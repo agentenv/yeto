@@ -308,7 +308,11 @@ def _trainer_records(objects: Any, learners: Any = None) -> dict[int, dict]:
         dec = life.get("decision") if isinstance(life.get("decision"), dict) else (
             launch.get("decision") if isinstance(launch.get("decision"), dict) else None)
         ended = launch.get("ended") if isinstance(launch.get("ended"), dict) else {}
-        out[k] = {"launch_state": _str(launch.get("state")), "life_state": _str(life.get("state")),
+        # a resident ssh: island with spare nodes and node health checks: only when its record has them
+        extra = {key: doc for key, doc in (("spares", spares_record(life.get("spares"))),
+                                           ("health", health_record(life.get("health"), life.get("updated"))))
+                 if doc is not None}
+        out[k] = {**extra, "launch_state": _str(launch.get("state")), "life_state": _str(life.get("state")),
                   "reason": _str(life.get("reason")), "since": _f(life.get("since")), "exit": _str(life.get("exit")),
                   "decision": {x: _str(dec.get(x)) for x in ("action", "cause", "detail", "state")} if dec else None,
                   "stop": {"at": _f(stop.get("at")), "by": _str(stop.get("by")), "reason": _str(stop.get("reason"))}
@@ -337,6 +341,64 @@ def _straggler(mark: Any) -> dict | None:
                                               "last_merged_step")},
             "action": _str(mark.get("action")), "reason": _str(mark.get("reason")),
             "absent": mark.get("absent") is True, "at": _f(mark.get("at"))}
+
+
+def _names(v: Any) -> list[str]:
+    return [str(x) for x in v if isinstance(x, str) and x] if isinstance(v, (list, tuple)) else []
+
+
+def spares_record(doc: Any) -> dict | None:
+    """The ``spares`` of a trainer island's record (``SshIslandOps.spares_view``: a resident
+    ``ssh:`` island with spare nodes), the fields the page shows; None: no such field."""
+    if not isinstance(doc, dict):
+        return None
+    waiting = doc.get("waiting_spare") is True
+    return {"nodes": _names(doc.get("nodes")), "spare_nodes": _names(doc.get("spare_nodes")),
+            "lost": _names(doc.get("lost")), "waiting_spare": waiting,
+            "wait_reason": _str(doc.get("wait_reason")) if waiting else None,
+            "waiting_since": _f(doc.get("waiting_since")) if waiting else None,
+            "replacements": _int(doc.get("replacements")) or 0,
+            "replacements_window": _int(doc.get("replacements_window")),
+            "max_replacements": _int(doc.get("max_replacements")),
+            "last_replaced_at": _f(doc.get("last_replaced_at"))}
+
+
+HEALTH_REASONS_MAX = 3  # reasons of one node the page carries (its record keeps a few more)
+
+
+def health_record(doc: Any, updated: Any = None) -> dict | None:
+    """The ``health`` of a trainer island's record (``SshIslandOps.island_health``: the newest
+    check of each node, ``yeto.hw.node_health``): ``{"verdict", "updated", "nodes": {name:
+    {verdict, reasons, bad_in_row, at, every_s}}}``; None: no such field. ``updated``: when the
+    record was last written (a check much older than it stopped: :func:`stale_health`)."""
+    if not isinstance(doc, dict) or not isinstance(doc.get("nodes"), dict):
+        return None
+    nodes = {}
+    for name, node in doc["nodes"].items():
+        if not isinstance(node, dict) or not isinstance(name, str):
+            continue
+        nodes[name] = {"verdict": _str(node.get("verdict")),
+                       "reasons": _names(node.get("reasons"))[:HEALTH_REASONS_MAX],
+                       "bad_in_row": _int(node.get("bad_in_row")), "at": _f(node.get("at")),
+                       "every_s": _f(node.get("every_s"))}
+    return {"verdict": _str(doc.get("verdict")), "updated": _f(updated), "nodes": nodes}
+
+
+HEALTH_STALE_PERIODS = 3  # yeto.hw.node_health.STALE_PERIODS (no import: the dashboard stands alone)
+HEALTH_EVERY_S = 60.0  # yeto.hw.node_health.HEALTH_EVERY_S
+
+
+def stale_health(node: dict, updated: float | None) -> dict:
+    """A node's check as ``yeto.hw.node_health.fresh`` reads it, against the record's own write
+    time (the record is not written again while no verdict changes, so its ``updated`` and the
+    check's ``at`` move together while checks run): a check older than
+    :data:`HEALTH_STALE_PERIODS` periods before the record's write reads as ``read_failed``
+    (``stale``: the check stopped, e.g. a hung node runtime)."""
+    at, every = node.get("at"), node.get("every_s") or HEALTH_EVERY_S
+    if at is None or updated is None or updated - at <= HEALTH_STALE_PERIODS * every:
+        return node
+    return {**node, "verdict": "read_failed", "stale": True,
+            "reasons": [f"health check stale: the last one {updated - at:.0f}s before the record"]}
 
 
 def _phase(life: str | None) -> str:
@@ -384,6 +446,15 @@ def island_state(rec: dict | None, desired: dict | None = None) -> dict | None:
                                                         and life in ("ordering", "starting"))):
         # the launch after a move: ordering its new machines (sky fails over across zones and regions)
         return {"state": "moving", "reason": f"moving to {rec.get('gpu') or (desired or {}).get('gpu')}",
+                "detail": f"new launch {_phase(life)} · incarnation {rec.get('incarnation')}"}
+    spares = rec.get("spares") or {}
+    if booting and (spares.get("waiting_spare") or spares.get("lost")):
+        # a resident ssh: island that lost a node: waiting for a spare node, or starting on one
+        lost = ", ".join(spares.get("lost") or ())
+        if spares.get("waiting_spare"):
+            return {"state": "starting", "reason": "waiting for a spare node",
+                    "detail": spares.get("wait_reason") or (f"lost {lost}" if lost else None)}
+        return {"state": "starting", "reason": f"replacing lost node {lost}",
                 "detail": f"new launch {_phase(life)} · incarnation {rec.get('incarnation')}"}
     if booting:
         relaunch = why_now if why_now.startswith("relaunch") else None

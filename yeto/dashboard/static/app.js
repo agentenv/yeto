@@ -463,9 +463,18 @@ function evText(e){var r=e.record||{},keys=/^island_straggler/.test(e.type)?EV_S
    arrived before it, -inf before any) and its arrival index; ties keep the arrival order, newest arrival first */
 function evOrder(evs){var t=-Infinity;return evs.map(function(e,i){if(fin(e.ts))t=e.ts;return [e,fin(e.ts)?e.ts:t,i]})
   .sort(function(a,b){return a[1]!==b[1]?(b[1]>a[1]?1:-1):b[2]-a[2]}).map(function(x){return x[0]})}
+// a resident ssh: island's spare nodes (yeto.launch.island_spares) and node health checks (yeto.hw.node_health)
+var EV_SPARE={island_node_lost:["bd","lost"],island_waiting_spare:["wn","wait"],island_node_replaced:["ok","swap"],island_replacement_limit:["bd","max"],
+  node_health:["bd","node"],node_health_read_failed:["wn","node"],node_health_degraded:["mu","node"]};
+var EV_SPARE_KEYS=["node","lost","spare","resume_step","verdict","reasons","reason","elapsed_s","next_check_s","given_up"];
+Object.keys(EV_SPARE).forEach(function(t){EV_KEEP[t]=1});
+// [level, its fields (a value over 80 characters cut with an ellipsis), the whole fields (the line's hover)]
+function evSpare(e){var r=e.record||{},l=EV_SPARE[e.type];if(e.type==="island_waiting_spare"&&r.given_up)l=["bd","stop"];
+  var kv=EV_SPARE_KEYS.filter(function(k){return r[k]!=null&&!(Array.isArray(r[k])&&!r[k].length)}).map(function(k){return [k,Array.isArray(r[k])?r[k].join(", "):String(r[k])]});
+  return [l,kv.map(function(x){return x[0]+"="+(x[1].length>80?x[1].slice(0,79)+"…":x[1])}).join(" "),kv.map(function(x){return x[0]+"="+x[1]}).join(" ")]}
 function events(){
   var ec=YetoTbl.cap("event-stream",evOrder(EVENTS.filter(function(e){return keepEv(e.type)})),{def:15,unit:"events"}),list=ec.rows;
-  $("evs").innerHTML=ec.bar+list.map(function(e){var l=evLevel(e.type,e.record||{});return '<div><span class="t">'+(fleetOn()&&!fin(e.ts)?'<span title="no time on the record">—</span>':clock(e.ts))+'</span><span class="st '+l[0]+'" title="'+l[1]+'"><i></i>'+l[1]+'</span><span class="x"><b>'+esc(e.type.replace(/^rl_/,""))+'</b>'+(e.island!=null?" "+esc(cardOf(e.island)?lbl(e.island):"island "+e.island):"")+' '+esc(evText(e))+'</span></div>'}).join("")||'<div class="note">none</div>';
+  $("evs").innerHTML=ec.bar+list.map(function(e){var sp=EV_SPARE[e.type]?evSpare(e):null,l=sp?sp[0]:evLevel(e.type,e.record||{});return '<div><span class="t">'+(fleetOn()&&!fin(e.ts)?'<span title="no time on the record">—</span>':clock(e.ts))+'</span><span class="st '+l[0]+'" title="'+l[1]+'"><i></i>'+l[1]+'</span><span class="x"'+(sp&&sp[2]!==sp[1]?' title="'+esc(sp[2])+'"':"")+'><b>'+esc(e.type.replace(/^rl_/,""))+'</b>'+(e.island!=null?" "+esc(cardOf(e.island)?lbl(e.island):"island "+e.island):"")+' '+esc(sp?sp[1]:evText(e))+'</span></div>'}).join("")||'<div class="note">none</div>';
 }
 function cmds(){
   var run=O.run||"<run>",cm=O.commands||{};

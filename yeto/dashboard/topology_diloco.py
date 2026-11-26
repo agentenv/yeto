@@ -451,6 +451,10 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
     versions, committed, merged_steps, expected = sy["versions"], sy["committed"], sy["merged_steps"], sy["expected"]
     m_size = len(expected) or len(trainer_ids)
     live = [i for i in trainer_ids if (states.get(i) or {}).get("alive")]
+    # a resident ssh: island that lost a node (stopped, waiting for a spare or starting on one) is out of the
+    # roster: the syncer merges without it until it is back
+    roster = [i for i in live if not ((by_id.get(i) or {}).get("spares") or {}).get("waiting")
+              and not ((by_id.get(i) or {}).get("spares") or {}).get("lost")]
 
     # rounds in flight: PUSHes of steps the owner shard has not committed yet (a PULL without a
     # PUSH is not on the tapes)
@@ -543,7 +547,7 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
         "quorum": sy["quorum"], "versions": versions, "last_merge_ts": sy["last_merge_ts"], "behind": behind,
         "syncer_tape": tape_seen, "inferred_versions": inferred,
         "stuck": stuck, "period_s": sy["period_s"], "merge_gap_s": sy["merge_gap_s"], "quorum_p50_s": sy["quorum_p50_s"],
-        "roster": len(live), "expected": expected, "shards": shard_rows(p, n, merges, rounds, committed, done),
+        "roster": len(roster), "expected": expected, "shards": shard_rows(p, n, merges, rounds, committed, done),
         "rounds": rounds, "last_merge_ts_any": sy["last_merge_ts_any"], "running": running, "done": done,
         "traffic": {"push": len(pushes5), "push_bytes": sum(_push_bytes(x) or 0 for x in pushes5),
                     "bcast": len(bcasts5)},
@@ -791,6 +795,8 @@ def _trainer(iid: str, x: _Island, card: dict, st: dict, merges: list[dict], ver
         "truncated": x.truncated[-1] if x.truncated else None,
         "island": roll,
         "nodes": _nodes(x, card, roll, now),
+        # a resident ssh: island: its spare nodes and its unhealthy nodes (no key without them)
+        **{k: card[k] for k in ("spares", "node_health") if k in card},
     }
 
 

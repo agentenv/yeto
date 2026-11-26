@@ -1,0 +1,497 @@
+"""A resident ssh: trainer island with spare nodes on the dashboard (own-cluster 4.5): its nodes'
+health reasons, its ``waiting_spare`` state, its replacements (count, last time) and the spare-node
+events (``island_node_lost`` / ``island_waiting_spare`` / ``island_node_replaced`` /
+``island_replacement_limit``) in the event stream. The island's record (``spares`` / ``health`` in
+``fleet/trainers/<k>/state.json``) wins over its fleet.jsonl events; an island without spare nodes or
+health checks (every customer run) carries no new field at all."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+from test_dashboard_diloco import SMOKE
+from test_dashboard_fleet_islands import T0, fleet_reducer
+
+from yeto.dashboard import fleet_islands
+from yeto.dashboard.export import export_html
+from yeto.dashboard.reducer import Reducer
+from yeto.dashboard.sources import load_all
+from yeto.launch import island_spares as isp
+from yeto.rl.engine.object_store import DirectoryObjectStore
+
+LEGEND = 'legend: mk("topoLg").innerHTML'
+# the topology smoke, also printing the event stream, trainer 1's tip (a hover on its card) and the dashed boxes
+EV_SMOKE = SMOKE.replace(LEGEND, LEGEND + ''', events: mk("evs").innerHTML,
+  tip: (function () { const h = Object.values(els).find((n) => n.listeners && n.listeners.mousemove);
+    if (!h) return null; h.listeners.mousemove[0]({ target: { closest: () => ({ getAttribute: () => "trn:1" }) },
+      clientX: 0, clientY: 0 }); return mk("topoTip").innerHTML; })(),
+  dashed: svg.filter((n) => n.style && n.style.strokeDasharray === "5 4").length''')
+assert EV_SMOKE != SMOKE
+FX = Path(__file__).parent / "fixtures" / "dashboard"
+NEW_KEYS = ("spares", "node_health")
+WAIT = "fabric group rack-b has no free healthy spare node (gpu-e: lease held by run other)"
+LOST = "rank 1 (gpu-d) node health bad in 2 checks in a row: GPU 3 XID 79"
+
+
+def ev(kind: str, at: float, k: int = 1, **fields) -> dict:
+    return {"event": kind, "time_unix": at, "island": f"fleet-qa-l{k}-modal", "island_id": k, **fields}
+
+
+def lost(at: float) -> dict:
+    return ev(isp.NODE_LOST, at, node="gpu-d", rank=1, incarnation=0, reason=LOST)
+
+
+def waiting(at: float, elapsed: float = 0, **kw) -> dict:
+    return ev(isp.WAITING_SPARE, at, lost=["gpu-d"], reason=WAIT, group="rack-b", next_check_s=60,
+              elapsed_s=elapsed, **kw)
+
+
+def replaced(at: float) -> dict:
+    return ev(isp.NODE_REPLACED, at, rank=1, lost="gpu-d", spare="gpu-e", incarnation=1, reason=LOST,
+              resume_step=6, group="rack-b")
+
+
+def reducer(*extra: dict) -> Reducer:
+    r = fleet_reducer()
+    for rec in extra:
+        r.feed(rec)
+    return r
+
+
+def cards(r: Reducer, now: float | None = None) -> dict:
+    return {c["id"]: c for c in r.overview(now=r.max_ts if now is None else now)["islands"]}
+
+
+def spares_doc(**kw) -> dict:
+    return {"nodes": ["gpu-c", "gpu-d"], "spare_nodes": ["gpu-e"], "lost": [], "waiting_spare": False,
+            "wait_reason": None, "waiting_since": None, "replacements": 0, "replacements_window": 0,
+            "max_replacements": 3, "last_replaced_at": None, **kw}
+
+
+def node(verdict: str, at: float, reasons=(), bad=0) -> dict:
+    return {"verdict": verdict, "ok": verdict == "ok", "reasons": list(reasons), "bad_in_row": bad, "at": at,
+            "every_s": 60.0, "multi": True}
+
+
+def store_state(tmp_path: Path, life: str, **fields) -> dict:
+    """The fleet state of a run store whose island 1 record is ``life`` with ``fields``."""
+    for k, doc in {0: {"state": "running"}, 1: {"state": life, "relaunches": 1, "incarnation": 1, **fields}}.items():
+        p = tmp_path / "store" / f"fleet/trainers/{k}/state.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"since": T0, "handle": {"cluster": f"fleet-qa-l{k}-modal"}, **doc}))
+    return fleet_islands.read_fleet_state(DirectoryObjectStore(str(tmp_path / "store")))
+
+
+def smoke(tmp: Path, r: Reducer, width: int = 1200) -> dict:
+    exe = shutil.which("node")
+    if exe is None:
+        pytest.skip("node not installed")
+    tmp.mkdir(parents=True, exist_ok=True)
+    page = export_html(r, tmp / "p.html", generated_at=r.max_ts)
+    (tmp / "smoke.js").write_text(EV_SMOKE)
+    res = subprocess.run([exe, str(tmp / "smoke.js"), str(page), str(width)], capture_output=True, text=True,
+                         timeout=60, check=False)
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+# -- the reducer ---------------------------------------------------------------------------------
+def test_spare_and_health_events_are_no_lifecycle_state_nor_a_sign_of_life():
+    end = reducer().max_ts
+    r = reducer(ev("node_health", end + 4000, node="gpu-d", rank=1, verdict="lost", reasons=["GPU 3 XID 79"]),
+                lost(end + 4001), waiting(end + 4002))
+    assert r.islands["1"]["last_event_ts"] == reducer().islands["1"]["last_event_ts"]  # not a sign of life
+    assert r.islands["1"]["fleet_state"] == reducer().islands["1"]["fleet_state"]  # not a lifecycle state
+    plain = cards(reducer(), now=end + 4002)["1"]["status"]
+    assert plain in ("stale", "lost") and cards(r, now=end + 4002)["1"]["status"] == plain
+    marks = ("node_health", isp.NODE_LOST, isp.WAITING_SPARE)
+    assert all(e["stream"] == "fleet" for e in r.events if e["type"] in marks)
+
+
+def test_the_events_mark_the_card_without_a_record():
+    r = reducer(lost(T0 + 400), waiting(T0 + 460, elapsed=30))
+    sp = cards(r)["1"]["spares"]
+    assert sp["waiting"] and sp["since"] == T0 + 430 and sp["reason"] == WAIT and sp["source"] == "events"
+    assert sp["lost"] == ["gpu-d"] and sp["replacements"] == 0
+    r.feed(waiting(T0 + 520, elapsed=90))  # a later report keeps the wait's start
+    assert cards(r)["1"]["spares"]["since"] == T0 + 430
+    r.feed(replaced(T0 + 600))
+    sp = cards(r)["1"]["spares"]
+    assert not sp["waiting"] and sp["since"] is None and sp["replacements"] == 1 and sp["last_at"] == T0 + 600
+    assert sp["last"]["lost"] == "gpu-d" and sp["last"]["spare"] == "gpu-e" and sp["lost"] == []
+    assert "spares" not in cards(r)["0"]  # the other island: no field
+
+
+def limit(at: float) -> dict:
+    return ev(isp.REPLACEMENT_LIMIT, at, replaced=[], lost=["gpu-d"], reason="3 node replacement(s)")
+
+
+@pytest.mark.parametrize("final", [limit(T0 + 700), waiting(T0 + 700, elapsed=86400, given_up=True)])
+def test_a_limit_or_a_given_up_wait_ends_the_wait(final):
+    sp = cards(reducer(lost(T0 + 400), waiting(T0 + 401), final))["1"]["spares"]
+    assert not sp["waiting"] and sp["stopped"]
+
+
+# -- replay order: by time across sources, in write order within one source ----------------------------
+def _spares_of(rows) -> dict:
+    """The events-only ``spares`` mark of island 1 after feeding ``rows`` ([(source, record)])."""
+    r = reducer()
+    for source, rec in rows:
+        assert r.feed(rec, source=source)
+    return cards(r)["1"]["spares"]
+
+
+HOST_A = [("host-a", lost(T0 + 400)), ("host-a", waiting(T0 + 401, elapsed=1))]  # the lost host's launcher
+HOST_B = [("host-b", replaced(T0 + 900))]  # the new host's launcher: a spare took gpu-d's place
+
+
+@pytest.mark.parametrize("rows", [HOST_A + HOST_B, HOST_B + HOST_A, [HOST_A[0], HOST_B[0], HOST_A[1]]],
+                         ids=["in-order", "new-host-first", "interleaved"])
+def test_a_lost_host_s_records_read_late_replay_in_place(rows):
+    sp = _spares_of(rows)
+    assert sp == _spares_of(HOST_A + HOST_B)
+    assert not sp["waiting"] and sp["since"] is None and sp["lost"] == [] and sp["replacements"] == 1
+    assert sp["last"]["spare"] == "gpu-e" and sp["last_at"] == T0 + 900
+
+
+def test_one_source_keeps_its_write_order_over_an_older_time():
+    """A launcher whose clock stepped back: its replacement line (written after the wait) has an
+    older time; within its own source the write order decides: the island is not waiting."""
+    sp = _spares_of([("host-a", lost(T0 + 400)), ("host-a", waiting(T0 + 500)), ("host-a", replaced(T0 + 450))])
+    assert not sp["waiting"] and sp["replacements"] == 1 and sp["last_at"] == T0 + 450  # the record's own time
+    # another source's later line still goes after it by time
+    sp = _spares_of([("host-a", lost(T0 + 400)), ("host-a", waiting(T0 + 500)), ("host-a", replaced(T0 + 450)),
+                     ("host-b", waiting(T0 + 480))])
+    assert sp["waiting"] is False  # host-a's replacement replays at 500 (after its wait), host-b's wait at 480
+
+
+def test_an_untimed_line_keeps_the_time_of_the_line_before_it():
+    untimed = {k: v for k, v in replaced(0).items() if k != "time_unix"}
+    sp = _spares_of([("host-a", lost(T0 + 400)), ("host-a", untimed), ("host-b", waiting(T0 + 300))])
+    assert not sp["waiting"] and sp["replacements"] == 1 and sp["last_at"] is None  # host-b's wait is older
+
+
+def test_a_spare_event_sets_no_shape_field_nor_state():
+    base = reducer().islands["1"]
+    r = reducer(dict(lost(T0 + 10), island="other-name", gpu="H100", cloud="nowhere"),
+                dict(replaced(T0 + 5), gpu="H100"))  # the second arrives older: a replay, still no lifecycle
+    isl = r.islands["1"]
+    for key in ("name", "gpu", "cloud", "fleet_state", "ready_ts", "lost_ts", "stop_ts", "open_ts", "closed_s"):
+        assert isl[key] == base[key], key
+    assert r.fleet_spares_log["1"] and "1" in r.fleet_spares_src_t
+
+
+def test_a_health_event_is_no_spare_record():
+    r = reducer(ev("node_health", T0 + 10, node="gpu-d", verdict="lost", reasons=["GPU 3 XID 79"]))
+    assert "spares" not in r.islands["1"] and "1" not in r.fleet_spares_log
+    assert any(e["type"] == "node_health" for e in r.events)
+
+
+def test_the_record_wins_over_the_events(tmp_path):
+    r = reducer(lost(T0 + 400), waiting(T0 + 401), replaced(T0 + 450))
+    st = store_state(tmp_path, "recovering", spares=spares_doc(lost=["gpu-d"], waiting_spare=True,
+                                                                wait_reason=WAIT, waiting_since=T0 + 500))
+    assert r.load_fleet_state(st)
+    c = cards(r)["1"]
+    sp = c["spares"]
+    assert sp["source"] == "record" and sp["waiting"] and sp["since"] == T0 + 500 and sp["replacements"] == 0
+    assert sp["last"] is None  # no replacement on the record: no names from the events either
+    assert c["status"] == "starting" and c["island_now"]["reason"] == "waiting for a spare node"
+    assert c["island_now"]["detail"] == WAIT
+
+
+def test_the_record_s_replacements_take_the_names_of_the_last_event(tmp_path):
+    r = reducer(lost(T0 + 400), replaced(T0 + 450))
+    st = store_state(tmp_path, "running", spares=spares_doc(nodes=["gpu-c", "gpu-e"], spare_nodes=["gpu-d"],
+                                                             replacements=1, replacements_window=1,
+                                                             last_replaced_at=T0 + 449))
+    assert r.load_fleet_state(st)
+    sp = cards(r)["1"]["spares"]
+    assert (sp["replacements"], sp["window"], sp["max"], sp["last_at"]) == (1, 1, 3, T0 + 449)
+    assert sp["last"]["spare"] == "gpu-e"
+
+
+def test_island_state_of_an_island_that_lost_a_node():
+    rec = {"life_state": "recovering", "relaunches": 1, "incarnation": 1,
+           "spares": fleet_islands.spares_record(spares_doc(lost=["gpu-d"]))}
+    assert fleet_islands.island_state(rec) == {"state": "starting", "reason": "replacing lost node gpu-d",
+                                               "detail": "new launch recovering · incarnation 1"}
+    rec["spares"]["waiting_spare"], rec["spares"]["wait_reason"] = True, WAIT
+    assert fleet_islands.island_state(rec)["reason"] == "waiting for a spare node"
+    rec["life_state"] = "running"  # replaced and running: the spares say nothing of its state
+    assert fleet_islands.island_state(rec) == {"state": "running", "reason": None, "detail": None}
+
+
+def test_the_unhealthy_nodes_of_the_record(tmp_path):
+    r = reducer()
+    now = r.max_ts
+    health = {"verdict": "lost", "nodes": {"gpu-c": node("ok", now - 900),
+                                           "gpu-d": node("lost", now - 900, ["GPU 3 XID 79"], 2)}}
+    # the record is not written again while no verdict changes: a check as old as the record is current
+    assert r.load_fleet_state(store_state(tmp_path, "recovering", health=health, updated=now - 890))
+    assert cards(r)["1"]["node_health"] == [{"node": "gpu-d", "verdict": "lost", "reasons": ["GPU 3 XID 79"],
+                                             "bad_in_row": 2}]
+    assert "spares" not in cards(r)["1"]  # health checks without spare nodes
+
+
+def test_a_check_older_than_its_record_reads_stale(tmp_path):
+    r = reducer()
+    now = r.max_ts
+    health = {"verdict": "ok", "nodes": {"gpu-c": node("ok", now - 10), "gpu-d": node("ok", now - 400)}}
+    assert r.load_fleet_state(store_state(tmp_path, "running", health=health, updated=now - 10))
+    (bad,) = cards(r)["1"]["node_health"]  # gpu-d's checks stopped 390 s before the record: 3 periods are 180 s
+    assert bad["node"] == "gpu-d" and bad["verdict"] == "read_failed" and bad["stale"] is True
+    assert fleet_islands.stale_health(health["nodes"]["gpu-d"], now - 300) is health["nodes"]["gpu-d"]  # 100 s
+
+
+@pytest.mark.parametrize("life", ["done", "failed"])
+def test_an_ended_island_shows_no_health(tmp_path, life):
+    now = reducer().max_ts
+    health = {"verdict": "lost", "nodes": {"gpu-d": node("lost", now - 10, ["GPU 3 XID 79"], 2)}}
+    r = reducer()
+    assert r.load_fleet_state(store_state(tmp_path, life, health=health, updated=now))
+    assert "node_health" not in cards(r)["1"]
+
+
+def test_the_record_fields_read_defensively():
+    assert fleet_islands.spares_record(None) is None and fleet_islands.health_record("x") is None
+    sp = fleet_islands.spares_record({"waiting_spare": "yes", "replacements": True, "lost": ["a", 3, None]})
+    assert sp["waiting_spare"] is False and sp["replacements"] == 0 and sp["lost"] == ["a"]
+    many = {"verdict": "lost", "reasons": [f"r{i}" for i in range(9)]}
+    h = fleet_islands.health_record({"nodes": {"a": many, "b": 1}})
+    assert list(h["nodes"]) == ["a"] and len(h["nodes"]["a"]["reasons"]) == fleet_islands.HEALTH_REASONS_MAX
+
+
+# -- no new field without spare nodes (every customer run) ---------------------------------------------
+def test_no_new_field_without_spare_nodes(tmp_path):
+    r = reducer()
+    assert r.load_fleet_state(store_state(tmp_path, "running"))
+    view = json.dumps(r.page_view(now=r.max_ts), default=str)
+    assert not any(f'"{k}"' in view for k in NEW_KEYS)
+    st = store_state(tmp_path / "b", "running")
+    assert not any(k in (row["record"] or {}) for row in st["trainers"].values() for k in ("spares", "health"))
+
+
+@pytest.mark.parametrize("fixture", sorted(p.name for p in FX.iterdir() if p.is_dir()))
+def test_customer_fixtures_carry_no_new_field(fixture):
+    r = Reducer(run="cust")
+    load_all(r, [str(p) for p in sorted((FX / fixture).iterdir())])
+    view = json.dumps(r.page_view(now=r.max_ts), default=str)
+    for key in NEW_KEYS + tuple(isp.__dict__[n] for n in ("NODE_LOST", "NODE_REPLACED", "WAITING_SPARE")):
+        assert f'"{key}"' not in view
+
+
+# -- the page ------------------------------------------------------------------------------------------
+def _with_record(tmp_path, life, *extra, **fields):
+    r = reducer(*extra)
+    assert r.load_fleet_state(store_state(tmp_path / "s", life, **fields))
+    return r
+
+
+def test_a_waiting_island_s_card_badge_phase_and_why(tmp_path):
+    end = reducer().max_ts
+    r = _with_record(tmp_path, "recovering", lost(end - 100), waiting(end - 95),
+                     spares=spares_doc(lost=["gpu-d"], waiting_spare=True, wait_reason=WAIT, waiting_since=end - 95))
+    out = smoke(tmp_path, r)
+    assert "waiting spare" in out["texts"] and out["dashed"] == 0  # warned, not drawn as a lost trainer
+    assert "waiting for a spare node · 1m35s" in out["texts"]  # how long, not the record's incarnation
+    assert any(t.startswith("no free spare in rack-b · gpu-e: lease") for t in out["texts"])  # cut to the card
+    # Islands now: the mark in place of the status (no "waiting for a spare node" twice), the reason in the last cell
+    assert '<span class="wn" style="white-space:nowrap">waiting spare 1m35s</span>' in out["nodes"]
+    assert "waiting for a spare node" not in out["nodes"]
+    short = "no free spare in rack-b · gpu-e: lease held by run other"
+    assert f'<div class="ns spc wt" title="{WAIT}">{short}</div>' in out["nodes"]
+    assert "waiting for a spare</span><span>1m35s · " + WAIT in out["tip"]  # the whole reason on a touch page
+    assert 'title="wait"' in out["events"] and "<b>island_waiting_spare</b>" in out["events"]
+
+
+def test_a_wait_known_from_its_events_only(tmp_path):
+    end = reducer().max_ts
+    r = reducer(lost(end + 10), waiting(end + 20, elapsed=40))
+    out = smoke(tmp_path, r)
+    assert "waiting spare" in out["texts"] and "waiting for a spare node · 40s" in out["texts"]
+    assert "lost" not in out["texts"] and out["dashed"] == 0  # the wait, not a lost trainer
+    view = r.page_view(now=r.max_ts)["topology"]["diloco"]
+    assert view["roster"] == 1  # out of the syncer's roster while it waits
+
+
+def test_a_silent_trainer_waiting_for_a_spare_is_not_drawn_lost(tmp_path):
+    end = reducer().max_ts  # its tape silent for an hour: lost, unless it waits for a spare node
+    gone = smoke(tmp_path / "a", reducer(lost(end + 3590), ev("island_lost", end + 3600, reason=LOST)))
+    assert "lost" in gone["texts"] and gone["dashed"] >= 1
+    out = smoke(tmp_path / "b", reducer(lost(end + 3590), ev("island_lost", end + 3595, reason=LOST),
+                                        waiting(end + 3600, elapsed=10)))
+    assert "waiting spare" in out["texts"] and "lost" not in out["texts"] and out["dashed"] == 0
+
+
+@pytest.mark.parametrize("life", ["done", "failed"])
+def test_an_island_that_ended_is_no_longer_waiting(tmp_path, life):
+    end = reducer().max_ts
+    r = _with_record(tmp_path, life, lost(end - 100), waiting(end - 95),
+                     spares=spares_doc(lost=["gpu-d"], waiting_spare=True, wait_reason=WAIT, waiting_since=end - 95))
+    out = smoke(tmp_path, r)
+    assert "waiting spare" not in out["texts"] and not any("waiting for a spare" in t for t in out["texts"])
+    assert "waiting spare" not in out["nodes"]
+
+
+HELPERS = r"""
+const fs = require("fs"), src = fs.readFileSync(process.argv[2], "utf8");
+const a = src.indexOf("// a resident ssh: island with spare nodes (tr.spares"), b = src.indexOf("function col(k){");
+var D = JSON.parse(process.argv[3]), C = {warn: "W", bad: "B", ink2: "M"};
+function fin(x) { return typeof x === "number" && isFinite(x); }
+function dur(s) { return Math.round(s) + "s"; }
+function row(k, v) { return k + "=" + v + ";"; }
+function col(k) { return k; }
+function rich() {}
+eval(src.slice(a, b));
+const tr = JSON.parse(process.argv[4]);
+console.log(JSON.stringify({badge: spareBadge(tr), waiting: waitingSpare(tr), note: spareNote(tr, 1000)}));
+"""
+
+
+def helpers(tmp_path, d: dict, tr: dict) -> dict:
+    exe = shutil.which("node")
+    if exe is None:
+        pytest.skip("node not installed")
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "h.js").write_text(HELPERS)
+    src = Path(__file__).parents[1] / "yeto/dashboard/static/topology_diloco.js"
+    res = subprocess.run([exe, str(tmp_path / "h.js"), str(src), json.dumps(d), json.dumps(tr)], capture_output=True,
+                         text=True, timeout=60, check=False)
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+@pytest.mark.parametrize("d, now", [({"done": True}, None), ({"done": False}, {"state": "stopped"}),
+                                    ({"done": False}, {"state": "failed"})])
+def test_a_finished_run_or_island_has_no_spare_badge(tmp_path, d, now):
+    tr = {"island_now": now, "spares": {"waiting": True, "since": 900, "reason": WAIT, "replacements": 0},
+          "node_health": [{"node": "gpu-d", "verdict": "lost", "reasons": ["GPU 3 XID 79"]}]}
+    out = helpers(tmp_path, d, tr)
+    assert out["badge"] is None and out["waiting"] is False and out["note"] is None
+    live = helpers(tmp_path / "b", {"done": False}, {**tr, "island_now": {"state": "starting"}})
+    assert live["badge"] == ["waiting spare", "W"] and live["waiting"] is True
+
+
+def test_a_lost_node_s_health_reason_and_badge(tmp_path):
+    now = reducer().max_ts
+    health = {"verdict": "lost",
+              "nodes": {"gpu-c": node("ok", now - 5), "gpu-d": node("lost", now - 5, ["GPU 3 XID 79"], 2)}}
+    r = _with_record(tmp_path, "recovering",
+                     ev("node_health", now - 4, node="gpu-d", rank=1, verdict="lost", reasons=["GPU 3 XID 79"]),
+                     lost(now - 3), spares=spares_doc(lost=["gpu-d"]), health=health, updated=now - 3)
+    out = smoke(tmp_path, r)
+    assert "node ✕" in out["texts"] and "gpu-d: GPU 3 XID 79" in out["texts"]
+    assert any(t.startswith("replacing lost node gpu-d") for t in out["texts"])
+    assert '<span class="bd" style="white-space:nowrap">node ✕</span>' in out["nodes"]
+    assert '<div class="ns spc bd" title="gpu-d: lost · GPU 3 XID 79">gpu-d: GPU 3 XID 79</div>' in out["nodes"]
+    assert "node gpu-d</span><span>lost · GPU 3 XID 79" in out["tip"]
+    assert "<b>node_health</b>" in out["events"] and "reasons=GPU 3 XID 79" in out["events"]
+    assert r.page_view(now=r.max_ts)["topology"]["diloco"]["roster"] == 1  # stopped while a spare takes its place
+
+
+def test_the_reason_styles_are_on_the_page(tmp_path):
+    page = export_html(reducer(), tmp_path / "p.html").read_text()
+    assert ".ns.bd{color:var(--bad)}" in page  # a lost node's reason in red, not in the .ns grey
+    assert ".ns.spc{max-width:28ch;margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" in page
+
+
+def test_one_bad_check_is_a_warning_without_badge(tmp_path):
+    now = reducer().max_ts
+    health = {"verdict": "bad_once", "nodes": {"gpu-c": node("bad_once", now - 5, ["GPU 0 uncorrectable ECC +1"], 1)}}
+    out = smoke(tmp_path, _with_record(tmp_path, "running", health=health, updated=now - 5))
+    assert "gpu-c: GPU 0 uncorrectable ECC +1 · 1 bad check" in out["texts"] and "node ✕" not in out["texts"]
+    assert 'class="ns spc wt"' in out["nodes"] and "node ✕" not in out["nodes"]
+
+
+@pytest.mark.parametrize("verdict, words", [("bad_once", "health bad in 1 check"),
+                                            ("lost", "health bad in 2 checks in a row"),
+                                            ("read_failed", "health unread")])
+def test_a_check_without_reasons_reads_in_words(tmp_path, verdict, words):
+    now = reducer().max_ts
+    health = {"verdict": verdict, "nodes": {"gpu-c": node(verdict, now - 5)}}
+    out = smoke(tmp_path, _with_record(tmp_path, "running", health=health, updated=now - 5))
+    assert "gpu-c: " + words in out["texts"] and "gpu-c: " + words in out["nodes"]
+    assert verdict not in " ".join(out["texts"])
+
+
+def test_a_stale_check_reads_unread(tmp_path):
+    now = reducer().max_ts
+    health = {"verdict": "ok", "nodes": {"gpu-c": node("ok", now - 400)}}
+    out = smoke(tmp_path, _with_record(tmp_path, "running", health=health, updated=now - 5))
+    assert "gpu-c: health unread (stale)" in out["texts"] and "gpu-c: health unread (stale)" in out["nodes"]
+
+
+def test_a_replaced_island_s_count_and_last_time(tmp_path):
+    end = reducer().max_ts
+    r = _with_record(tmp_path, "running", lost(end - 200), replaced(end - 150),
+                     spares=spares_doc(nodes=["gpu-c", "gpu-e"], spare_nodes=["gpu-d"], replacements=1,
+                                       replacements_window=1, last_replaced_at=end - 150))
+    out = smoke(tmp_path, r)
+    assert "replaced 1× · gpu-d → gpu-e · 2m30s ago" in out["texts"]
+    assert "waiting spare" not in out["texts"] and "node ✕" not in out["texts"]
+    assert "replaced 1× · 2m30s ago" in out["nodes"] and "1 of at most 3 replacements in 24 h" in out["nodes"]
+    assert "gpu-d → gpu-e · resumed at step 6 · 2m30s ago" in out["tip"] and "1 · 1 of at most 3 in 24 h" in out["tip"]
+
+
+def test_the_reason_it_gave_up_is_on_its_card(tmp_path):
+    end = reducer().max_ts
+    out = smoke(tmp_path, reducer(lost(end + 10), waiting(end + 20), limit(end + 30)))
+    assert "3 node replacement(s)" in out["texts"] and "waiting spare" not in out["texts"]
+    assert '<div class="ns spc bd" title="3 node replacement(s)">3 node replacement(s)</div>' in out["nodes"]
+
+
+def test_the_reason_a_trainer_left_is_kept(tmp_path):
+    end = reducer().max_ts
+    r = _with_record(tmp_path, "failed", lost(end - 100), waiting(end - 95), limit(end - 50),
+                     exit="3 node replacement(s) within 24 h: the island stops")
+    c = cards(r)["1"]
+    assert c["left"]["reason"] and c["spares"]["stopped"]
+    out = smoke(tmp_path, r)
+    assert '<div class="ns">' + c["left"]["reason"] in out["nodes"] and "ns spc" not in out["nodes"]
+
+
+@pytest.mark.parametrize("why, short", [
+    ("fabric group rack-b has no free healthy spare node (gpu-e: quarantined (XID 79 (GPU 3)); gpu-f: held)",
+     "no free spare in rack-b · gpu-e: quarantined (XID 79 (GPU 3)); gpu-f: held"),
+    ("the inventory has no free healthy spare node (gpu-e: unhealthy); placement: no group (of 2) has room",
+     "no free spare · gpu-e: unhealthy · placement: no group (of 2) has room"),
+    ("fabric group rack-b has no free healthy spare node", "no free spare in rack-b"),
+    ("spare refused: no rendezvous address", "spare refused: no rendezvous address"),
+])
+def test_why_no_spare_in_short(tmp_path, why, short):
+    end = reducer().max_ts
+    r = _with_record(tmp_path, "recovering", lost(end - 100),
+                     spares=spares_doc(lost=["gpu-d"], waiting_spare=True, wait_reason=why, waiting_since=end - 95))
+    out = smoke(tmp_path, r, width=2000)
+    assert '">' + short + "</div>" in out["nodes"]
+
+
+def test_the_event_stream_shows_the_spare_node_events(tmp_path):
+    end = reducer().max_ts  # the newest events: the stream shows the latest 15
+    out = smoke(tmp_path, reducer(lost(end + 10), waiting(end + 20), replaced(end + 30),
+                                  limit(end + 40),
+                                  waiting(end + 50, elapsed=86400, given_up=True)))["events"]
+    assert 'title="lost"' in out and "<b>island_node_lost</b>" in out and "node=gpu-d" in out
+    assert 'title="wait"' in out and "elapsed_s=0" in out and "next_check_s=60" in out
+    assert 'title="swap"' in out and "lost=gpu-d spare=gpu-e resume_step=6" in out
+    assert 'title="max"' in out and 'title="stop"' in out and "given_up=true" in out
+
+
+def test_a_long_field_is_cut_with_an_ellipsis_the_whole_on_hover(tmp_path):
+    end = reducer().max_ts
+    why = WAIT[:-1] + "; gpu-f: quarantined (XID 79 (GPU 3)))"  # 120 characters
+    out = smoke(tmp_path, reducer(lost(end + 10), ev(isp.WAITING_SPARE, end + 20, lost=["gpu-d"], reason=why)))["events"]
+    assert "reason=" + why[:79] + "…" in out and "reason=" + why + " " not in out.split("title=")[0]
+    assert 'title="lost=gpu-d reason=' + why + '"' in out
+    assert "title=\"node=gpu-d" not in out  # a line with no cut field has no hover of its own
+
+
+def test_a_card_without_spare_nodes_draws_nothing_new(tmp_path):
+    out = smoke(tmp_path, reducer())
+    for word in ("waiting spare", "node ✕", "replaced", "no free spare"):
+        assert word not in json.dumps(out)

@@ -258,7 +258,8 @@ def test_the_moved_host_s_island_is_running_with_the_lost_host_s_history(tmp_pat
     only_store = Reducer()
     assert fleet_store.store_readers(StoreTapes(objects, label="store")).pump(only_store) == len(a) + len(b)
     assert _lifecycle(only_store.islands["1"]) == RUNNING_AGAIN
-    assert {r["event"] for r in only_store.fleet_records} == {"island_ready", "island_lost"}
+    # every fleet.jsonl record once, the spare-node events too (a line of the fleet records, no lifecycle state)
+    assert sorted(r["event"] for r in only_store.fleet_records) == sorted(r["event"] for r in a + b)
 
 
 def test_a_folder_stamp_two_hours_off_does_not_change_the_state(tmp_path):
