@@ -485,8 +485,7 @@ _PLACEMENT = (
         default=None,
         help="ports fixed partition: dedicated rollout GPUs per island ("
         "on a multi-node island the island total, laid out after the trainer's nodes). "
-        "Note: on `launch`, a bare --rollout-num-gpus is an argparse abbreviation of "
-        "--rollout-num-gpus-per-engine, not this option",
+        "`launch` takes no --rollout-num-gpus (options are taken by their full name)",
     ),
     shared_flag(
         "--rl-standby-gpus",

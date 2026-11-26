@@ -41,6 +41,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ... import exact_argparse
 from .. import agentic_setup
 from ..pool import status as island_status
 from ..pool.island_pool import Member
@@ -1328,7 +1329,7 @@ def agentic_setup_cmd(args) -> int:
 # -- entry -------------------------------------------------------------------
 
 def main(argv: list[str] | None = None, *, prog: str = "python -m yeto.launch.nc") -> int:
-    p = argparse.ArgumentParser(prog=prog,
+    p = exact_argparse.ExactArgumentParser(prog=prog,  # full option names only
                                 description="National Compute nodes for yeto samplers (docs/NC_POOL.md). A lease "
                                 "is NOT ended at lease_until: a node stays billed until it is deleted.")
     sub = p.add_subparsers(dest="cmd", required=True)
