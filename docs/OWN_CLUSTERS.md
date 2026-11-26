@@ -1004,6 +1004,11 @@ trainer card carries a `straggler` badge and its row in "Islands now" says `stra
 relaunched, because the syncer already merges without the island. A lost or unhealthy node
 is handled by the island's own launch, not by this report.
 
+An island that loses a node (see [Spare nodes](#spare-nodes)) is recovering, not running. The
+poll that finds the loss clears its report (`recovering`), and the island is not counted while
+it waits for a spare. On the spare it is a new launch: it is not counted until its first push
+is merged, for at most its recover timeout from when it runs on the spare, then as above.
+
 Set `N` in `fleet.trainer_argv`, so every island launch gets the same value:
 
 ```json
