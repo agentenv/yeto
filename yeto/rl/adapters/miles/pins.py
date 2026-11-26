@@ -689,7 +689,7 @@ MILES_NEXT_BASE_IMAGE = (
 # first import of this module, whenever that is): default_rl_image moves them from it
 PINS_REGISTRY = image_registry()
 MILES_PORTS_V1_IMAGE = pinned_image(
-    "yeto-miles-ports", "7a52de2e783c462961daa3e92af76da31154dee81668d5fd1e4bc8555cf8eab2")
+    "yeto-miles-ports", "7a52de2e783c462961daa3e92af76da31154dee81668d5fd1e4bc8555cf8eab2", registry=PINS_REGISTRY)
 # The k31 image: radixark/miles:kimi-k31 (CUDA 13.0.3, SGLang 35708f76) plus the
 # yeto overlay layer with Miles k31/b8 6c7046e6 = MILES_NEXT_COMMIT
 # (docker/miles-k31/build.sh). Registry: yeto.rl.image_registry (YETO_IMAGE_REGISTRY); tag
@@ -707,13 +707,13 @@ MILES_PORTS_V1_IMAGE = pinned_image(
 # commits.json, yeto-source.json, labels) for the same tree at the Miles commit after the
 # fork's author-metadata normalization.
 MILES_K31_IMAGE = pinned_image(
-    "yeto-miles-k31", "028e505de58552e6ede8926c8bf8ab8451e8e749cfc35afc1eb70e8d362c65b3")
+    "yeto-miles-k31", "028e505de58552e6ede8926c8bf8ab8451e8e749cfc35afc1eb70e8d362c65b3", registry=PINS_REGISTRY)
 # The FULL_E full-parameter (partial-experts) trainer image, the --tuning full default
 # before MILES_K31_NEXT9_IMAGE. Same registry rule; the digest is fixed. Tag
 # k31-aa6b6ff-35708f7: the FULL_E image sha256:2de5d796... plus the same .git-only layer.
 # Kept for runs still pinned to it.
 MILES_K31_FULL_IMAGE = pinned_image(
-    "yeto-miles-k31", "fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325")
+    "yeto-miles-k31", "fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325", registry=PINS_REGISTRY)
 # The former full image 2de5d796 (pre-rewrite .git, FULL_E 1f29e430) with only its yeto
 # overlay layer (layer 115) repacked for overlay appliers: that layer whites out the
 # sglang dist-info directory and writes the same directory again, which the containerd
@@ -725,7 +725,7 @@ MILES_K31_FULL_IMAGE = pinned_image(
 # Tag k31-1f29e43-35708f7-overlayfix. Kept for runs still pinned to the former full
 # image.
 MILES_K31_FULL_OVERLAYFIX_IMAGE = pinned_image(
-    "yeto-miles-k31", "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14")
+    "yeto-miles-k31", "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14", registry=PINS_REGISTRY)
 # The Kimi-K3.1 full-parameter (partial-experts) trainer image: the default --rl-image of
 # --rl-model-recipe kimi_k31 --tuning full (the LoRA form and every other recipe keep
 # MILES_K31_IMAGE: next9 was measured on the full-parameter form only). Miles
@@ -735,7 +735,7 @@ MILES_K31_FULL_OVERLAYFIX_IMAGE = pinned_image(
 # k31-f61eb35-35708f7-a1-overlayfix; same registry rule, the digest is fixed. The MFU
 # switches are not injected by yeto: docs/KIMI_K31_ASYNC_RL_GUIDE.md lists them.
 MILES_K31_NEXT9_IMAGE = pinned_image(
-    "yeto-miles-k31", "3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225")
+    "yeto-miles-k31", "3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225", registry=PINS_REGISTRY)
 # MILES_K31_IMAGE (028e505d) with only its yeto overlay layer (layer 115, the FULL_D layer
 # a2110bdf it shares with 63ad0d2a) repacked for overlay appliers: that layer whites out the
 # sglang dist-info directory (and the editable .pth / finder) and writes them again, which
@@ -748,7 +748,7 @@ MILES_K31_NEXT9_IMAGE = pinned_image(
 # a sky trainer island pulls it in place of MILES_K31_IMAGE (OVERLAY_SAFE_DIGESTS), Modal
 # keeps the pin.
 MILES_K31_OVERLAYFIX_IMAGE = pinned_image(
-    "yeto-miles-k31", "32626906f3fd14ab4d888c874c2ae27a727c4119b94b38aa8b60a6c5da17c084")
+    "yeto-miles-k31", "32626906f3fd14ab4d888c874c2ae27a727c4119b94b38aa8b60a6c5da17c084", registry=PINS_REGISTRY)
 MILES_NEXT_IMAGE = MILES_K31_IMAGE
 # image digest -> the Miles commit inside it, when it is not MILES_NEXT_COMMIT: the island
 # checks its checkout against this commit (--miles-commit) instead of the default pin
