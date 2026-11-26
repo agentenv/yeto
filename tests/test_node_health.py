@@ -508,3 +508,25 @@ def test_read_failures_in_a_row_write_a_degraded_event_once_per_streak_and_lose_
 def test_the_tracker_takes_the_job_kind_explicitly():
     with pytest.raises(TypeError):
         HealthTracker()  # noqa: the job's kind (multi) is not guessed
+
+
+def test_an_empty_or_cut_off_output_is_a_read_failure_never_healthy():
+    first = check(node_text())
+    rc_only = f"{host_probe.RC} 0\n{host_probe.RC} 255\n"
+    whole = node_text()
+    cut_in_gpus = whole[:whole.index(f"{host_probe.RC}", whole.index(f"{host_probe.SECTION} gpus"))]
+    no_ib = whole[:whole.index(f"{host_probe.SECTION} ibstat")]
+    for label, text in (("empty", ""), ("rc lines only", rc_only), ("cut in the GPU section", cut_in_gpus),
+                        ("cut before the IB sections", no_ib)):
+        for prev in (None, first.facts):
+            r = check(text, prev)
+            assert not r.checked and r.ok_single is None and r.ok_multi is None, (label, prev is None)
+            assert HealthTracker(multi=False).update(r) == "read_failed", label
+    assert check("").reasons == ["nvidia-smi: no output (the check did not run)"]
+    assert check(cut_in_gpus).reasons == ["node health output incomplete (no gpus, fabric, fabricmanager, ibstat, "
+                                          "ibv_devinfo)"]
+    assert check(no_ib).reasons == ["node health output incomplete (no ibstat, ibv_devinfo)"]
+    # a cut-off output still shows a new hardware XID of its completed XID section
+    sick = node_text(xid=(0, xid_text(xid_line(9000.0, 5, 79))))
+    r = check(sick[:sick.index(f"{host_probe.SECTION} fabric")], first.facts)
+    assert r.checked and r.ok_single is False and r.reasons == ["GPU 5 XID 79"]

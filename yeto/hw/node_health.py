@@ -46,8 +46,10 @@ XID cursor). It judges two jobs at once (:class:`HealthResult`):
   tools did not read (a read failure of the multi-node job: ``IB tools unread``).
 
 ``checked`` False (``ok_*`` None): ``nvidia-smi`` did not answer (a timeout, missing, an
-ssh that failed, the check killed past its limit) and the kernel log shows no new
-hardware XID: a read failure, which says nothing about the node. ``nvidia-smi`` that
+ssh that failed, the check killed past its limit), or the output is not whole (empty,
+a section missing or cut off before its exit code), and the kernel log shows no new
+hardware XID: a read failure, which says nothing about the node. An output is never
+judged healthy unless every section of the check is in it, complete. ``nvidia-smi`` that
 cannot talk to the driver, a new hardware XID and a node with no GPU at all are bad
 (``ok_single`` False), whatever else read.
 
@@ -271,10 +273,15 @@ class CudaChecker(Checker):
                      f"node health check timed out after {HEALTH_LIMIT_S}s (killed)")
             return self._unread(error, sections, prev, carried)
         gpus = sections.get("gpus")
-        if gpus is not None and DRIVER_DOWN in gpus.text:  # nvidia-smi answers, the driver does not (rc 9)
+        if gpus is None:  # nothing (an SSH call that failed, a check that did not run)
+            return self._unread(_read_error(None), sections, prev, carried)
+        cut = [name for name, _ in CUDA_SECTIONS if name not in sections or sections[name].rc is None]
+        if cut:  # an output cut off: what it holds is not the whole answer
+            return self._unread(f"node health output incomplete (no {', '.join(cut)})", sections, prev, carried)
+        if DRIVER_DOWN in gpus.text:  # nvidia-smi answers, the driver does not (rc 9)
             return self._unread("", sections, prev, carried, driver_down=True)
         rows, gone = self._gpu_rows(gpus)
-        if gpus is None or (not rows and not gone and not self._no_devices(gpus)):
+        if not rows and not gone and not self._no_devices(gpus):
             return self._unread(_read_error(gpus), sections, prev, carried)
         facts: dict[str, Any] = dict(carried)
         gpu_reasons: list[str] = []
