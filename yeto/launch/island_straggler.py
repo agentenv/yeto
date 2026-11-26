@@ -19,8 +19,10 @@ default, or a replacement the island's provider offers).
   incarnation it finds at its first read: a relaunched or moved island's new launch never
   counts the merges its earlier launches missed.
 * **When counting starts.** At the island's first ``pool_join`` after the watch started, or
-  after the controller relaunched it (a new incarnation token), or at a ``pool_join`` of a
-  new generation or syncer term (a relaunch the controller did not see). A later re-JOIN of
+  after it left running (recovering, draining; a relaunch is a new incarnation token), or at
+  a ``pool_join`` of a new generation or syncer term (a relaunch the controller did not
+  see). What the syncer records after the island left running is its next incarnation's: a
+  join written before the controller holds the new incarnation running is counted. A later re-JOIN of
   the same generation (a lease that expired) does not restart the count. A merged push of
   the island resets it. An island adopted by a restarted launcher has joined before the
   watch started: it is counted from its first merged push after that.
@@ -114,8 +116,10 @@ class _Island:
     flagged: bool = False
     token: Any = None
     generation: tuple | None = None  # (syncer_epoch, generation) of the join counted from
-    since: float | None = None  # wall time of its last relaunch: older records are another incarnation's
+    since: float | None = None  # wall time it last left running: older records are another incarnation's
     rejoined: str | None = None  # a flagged island joined again as a new generation: why its stretch ends
+    away: bool = False  # not running now (recovering, draining, ended): its count restarts at its next join
+    was_joined: bool = False  # whether it was in the pool when it left running
 
 
 def _time(record: Mapping[str, Any]) -> float | None:
@@ -194,15 +198,26 @@ class StragglerTracker:
         the end of the stretch of a flagged island that is not running any more."""
         out: list[Straggler] = []
         threshold = self.cycles * self.per_cycle
+        for k, state in self.islands.items():
+            if k in running or state.token is None or state.away:
+                continue
+            # it left running: what the syncer records from now on is its next incarnation's (a
+            # join of it may come before its controller holds it running again)
+            if state.flagged:
+                out.append(self._signal(k, state, cleared=True, reason="not running"))
+            was_joined = state.joined
+            self._restart(state)
+            state.away, state.was_joined = True, was_joined
         for k, token in running.items():
             state = self._island(int(k))
-            if state.token != token:
-                if state.token is not None:  # relaunched: its count starts at its next join
-                    if state.flagged:
-                        out.append(self._signal(int(k), state, cleared=True, reason="relaunched"))
-                    state.joined, state.misses, state.absent, state.flagged = False, 0, False, False
-                    state.generation, state.rejoined, state.since = None, None, self.clock()
-                state.token = token
+            if state.away and state.token == token:  # the same incarnation back: counted from now
+                state.joined = state.joined or state.was_joined
+            elif state.token != token and state.token is not None and not state.away:
+                # relaunched between two checks: its count starts at its next join
+                if state.flagged:
+                    out.append(self._signal(int(k), state, cleared=True, reason="relaunched"))
+                self._restart(state)
+            state.token, state.away = token, False
             if state.rejoined is not None:
                 if state.flagged:
                     out.append(self._signal(int(k), state, cleared=True, reason=state.rejoined))
@@ -218,10 +233,14 @@ class StragglerTracker:
                 state.flagged = False
                 out.append(self._signal(int(k), state, cleared=True, reason="a push of it is merged again"))
         for k, state in self.islands.items():
-            if k not in running and state.flagged:
+            if k not in running and state.flagged:  # never held running here
                 state.flagged = False
                 out.append(self._signal(k, state, cleared=True, reason="not running"))
         return out
+
+    def _restart(self, state: _Island) -> None:
+        state.joined, state.misses, state.absent, state.flagged = False, 0, False, False
+        state.generation, state.rejoined, state.since = None, None, self.clock()
 
     def _signal(self, k: int, state: _Island, *, cleared: bool, reason: str) -> Straggler:
         return Straggler(island=k, cleared=cleared, missed_cycles=state.misses // self.per_cycle,
@@ -275,7 +294,7 @@ class FileTape:
 
 
 def _incarnation_order(incarnation: str) -> tuple:
-    from yeto.dashboard.store_tapes import launch_started  # noqa: PLC0415
+    from yeto.dashboard.store_tapes import launch_started
 
     started = launch_started(incarnation)
     return (0 if started is None else 1, started or 0.0, incarnation)

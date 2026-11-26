@@ -23,6 +23,10 @@ Two islands (``ssh:2x8xb300@bm``, two nodes each) train. Then, one case each:
 Each case checks that the other islands' processes never restarted (one start per node, no
 kill before the end, one launch), that the merged steps run 1..N without a gap or a repeat,
 that no push is merged twice, and that the resource ledger holds each SSH incarnation once.
+
+A fourth test runs the stuck case over the per-island wiring: each launch's watch is the
+launcher's own for its argv and reads the syncer's tape from the run store, uploaded in
+chunks, past an earlier syncer's history; island 1 is relaunched while it is reported.
 """
 
 from __future__ import annotations
@@ -33,13 +37,27 @@ import time
 from collections import Counter
 
 import pytest
-
 from test_fleet_island_launches import example_doc
 from test_fleet_trainer_worker import FakeLaunches
-from test_rl_full_parameter_async import _f32, _initial, _start_async_syncer, _wait, needs_cargo
-from test_rl_full_parameter_async import syncer_binary  # noqa: F401 - fixture
-from test_rl_full_parameter_dynamic_members import LAUNCHED, MAX_LEARNERS, P, POOL, _client, _delta, _outer_steps
+from test_rl_full_parameter_async import (
+    _f32,
+    _initial,
+    _start_async_syncer,
+    _wait,
+    needs_cargo,
+    syncer_binary,  # noqa: F401 - fixture
+)
+from test_rl_full_parameter_dynamic_members import (
+    LAUNCHED,
+    MAX_LEARNERS,
+    POOL,
+    P,
+    _client,
+    _delta,
+    _outer_steps,
+)
 from test_rl_ssh_resident import FakeCluster, b300
+
 from yeto.cost.ledger import ResourceLedger
 from yeto.hw import card_tools
 from yeto.launch import island_lifecycle as lifecycle
@@ -51,8 +69,7 @@ from yeto.launch.ssh_resident import SshIslandOps
 from yeto.launch.ssh_trainer_island import SshTrainerSpec
 from yeto.launch.ssh_trainer_ledger import KIND as SSH_TRAINER
 from yeto.modal_runner import RoutingOps
-from yeto.rl import fleet, fleet_islands, island_launches, trainer_worker
-from yeto.rl import up
+from yeto.rl import fleet, fleet_islands, island_launches, trainer_worker, up
 from yeto.rl.engine.object_store import DirectoryObjectStore
 
 GPU = "ssh:2x8xb300@bm"
@@ -78,6 +95,7 @@ class TrainerCluster(FakeCluster):
         self.rank0 = {nodes[0].name: k for k, nodes in NODES.items()}
         self.trainer_starts: list[int] = []
         self.trainer_kills: list[int] = []
+        self.trainer_events: list[tuple[str, int]] = []  # both, in order (a relaunch: kill, then start)
         self.guard = threading.Lock()
 
     def start(self, node, script):
@@ -85,6 +103,7 @@ class TrainerCluster(FakeCluster):
         if "setsid bash -c" in script and node.name in self.rank0:
             with self.guard:
                 self.trainer_starts.append(self.rank0[node.name])
+                self.trainer_events.append(("start", self.rank0[node.name]))
         return stream
 
     def run(self, node, script, *, timeout=300.0):
@@ -92,13 +111,15 @@ class TrainerCluster(FakeCluster):
         if "kill -TERM" in script and node.name in self.rank0:
             with self.guard:
                 self.trainer_kills.append(self.rank0[node.name])
+                self.trainer_events.append(("kill", self.rank0[node.name]))
         return out
 
     def finish(self, k: int) -> None:
-        """Island k's trainer ended its run: every rank exits 0 (rank 0 last)."""
+        """Island k's trainer ended its run: every rank of its newest incarnation exits 0 (rank 0 last)."""
         for node in reversed(NODES[k]):
-            if self.runs[node.name].get(0, {}).get("state") == "running":
-                self.exit(node.name, 0, 0)
+            runs = self.runs[node.name]
+            if runs and runs[max(runs)].get("state") == "running":
+                self.exit(node.name, max(runs), 0)
 
 
 class FastClock:
@@ -148,9 +169,12 @@ class SshIslandLaunches(FakeLaunches):
     fleet: the resident ssh: island ops on its inventory nodes and the fleet controller
     supervising it (its island STOP, its record, the straggler watch), on a thread."""
 
-    def __init__(self, tmp_path, cluster: TrainerCluster, objects, tape) -> None:
+    def __init__(self, tmp_path, cluster: TrainerCluster, objects, tape, watch=None) -> None:
         super().__init__()
         self.tmp_path, self.cluster, self.objects, self.tape = tmp_path, cluster, objects, tape
+        # the straggler watch of a launch (its argv, its island records); the syncer's tape file by default
+        self.watch = watch or (lambda argv, states: st.StragglerWatch(st.FileTape(tape), cycles=CYCLES,
+                                                                       log=lambda m: None))
         self.controllers: dict[int, FleetController] = {}
         self.logs: dict[int, FleetLog] = {}
         self.errors: list[BaseException] = []
@@ -166,13 +190,13 @@ class SshIslandLaunches(FakeLaunches):
         ops.add(name, spec)
         job = ops.start(name)
         log = self.logs[k] = FleetLog()
-        recorder = lifecycle.FleetRecorder(lifecycle.IslandStateStore(self.objects, log=lambda m: None),
-                                           {name: lifecycle.IslandRef(k, "ssh")})
+        states = lifecycle.IslandStateStore(self.objects, log=lambda m: None)
+        recorder = lifecycle.FleetRecorder(states, {name: lifecycle.IslandRef(k, "ssh")})
         ctl = self.controllers[k] = FleetController(
             learners={name: (spec, job)}, syncer=None, sky_ops=RoutingOps(FastClock(), None, ssh_ops=ops),
             poll_interval=30.0, recover_timeout=600.0, thread_cls=_SyncThread, recorder=recorder, elastic=True,
             deterministic_stop=True, fleet_log=log,
-            straggler=st.StragglerWatch(st.FileTape(self.tape), cycles=CYCLES, log=lambda m: None))
+            straggler=self.watch(argv, states))
 
         def supervise():
             code = 0
@@ -334,7 +358,10 @@ def test_ssh_islands_join_leave_and_lag_without_touching_the_other_islands(synce
         process.wait(timeout=10)
     assert not launches.errors, launches.errors
 
-    # -- the other islands were never touched: one start per node, one launch, no kill before the end
+    # -- the other islands were never touched: one start per node, one launch, no kill before the end.
+    # Limit: these count the start / kill scripts the control plane sent to the fake nodes (and the
+    # worker's launches), not OS processes; they prove yeto restarted nothing, not that nothing on
+    # a real node could restart a rank by itself.
     others = {"add": [0, 1], "remove": [0], "stuck": [0, 1]}[case]
     for k in others:
         assert started[k] == 1 and launches.started(f"r-i{k}") == 1
@@ -348,7 +375,9 @@ def test_ssh_islands_join_leave_and_lag_without_touching_the_other_islands(synce
         worker.step()
         assert worker.load(1)["state"] == trainer_worker.REMOVED
 
-    # -- the merges: steps 1..N without a gap or a repeat, no push merged twice
+    # -- the merges: steps 1..N without a gap or a repeat, no push merged twice.
+    # Limit: a push is keyed by (island, the step it was pushed for); a delta carried into a later
+    # round keeps its own step, so this catches a double merge, not a wrong carry-over discount.
     steps = _outer_steps(tape.read_text())
     assert [r["step"] for r in steps] == list(range(1, total_steps * P + 1))
     merged = [(int(e[0]), pushed) for r in steps for e, pushed in zip(r["raw_weights"], r["pushed_for"])]
@@ -362,6 +391,9 @@ def test_ssh_islands_join_leave_and_lag_without_touching_the_other_islands(synce
         assert min(state["joined_at"]) >= change_at and first > max(state["joined_at"])
     if case == "remove":
         leave = next(r for r in _records(tape) if r.get("kind") == "pool_leave" and int(r["island_id"]) == 1)
+        # Limit: by wall time, skipping one cycle of rounds per fragment pair (2 x P): the rounds open
+        # at the leave may still merge a push island 1 sent before it; this does not pin the round
+        # its last push merged in, only that island 0 merges alone from then on.
         after = [r for r in steps if r.get("time_unix", 0) > leave.get("time_unix", 0)][2 * P:]
         assert after and all([int(e[0]) for e in r["raw_weights"]] == [0] for r in after)
 
@@ -373,7 +405,9 @@ def test_ssh_islands_join_leave_and_lag_without_touching_the_other_islands(synce
         assert len(launches.logs[1].kinds(st.CLEARED_EVENT)) == 1
         assert states.read(1)["straggler"] is None  # cleared in its record too
         absent = [r for r in steps if r["absent"] == [1]]
-        assert any(r["timed_out"] for r in absent)  # merged at the quorum deadline without it
+        # merged at the quorum deadline without it. Limit: "any", because which of the rounds without
+        # island 1 waited for the deadline depends on when its PULL was answered before it went silent
+        assert any(r["timed_out"] for r in absent)
         assert launches.controllers[1].learners["r-i1-trainer"]["relaunches"] == 0
     for k, log in launches.logs.items():
         if case != "stuck" or k != 1:
@@ -386,6 +420,204 @@ def test_ssh_islands_join_leave_and_lag_without_touching_the_other_islands(synce
     islands = {"add": 3, "remove": 2, "stuck": 2}[case]
     assert sorted(created) == sorted(f"r-i{k}/r-i{k}-trainer-i0" for k in range(islands))
     assert set(created.values()) == {1} and all(n == 1 for n in released.values())
+
+
+def _launch_args(argv):
+    """The args ``yeto launch`` parses from an island launch's argv."""
+    from yeto.cli import build_parser
+
+    return build_parser().parse_args(["launch", *argv])
+
+
+@needs_cargo
+def test_a_stuck_island_relaunched_mid_run_is_watched_over_the_run_store(syncer_binary, tmp_path,  # noqa: F811
+                                                                          monkeypatch):
+    """The stuck case over the per-island wiring: each island launch's watch is the launcher's
+    own (``launcher._island_straggler_watch`` of its parsed argv and its island records), so it
+    reads the syncer's tape from the run store (a ``DirectoryObjectStore`` here), where the
+    syncer launch's uploaders copy it chunk by chunk (``tapes/syncer/<incarnation>/``). The
+    store also holds an earlier syncer's history in which island 1 missed 40 merges: it is
+    never counted. Island 1 stops pushing and is reported once; then one of its ranks fails,
+    its controller relaunches it (cleared: relaunched); the new incarnation joins again
+    (catch-up) and stays silent: it is reported again only after N merge cycles counted from
+    that join; then it pushes and the mark is cleared. Island 0 is never touched."""
+    from yeto import launcher
+    from yeto.rl.engine.tape_upload import syncer_incarnation, syncer_uploaders
+
+    monkeypatch.delenv("YETO_RL_TAPE_UPLOAD_S", raising=False)
+    cfg = _config(tmp_path)
+    plan = fleet.plan_of(cfg)
+    objects = DirectoryObjectStore(tmp_path / "store")
+    store = dz.DesiredStore(objects)
+    store.apply({"members": [*island_launches.trainer_members(cfg, plan),
+                             *({"kind": "sampler_pool", "name": p.name, "island": i.index,
+                                "pool": {"provider": "modal"}} for i in plan.islands for p in i.pools)]}, expect=0)
+    old = time.time() - 3600  # an earlier syncer of the run: island 1 missing from its last 40 merges
+    history = [{"kind": "pool_join", "island_id": k, "generation": 0, "syncer_epoch": 0, "time_unix": old}
+               for k in (0, 1)]
+    history += [{"kind": "outer_step", "step": n, "fragment": (n - 1) % P, "weights": [[0, n - 1, 1.0]],
+                 "raw_weights": [[0, n - 1, 1.0]], "absent": [1], "time_unix": old + n} for n in range(1, 41)]
+    objects.write(f"{st.SYNCER_TAPES}oldhost-20200101T000000Z/00000000.jsonl",
+                  "".join(json.dumps(r) + "\n" for r in history).encode())
+    total_steps, change_at = 30, 3
+    process, port, profile_hash = _start_async_syncer(syncer_binary, tmp_path, *STUCK_POOL, total_steps=total_steps,
+                                                      log_file=tmp_path / "syncer.log")
+    tape = tmp_path / "tape.jsonl"
+    uploaders = syncer_uploaders(objects, tape, incarnation=syncer_incarnation(), interval_s=0.3, from_end=False,
+                                 log=lambda m: None)
+    island_launches.write_syncer_record(objects, addr=f"127.0.0.1:{port}", syncer_epoch=0, learners=LAUNCHED,
+                                        max_learners=MAX_LEARNERS, run="r")
+    states = lifecycle.IslandStateStore(objects, log=lambda m: None)
+    watches = {}
+
+    def watch(argv, island_states):
+        w = launcher._island_straggler_watch(_launch_args(argv), island_states, None)
+        w.source.interval_s = 0.2  # a store read every 0.2 s, not every 30 s
+        watches[int(argv[argv.index("--rl-fleet-learner-id") + 1])] = w
+        return w
+
+    cluster = TrainerCluster()
+    launches = SshIslandLaunches(tmp_path, cluster, objects, tape, watch=watch)
+    worker = trainer_worker.TrainerWorker(store, objects, launches, states, log=lambda m: None)
+
+    clients: dict[int, object] = {}
+    catching: dict[int, dict] = {}
+    versions = {k: [0] * P for k in range(LAUNCHED)}
+    seen: dict[int, set] = {k: set() for k in range(LAUNCHED)}
+    held: dict[int, list] = {}
+    phase = {"name": "train", "events": 0}
+    beat = [0.0]
+
+    def follow_the_nodes():
+        with cluster.guard:
+            events = list(cluster.trainer_events)
+        for what, k in events[phase["events"]:]:
+            phase["events"] += 1
+            if what == "kill" and k in clients:  # its incarnation torn down: the connection drops
+                clients.pop(k).close()
+            elif what == "start":
+                if k in clients:
+                    clients.pop(k).close()
+                clients[k] = _client(k, port, profile_hash)
+                clients[k].start()
+                if phase["name"] != "train":  # a relaunched trainer catches up before it answers
+                    catching[k] = {}
+                    seen[k].clear()
+
+    def drain(k):
+        client = clients[k]
+        client.check_health()
+        if k in catching:
+            for update in client.drain_updates():
+                catching[k].setdefault(update.fragment_id, update.version)
+            held.setdefault(k, []).extend(client.drain_pulls())
+            if len(catching[k]) < P:
+                return
+            caught = catching.pop(k)
+            versions[k] = [caught[fid] for fid in range(P)]
+        for update in client.drain_updates():
+            versions[k][update.fragment_id] = max(versions[k][update.fragment_id], update.version)
+        if k == 1 and phase["name"] in ("stuck", "relaunching", "stuck again"):
+            held.pop(k, None)
+            client.drain_pulls()
+            return  # connected (its heartbeats go on), delivering nothing
+        for permit in held.pop(k, []) + client.drain_pulls():
+            key = (permit.global_step, permit.round_attempt)
+            if key in seen[k]:
+                continue
+            seen[k].add(key)
+            client.push_fragment(permit.fragment_id, permit.global_step, permit.round_attempt,
+                                 versions[k][permit.fragment_id], permit.global_step, 1, 7,
+                                 _f32(_delta(k, permit.global_step)))
+
+    def poll():
+        assert not launches.errors, launches.errors
+        if time.monotonic() - beat[0] > 1:
+            beat[0] = time.monotonic()
+            for client in list(clients.values()):
+                client.heartbeat(0)
+        worker.step()
+        follow_the_nodes()
+        for k in list(clients):
+            drain(k)
+        log = launches.logs[1]
+        if phase["name"] == "train" and len(clients) == LAUNCHED and min(versions[0]) >= change_at:
+            # the history in the store and the merges so far reported nobody
+            assert not log.kinds(st.EVENT) and not launches.logs[0].kinds(st.EVENT)
+            phase["name"] = "stuck"
+        elif phase["name"] == "stuck" and log.kinds(st.EVENT):
+            phase["name"] = "relaunching"
+            node = NODES[1][1].name
+            cluster.exit(node, max(cluster.runs[node]), 1)  # incarnation 0's rank 1 fails
+        elif phase["name"] == "relaunching" and log.kinds(st.CLEARED_EVENT) and 1 in clients and 1 not in catching:
+            phase["name"] = "stuck again"
+        elif phase["name"] == "stuck again" and len(log.kinds(st.EVENT)) == 2:
+            phase["name"] = "pushing"
+        return phase["name"] == "pushing" and len(log.kinds(st.CLEARED_EVENT)) == 2 \
+            and all(c.finalizing.is_set() for c in clients.values())
+
+    try:
+        worker.step()
+        follow_the_nodes()
+        assert sorted(clients) == [0, 1]
+        for fid in range(P):
+            clients[0].send_init(fid, _f32(_initial(fid)))
+        _wait(poll, "the fleet never finalized (stuck, relaunched)", timeout=300)
+        for client in clients.values():
+            manifest, _fragments = client.wait_for_final_fragments(timeout=30)
+            client.acknowledge_finalization(manifest)
+        assert process.wait(timeout=15) == 0
+        for k in list(clients):
+            cluster.finish(k)
+        _wait(lambda: all(launches.ended(m["prefix"]) is not None for m in dz.trainers(store.read()).values()),
+              "an island launch did not end", timeout=60)
+    finally:
+        for client in clients.values():
+            client.close()
+        for up_ in uploaders:
+            up_.stop(5.0)
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=10)
+    assert not launches.errors, launches.errors
+
+    # -- the watch read the run store's copy, uploaded chunk by chunk
+    assert all(isinstance(w.source, st.StoreTape) and w.source.requests > 0 for w in watches.values())
+    current = [key for key in objects.list(st.SYNCER_TAPES) if "oldhost-" not in key]
+    assert len(current) >= 2 and len({key.rsplit("/", 2)[1] for key in current}) == 1
+
+    # -- island 1: reported, relaunched (cleared), reported again N cycles after its new join, cleared
+    first, second = launches.logs[1].kinds(st.EVENT)
+    for event in (first, second):
+        assert event[2]["action"] == st.WAIT and event[2]["missed_cycles"] == CYCLES and event[2]["fragments"] == P
+    assert first[2]["last_merged_step"] is not None  # its own stretch, not the history's 40 merges
+    assert first[2]["newest_step"] - first[2]["last_merged_step"] >= CYCLES * P
+    relaunched, back = launches.logs[1].kinds(st.CLEARED_EVENT)
+    assert relaunched[2]["reason"] == "relaunched" and back[2]["reason"] == "a push of it is merged again"
+    steps = _outer_steps(tape.read_text())
+    joins = [r for r in _records(tape) if r.get("kind") == "pool_join" and int(r["island_id"]) == 1
+             and r.get("catch_up") and r["base_version"] <= second[2]["newest_step"]]
+    rejoin = max(r["base_version"] for r in joins)  # the relaunched incarnation's join
+    assert rejoin >= first[2]["newest_step"]  # after the first report (the relaunch may beat the next merge)
+    assert second[2]["newest_step"] - rejoin >= CYCLES * P  # counted from that join, not before
+    assert states.read(1)["straggler"] is None
+    ctl = launches.controllers[1]
+    assert ctl.learners["r-i1-trainer"]["relaunches"] == 1 and launches.started("r-i1") == 1
+
+    # -- island 0 untouched; the merges continuous, no push merged twice; nobody else reported
+    assert launches.started("r-i0") == 1
+    assert [sum(1 for c in cluster.calls if c[:2] == ("start", n.name)) for n in NODES[0]] == [1, 1]
+    assert not launches.logs[0].kinds(st.EVENT) and not launches.logs[0].kinds(st.UNAVAILABLE_EVENT)
+    assert [r["step"] for r in steps] == list(range(1, total_steps * P + 1))
+    merged = [(int(e[0]), pushed) for r in steps for e, pushed in zip(r["raw_weights"], r["pushed_for"])]
+    assert len(merged) == len(set(merged)), Counter(merged).most_common(3)
+
+    # -- the ledger: island 1's two incarnations, each created once
+    rows = [r for r in ResourceLedger(tmp_path / "ledger.jsonl").records() if r["kind"] == SSH_TRAINER]
+    created = Counter(r["id"] for r in rows if r["op"] == "create")
+    assert sorted(created) == ["r-i0/r-i0-trainer-i0", "r-i1/r-i1-trainer-i0", "r-i1/r-i1-trainer-i1"]
+    assert set(created.values()) == {1}
+    assert all(n == 1 for n in Counter(r["id"] for r in rows if r["op"] == "release").values())
 
 
 def worker_members(store, case):

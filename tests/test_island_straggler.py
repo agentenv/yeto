@@ -10,8 +10,8 @@ import json
 import types
 
 import pytest
-
 from test_controller import RUNNING, SYNCER, FakeOps, ImmediateThread
+
 from yeto.launch import island_lifecycle as lc
 from yeto.launch import island_straggler as st
 from yeto.launch.fleet import FleetController
@@ -184,6 +184,41 @@ def test_a_relaunch_ignores_the_earlier_incarnation_s_records_read_late():
     tracker.feed(_at(_join(1), 6100.0))
     tracker.feed(_at(_step(2, [0], fragments=1), 6200.0))
     assert [s.merges for s in tracker.check({0: (0, 1), 1: (1, 2)})] == [1]
+
+
+def test_a_join_recorded_before_the_controller_holds_the_new_incarnation_running_counts():
+    """Recovering at 6000 (the island left running), its new incarnation joins at 6100, and only
+    then does the controller hold it running (a new token): the join is the new incarnation's,
+    so the island is counted from it, not left uncounted until a push of it merges."""
+    now = [5000.0]
+    tracker = st.StragglerTracker(cycles=1, clock=lambda: now[0])
+    tracker.feed(_at(_join(1), 4000.0))
+    tracker.check(RUN2)
+    now[0] = 6000.0
+    assert tracker.check({0: (0, 1)}) == []  # island 1 recovering
+    tracker.feed(_at(_step(1, [0], fragments=1), 5900.0))  # its earlier incarnation's stretch
+    tracker.feed(_at(dict(_join(1), catch_up=True), 6100.0))
+    assert tracker.check({0: (0, 1)}) == []  # not held running: never reported
+    tracker.feed(_at(_step(2, [0], fragments=1), 6200.0))
+    now[0] = 6300.0
+    (signal,) = tracker.check({0: (0, 1), 1: (1, 2)})  # running again: counted from its join
+    assert not signal.cleared and signal.island == 1 and signal.merges == 1
+
+
+def test_an_island_back_running_as_the_same_incarnation_keeps_its_place_in_the_pool():
+    tracker = st.StragglerTracker(cycles=1)
+    tracker.feed(_join(1))
+    tracker.check(RUN2)
+    assert tracker.check({0: (0, 1)}) == []
+    tracker.check(RUN2)  # the same token back
+    tracker.feed(_step(1, [0], fragments=1))
+    assert [s.island for s in tracker.check(RUN2)] == [1]
+    fresh = st.StragglerTracker(cycles=1)  # never joined before it left: still not counted
+    fresh.check(RUN2)
+    fresh.check({0: (0, 1)})
+    fresh.check(RUN2)
+    fresh.feed(_step(1, [0], fragments=1))
+    assert fresh.check(RUN2) == []
 
 
 # -- the syncer's tape ---------------------------------------------------------------------------
@@ -432,7 +467,7 @@ def test_the_policy_decides_and_a_replace_is_handed_to_it(tmp_path):
         def replace(self, name, signal):
             replaced.append(name)
 
-    ctl, _ops, store, tape, log = _controller(tmp_path, policy=Policy())
+    ctl, _ops, store, tape, _log = _controller(tmp_path, policy=Policy())
     tape.pending += [_join(0), _join(1), _step(1, [0], fragments=1)]
     ctl._poll_stragglers()
     assert asked == [("r-l1", 1)] and replaced == ["r-l1"]
@@ -481,7 +516,7 @@ def test_the_launcher_reads_the_store_copy_for_an_island_launch_only(tmp_path, m
 
     monkeypatch.delenv("YETO_RL_TAPE_UPLOAD_S", raising=False)
     states = types.SimpleNamespace(objects=DirectoryObjectStore(tmp_path / "s"))
-    base = dict(training_mode="rl", rl_sync_island_lease_s=30.0, rl_checkpoint_store="s3://b/runs/r")
+    base = {"training_mode": "rl", "rl_sync_island_lease_s": 30.0, "rl_checkpoint_store": "s3://b/runs/r"}
     island = types.SimpleNamespace(**base, rl_fleet_role="island")
     assert isinstance(launcher._island_straggler_watch(island, states, None).source, st.StoreTape)
     group = types.SimpleNamespace(**base, rl_fleet_role=None)  # one launch: its syncer's tape is not uploaded
