@@ -32,6 +32,7 @@ versions the probe read and the evidence of the run (:mod:`.site_images`).
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import json
 import re
@@ -105,6 +106,7 @@ class AdoptRequest:
     strict_arch: bool = False
     allow_busy: bool = False
     container_sudo: bool = False
+    spec_engine: str | None = None  # sampler: the engine the pool's sampler spec runs (its engine.adapter)
 
     def __post_init__(self) -> None:
         if self.role not in site_images.ROLES:
@@ -183,6 +185,8 @@ def pin(ref: str, *, login: Mapping[str, str] | None = None, urlopen=None) -> st
     (step ``manifest``) when the registry has no such manifest or cannot be read. With
     ``YETO_IMAGE_MANIFEST_CHECK=off`` a digest is taken as it is and a tag is refused."""
     bare = ref.strip().removeprefix("docker:")
+    if not site_images.valid_reference(bare, digest=False):
+        raise AdoptError("manifest", f"{bare!r} is not a docker reference ([REGISTRY[:PORT]/]PATH[:TAG][@sha256:<64 hex>])")
     if not image_manifest.enabled():
         if not re.search(r"@sha256:[0-9a-f]{64}$", bare):
             raise AdoptError("manifest", f"{image_manifest.CHECK_ENV}=off: a tag cannot be pinned; give the "
@@ -491,6 +495,9 @@ def fit_problems(request: AdoptRequest, ref: str, facts: ImageFacts,
     problems: list[str] = []
     warnings: list[str] = []
     notes: list[str] = []
+    if request.spec_engine and request.engine and request.spec_engine.lower() != request.engine.lower():
+        problems.append(f"--engine {request.engine} but the sampler spec runs {request.spec_engine} (its "
+                        "engine.adapter): the record would name an engine the smoke did not run")
     need = ENGINE_PACKAGES.get((request.role, engine), ())
     if need and not any(p in facts.packages for p in need):
         problems.append(f"the image has no {request.role} engine {engine} (none of {list(need)} is installed; "
@@ -528,10 +535,14 @@ def fit_problems(request: AdoptRequest, ref: str, facts: ImageFacts,
 
 
 def default_engine(request: AdoptRequest, facts: ImageFacts | None) -> str:
-    """The engine of the record: the one asked for, else the default training backend
-    (trainer) or the engine package the probe found (sampler: vllm-ascend, vllm, sglang)."""
+    """The engine of the record: the one asked for (``--engine``; for a trainer smoke
+    the backend the model registry recommends, which ``yeto image adopt`` passes), else
+    the sampler spec's (``engine.adapter``), else the default training backend (trainer)
+    or the engine package the probe found (sampler: vllm-ascend, vllm, sglang)."""
     if request.engine:
         return request.engine.lower()
+    if request.spec_engine:
+        return request.spec_engine.lower()
     if request.role == "trainer":
         from ..rl.engine import backends  # noqa: PLC0415
 
@@ -608,6 +619,11 @@ class Adopter:
         engine = default_engine(req, facts)
         if self.smoke is None:
             raise self._held(AdoptError("smoke", f"no {req.role} smoke is wired for this adoption"))
+        try:  # the pull may have taken long: the node is checked again right before the smoke
+            self.check_idle(req.probe_node, "smoke")
+        except AdoptError as error:
+            self.report.steps.append(StepResult("smoke", False, error.reason, 0.0))
+            raise self._held(error) from None
         self.log("[image adopt] smoke ...")
         result = self.smoke(self, pinned, facts, engine)
         self.report.steps.append(result)
@@ -796,14 +812,23 @@ def add_parser(sub: Any) -> Any:
     a.add_argument("--role", required=True, choices=site_images.ROLES)
     a.add_argument("--inventory", required=True, help="the SSH node inventory (YAML / JSON)")
     a.add_argument("--engine", default=None,
-                   help="trainer: the --rl-backend (default: the model registry's); sampler: vllm | sglang | "
-                        "vllm-ascend (default: the engine found in the image)")
+                   help="trainer: the --rl-backend (default: the model registry's recommendation; the smoke runs "
+                        "miles); sampler: vllm | sglang | vllm-ascend (default: the sampler spec's engine.adapter, "
+                        "else the engine found in the image); a spec that runs another engine is refused")
     a.add_argument("--node", default=None, help="the node that probes and smokes (default: the first of the role)")
     a.add_argument("--catalog", default=None, help="the site image catalog (default: the inventory's site_images:)")
     a.add_argument("--min-image-free-gib", type=float, default=120.0,
                    help="free GiB the image root (docker data root / containerd store) of every node needs")
     a.add_argument("--attention-backend", default="auto",
                    help="the trainer's attention backend, for the trainer image floor (default auto)")
+    a.add_argument("--strict-arch", action="store_true",
+                   help="the image must carry a cubin of exactly the node's card architecture (no CUDA "
+                        "minor-version or PTX compatibility)")
+    a.add_argument("--allow-busy", action="store_true",
+                   help="probe and smoke a node whose cards run processes or that runs yeto containers (a warning)")
+    a.add_argument("--keep-smoke-artifacts", action="store_true",
+                   help="keep the smoke's cut model, checkpoint and files (printed with their size) instead of "
+                        "deleting them")
     a.add_argument("--dry-run", action="store_true", help="print every step and command; reach no registry or node")
     t = a.add_argument_group("trainer smoke")
     t.add_argument("--model-config", default=None,
@@ -849,12 +874,20 @@ def _plan(args: Any, request: AdoptRequest, run_id: str) -> Any:
         plan = image_smoke.trainer_plan(
             request.probe_node, model=request.model, config=_model_config(args), engine=request.engine,
             store=args.smoke_store, run_id=run_id, workdir=workdir, model_revision=args.model_revision,
-            model_path=args.model_path, layers=args.smoke_layers, extra_args=tuple(args.smoke_arg))
+            model_path=args.model_path, layers=args.smoke_layers, extra_args=tuple(args.smoke_arg),
+            keep=args.keep_smoke_artifacts)
         return plan
+    spec = _sampler_spec(args)
+    return image_smoke.sampler_plan(request.probe_node, spec=spec, run_id=run_id, release=args.release,
+                                    keep=args.keep_smoke_artifacts)
+
+
+def _sampler_spec(args: Any) -> dict[str, Any]:
+    from . import image_smoke  # noqa: PLC0415
+
     if not args.sampler_spec:
         raise image_smoke.SmokeError("the sampler smoke runs the pool's sampler spec: pass --sampler-spec")
-    spec = json.loads(Path(args.sampler_spec).expanduser().read_text())
-    return image_smoke.sampler_plan(request.probe_node, spec=spec, run_id=run_id, release=args.release)
+    return json.loads(Path(args.sampler_spec).expanduser().read_text())
 
 
 def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
@@ -866,13 +899,18 @@ def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
     try:
         nodes = role_nodes(load_inventory(args.inventory), args.role)
         catalog = args.catalog or str(site_images.inventory_catalog_path(args.inventory))
+        spec_engine = engine_images.spec_needs(_sampler_spec(args))["engine_pref"] if args.role == "sampler" \
+            and args.sampler_spec else None
         request = AdoptRequest(ref=args.ref, model=args.model, role=args.role, nodes=tuple(nodes),
                                engine=args.engine, node=args.node, catalog=catalog,
-                               min_image_free_gib=args.min_image_free_gib, attention_backend=args.attention_backend)
+                               min_image_free_gib=args.min_image_free_gib, attention_backend=args.attention_backend,
+                               strict_arch=args.strict_arch, allow_busy=args.allow_busy, spec_engine=spec_engine)
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
         slug = re.sub(r"[^a-z0-9]+", "-", args.model.rsplit("/", 1)[-1].lower()).strip("-")[:24] or "model"
         run_id = f"adopt-{slug}-{args.role}-{stamp}"
         plan = _plan(args, request, run_id)
+        if args.role == "trainer" and not request.engine:  # the record names the backend the smoke ran
+            request = dataclasses.replace(request, engine=str(plan.data["engine"]))
     except (InventoryError, site_images.SiteImagesError, image_smoke.SmokeError, FileNotFoundError, OSError,
             ValueError) as error:
         print(f"yeto image adopt: {error}", file=sys.stderr)

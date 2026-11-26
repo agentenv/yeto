@@ -263,10 +263,11 @@ def test_forward_tables_name_flags_of_both_layers():
 _NON_RL_LITERALS = frozenset({
     # yeto image adopt (yeto.launch.image_adopt): its flags, the card tools / docker ps of its idle
     # check, and its smoke (yeto.launch.image_smoke: the scripts/prune_layers.py --layers of the
-    # trainer cut; --smoke-arg=--flag=value in its help)
+    # trainer cut and its --cache-dir; --smoke-arg=--flag=value in its help; the cleanup's yeto down --missing-ok)
     "--role", "--strict-arch", "--allow-busy", "--showpids", "--csv", "--filter",
     "--inventory", "--engine", "--catalog", "--min-image-free-gib", "--model-config", "--model-path",
     "--smoke-store", "--smoke-layers", "--smoke-arg", "--sampler-spec", "--layers", "--flag",
+    "--keep-smoke-artifacts", "--cache-dir", "--missing-ok",
     # podman / docker CLI flags of the own-SSH-node sampler pool (yeto.launch.ssh_sampler_pool)
     "--security-opt", "--signal", "--tail", "--type",
     # the AgentENV-side regctl setting the task image check names (yeto.launch.agentic_setup)
