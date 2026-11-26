@@ -314,6 +314,8 @@ def test_an_own_trainer_island_with_an_own_sampler_pool_spends_nothing(kit, caps
     assert conf.node_runtime is True and [n.name for n in conf.nodes] == ["own-b300-2"]  # by roles: [sampler]
     nodes = load_inventory(KIT / "inventory.own-b300-nodes.yaml")
     assert [n.name for n in island_nodes(nodes, "trainer")] == ["own-b300-0", "own-b300-1"]
+    # a node merged from the YAML anchor without its own address would take the other's
+    assert len({n.address for n in nodes}) == len({n.host for n in nodes}) == len(nodes)
     (sampler_node,) = [n for n in nodes if "sampler" in n.roles]
     # the sampler spec fits its node and serves what the trainer releases (bf16, reloaded in place)
     spec = json.loads(kit.files["sampler-spec.qwen3-4b-vllm-own-b300.json"].read_text())
@@ -322,6 +324,9 @@ def test_an_own_trainer_island_with_an_own_sampler_pool_spends_nothing(kit, caps
     assert spec["engine"]["options"]["tp"] == int(server["topology"].removeprefix("tp")) == sampler_node.cards_per_node
     assert server["card_model"] == sampler_node.card == "B300"
     assert server["in_place_reload"] is True and server["quant_scheme"] == server["precision"] == "bf16"
+    # the sampler writes to the run's bucket (another bucket: the trainer waits out first_group)
+    bucket = cfg["store"].removeprefix("s3://").split("/", 1)[0]
+    assert spec["store"] == f"{pool['provider']['workdir']}/stage/{bucket}/runs/__RUN_PREFIX__"
     rc, out = _dry_run(kit, "run.own-trainer-own-sampler.json", capsys)
     assert rc == 0, out.why
     assert ("dry run: spend estimate $0.00/h = pools $0.00/h (own-b300 (ssh) 1 x $0) + trainer $0/h "
@@ -337,6 +342,7 @@ def test_an_own_trainer_island_with_an_own_sampler_pool_spends_nothing(kit, caps
     (island,) = plan["island_requests"]
     assert plan["total_gpus"] == 16 and island["num_nodes"] == 2
     assert island["ssh_island"]["rank_layout"]["world"] == 16
+    assert island["ssh_island"]["image"] == TRAINER_IMAGE  # the template's --rl-image
     assert [n["name"] for n in island["ssh_island"]["nodes"]] == ["own-b300-0", "own-b300-1"]
 
 
