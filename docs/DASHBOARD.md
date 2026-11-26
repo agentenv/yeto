@@ -215,15 +215,24 @@ name, as before.
 A launch that keeps its island records in the run store (an island fleet, or
 `--island-lifecycle on` with `--rl-checkpoint-store`) also copies `fleet.jsonl`
 there, in chunks, every 30 s (`YETO_RL_TAPE_UPLOAD_S`, 0 turns it off):
-`fleet/log/<lane>/<host>-p<pid>-<UTC start>/<seq>.jsonl`, lane `l<k>` for the
-island launch of learner `k` and `fleet` for a launch of the whole fleet. Every
-launcher process writes its own folder, so the events of a control plane that
-moved to another host, or of a host that was lost, stay in the store. The copy is
-observation only: a failed upload is a `WARN` line in the launcher log, retried
-with the next chunk, and the launcher's end waits at most 15 s for the last one.
-A launch of one trainer island uploads nothing, as before. `--store` reads every
-folder next to the island tapes (a lane's folders in the order they started), and
-a record that is also in a local `fleet.jsonl` given with `--tapes` counts once.
+`fleet/log/<lane>/<host>-p<pid>-<nonce>-<UTC start>/<seq>.jsonl`, lane `l<k>` for
+the island launch of learner `k` and `fleet` for a launch of the whole fleet. Every
+launcher process writes its own folder (the random nonce keeps two launchers of one
+host apart), so the events of a control plane that moved to another host, or of a
+host that was lost, stay in the store. Only this run's part of the local file is
+copied: `fleet.store.json` next to it records the store and the offset the copy
+starts at, and a run directory reused by a run with another store starts at the
+file's end. `yeto down` copies the `island_stop` lines it appends for islands a
+killed launcher left open. The copy is observation only: a failed upload is a
+`WARN` line, retried with the next chunk, and the launcher's end (and `yeto down`)
+waits at most 15 s for the last one. A launch of one trainer island uploads
+nothing, as before. `--store` reads every folder next to the island tapes, and a
+record that is also in a local `fleet.jsonl` given with `--tapes` counts once. The
+page folds an island's lifecycle records by their own time, whatever the order it
+reads them in: a host's older records that arrive after the newer host's (its run
+directory has only its own lines) add their closed ready -> lost intervals and do
+not change the island's current state. A host clock that is off by more than the
+gap between two hosts' records still orders those records by that clock.
 For tools that read the file itself:
 
 ```

@@ -119,10 +119,14 @@ def _dashboard_fleet_log(args, tasks, results, objects=None):
     except Exception as e:  # noqa: BLE001
         print(f"[launcher] fleet.jsonl disabled: {e}", file=sys.stderr)
         return None
-    if objects is not None:
-        from ..dashboard.fleet_store import start_uploader
+    store = getattr(args, "rl_checkpoint_store", None)
+    if objects is not None and store:
+        from ..dashboard.fleet_store import copy_start, start_uploader
 
-        log.uploader = start_uploader(objects, log.path, learner_id=None if member is None else member[0])
+        learner = None if member is None else member[0]
+        # a reused run directory: only this run's lines go to its store (fleet_store.copy_start)
+        log.uploader = start_uploader(objects, log.path, learner_id=learner,
+                                      offset=copy_start(log.path, str(store), learner_id=learner))
     return log
 
 

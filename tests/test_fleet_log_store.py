@@ -138,7 +138,7 @@ def test_the_store_copy_has_every_line_under_its_lane(tmp_path):
     keys = _store_keys(store)
     assert len(keys) == 1 and keys[0].startswith("fleet/log/l1/") and keys[0].endswith("/00000000.jsonl")
     folder = keys[0].split("/")[3]
-    assert fleet_store.incarnation().split("-p")[0] == folder.split("-p")[0]  # <host>-p<pid>-<UTC>
+    assert fleet_store.incarnation().split("-p")[0] == folder.split("-p")[0]  # <host>-p<pid>-<nonce>-<UTC>
     from yeto.dashboard.store_tapes import launch_started
     assert launch_started(folder) is not None
     assert (store / keys[0]).read_bytes() == (tmp_path / "fleet.jsonl").read_bytes()
@@ -198,8 +198,9 @@ def test_an_uploader_that_cannot_start_is_a_warn(tmp_path, monkeypatch):
 def test_the_launch_starts_the_copy_only_with_a_store(tmp_path, monkeypatch):
     monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
     store = tmp_path / "store"
-    log = manifest._dashboard_fleet_log(_launch_args(tmp_path, role="island", learner=2),  # noqa: SLF001
-                                        {ISLAND: SimpleNamespace()}, {ISLAND: ("job", None)},
+    args = _launch_args(tmp_path, role="island", learner=2)
+    args.rl_checkpoint_store = str(store)
+    log = manifest._dashboard_fleet_log(args, {ISLAND: SimpleNamespace()}, {ISLAND: ("job", None)},  # noqa: SLF001
                                         objects=DirectoryObjectStore(str(store)))
     assert log.uploader is not None and log.uploader.island == "l2"
     log.event("island_ready", ISLAND)
@@ -209,42 +210,82 @@ def test_the_launch_starts_the_copy_only_with_a_store(tmp_path, monkeypatch):
 
 # -- readers -----------------------------------------------------------------------------------
 
-def _two_hosts(tmp_path):
-    """A control plane that moved: host A's launcher (island ready, node lost), then host B's
-    (ready again, a spare in); host B's local file also holds A's lines (a restored run
-    directory), its store folder only its own. Host B's folder sorts first by name."""
+def _text(rows) -> bytes:
+    return "".join(json.dumps(r) + "\n" for r in rows).encode()
+
+
+A_ROWS = [{"event": "island_ready", "time_unix": 100.0, "island": ISLAND, "island_id": 1},
+          {"event": "island_node_lost", "time_unix": 150.0, "island": ISLAND, "island_id": 1, "node": "b300-1"},
+          {"event": "island_lost", "time_unix": 160.0, "island": ISLAND, "island_id": 1}]
+B_ROWS = [{"event": "island_ready", "time_unix": 400.0, "island": ISLAND, "island_id": 1},
+          {"event": "island_node_replaced", "time_unix": 401.0, "island": ISLAND, "island_id": 1, "spare": "b300-3"}]
+
+
+def _two_hosts(tmp_path, *, a_stamp="20261127T010000Z", b_stamp="20261127T020000Z"):
+    """A control plane that moved: host A's launcher (island ready, node lost, island lost),
+    then host B's (ready again, a spare in). Host B's local file has only its own lines; the
+    store has both folders. Host B's folder sorts first by name."""
     store = tmp_path / "store"
     objects = DirectoryObjectStore(str(store))
-    a = [{"event": "island_ready", "time_unix": 100.0, "island": ISLAND, "island_id": 1},
-         {"event": "island_node_lost", "time_unix": 150.0, "island": ISLAND, "island_id": 1, "node": "b300-1"},
-         {"event": "island_lost", "time_unix": 160.0, "island": ISLAND, "island_id": 1}]
-    b = [{"event": "island_ready", "time_unix": 400.0, "island": ISLAND, "island_id": 1},
-         {"event": "island_node_replaced", "time_unix": 401.0, "island": ISLAND, "island_id": 1, "spare": "b300-3"}]
-    text = lambda rows: "".join(json.dumps(r) + "\n" for r in rows).encode()  # noqa: E731
-    objects.write("fleet/log/l1/hosta-p7-20261127T010000Z/00000000.jsonl", text(a[:2]))
-    objects.write("fleet/log/l1/hosta-p7-20261127T010000Z/00000001.jsonl", text(a[2:]))
-    # host B sorts before host A by name; its folder started later
-    objects.write("fleet/log/l1/a-hostb-p9-20261127T020000Z/00000000.jsonl", text(b))
+    objects.write(f"fleet/log/l1/hosta-p7-0a0a0a0a-{a_stamp}/00000000.jsonl", _text(A_ROWS[:2]))
+    objects.write(f"fleet/log/l1/hosta-p7-0a0a0a0a-{a_stamp}/00000001.jsonl", _text(A_ROWS[2:]))
+    objects.write(f"fleet/log/l1/a-hostb-p9-0b0b0b0b-{b_stamp}/00000000.jsonl", _text(B_ROWS))
     local = tmp_path / "fleet.jsonl"
-    local.write_bytes(text(a + b))
-    return objects, a, b, local
+    local.write_bytes(_text(B_ROWS))
+    return objects, A_ROWS, B_ROWS, local
 
 
-def test_the_dashboard_folds_every_folder_once_in_start_order(tmp_path):
+def _lifecycle(isl):
+    return {k: isl[k] for k in ("fleet_state", "ready_ts", "last_ready_ts", "stop_ts", "lost_ts", "open_ts",
+                                "closed_s")}
+
+
+RUNNING_AGAIN = {"fleet_state": "ready", "ready_ts": 100.0, "last_ready_ts": 400.0, "stop_ts": None,
+                 "lost_ts": 160.0, "open_ts": 400.0, "closed_s": pytest.approx(60.0)}
+
+
+def test_the_moved_host_s_island_is_running_with_the_lost_host_s_history(tmp_path):
+    """Local file of host B only (its run directory), store with A and B: the island runs
+    (B's ready is the newest record), A's ready -> lost interval is billed, each record once."""
     objects, a, b, local = _two_hosts(tmp_path)
     reducer = Reducer()
     load_all(reducer, [str(local)])
     store = fleet_store.store_readers(StoreTapes(objects, label="store"))
-    assert store.pump(reducer) == 0  # every store record is already folded from the local file
-    isl = reducer.islands["1"]
-    assert isl["fleet_state"] == "ready" and isl["lost_ts"] == 160.0 and isl["closed_s"] == pytest.approx(60.0)
-    assert reducer.duplicates == len(a) + len(b)
+    assert store.pump(reducer) == len(a)  # A's lines are new; B's are folded already
+    assert _lifecycle(reducer.islands["1"]) == RUNNING_AGAIN
+    assert reducer.duplicates == len(b)
+    assert sum(1 for e in reducer.events if e["type"] == "island_node_lost") == 1
     only_store = Reducer()
     assert fleet_store.store_readers(StoreTapes(objects, label="store")).pump(only_store) == len(a) + len(b)
-    o = only_store.islands["1"]
-    assert o["fleet_state"] == "ready" and o["ready_ts"] == 100.0 and o["open_ts"] == 400.0
+    assert _lifecycle(only_store.islands["1"]) == RUNNING_AGAIN
     assert {r["event"] for r in only_store.fleet_records} == {"island_ready", "island_lost"}
-    assert sum(1 for e in only_store.events if e["type"] == "island_node_lost") == 1
+
+
+def test_a_folder_stamp_two_hours_off_does_not_change_the_state(tmp_path):
+    """Host B's clock 2 h behind for its folder stamp: B's folder is read before A's; the
+    records' own times still decide (the newest record, B's ready, sets the state)."""
+    objects, a, b, local = _two_hosts(tmp_path, a_stamp="20261127T030000Z", b_stamp="20261127T010000Z")
+    reducer = Reducer()
+    assert fleet_store.store_readers(StoreTapes(objects, label="store")).pump(reducer) == len(a) + len(b)
+    assert _lifecycle(reducer.islands["1"]) == RUNNING_AGAIN
+
+
+@pytest.mark.parametrize("order", ["in-order", "reversed", "lost-first"])
+def test_the_lifecycle_does_not_depend_on_the_read_order(order):
+    rows = [{"event": "island_ready", "time_unix": 10.0, "island": ISLAND, "island_id": 1, "gpu": "B300"},
+            {"event": "island_lost", "time_unix": 20.0, "island": ISLAND, "island_id": 1},
+            {"event": "island_ready", "time_unix": 30.0, "island": ISLAND, "island_id": 1, "gpu": "H100"},
+            {"event": "island_stop", "time_unix": 50.0, "island": ISLAND, "island_id": 1, "reason": "teardown"}]
+    want = Reducer()
+    for r in rows:
+        want.feed(dict(r))
+    got = Reducer()
+    feed = {"in-order": rows, "reversed": rows[::-1], "lost-first": [rows[1], rows[3], rows[0], rows[2]]}[order]
+    for r in feed:
+        got.feed(dict(r))
+    assert _lifecycle(got.islands["1"]) == _lifecycle(want.islands["1"])
+    assert _lifecycle(want.islands["1"])["closed_s"] == pytest.approx(30.0)
+    assert got.islands["1"]["gpu"] == "H100"  # the newest record's shape
 
 
 def test_the_store_readers_report_both_readers(tmp_path):
@@ -327,3 +368,140 @@ def test_the_writer_and_the_copy_run_concurrently(tmp_path):
     assert log.close() is True
     data = b"".join((store / k).read_bytes() for k in _store_keys(store))
     assert data == log.path.read_bytes()
+
+
+# -- folders of one host ---------------------------------------------------------------------------
+
+def test_two_launchers_of_one_host_pid_and_second_get_two_folders():
+    from yeto.dashboard.store_tapes import launch_started
+
+    one = fleet_store.incarnation(host="h", pid=1, now=1795700000.0)
+    two = fleet_store.incarnation(host="h", pid=1, now=1795700000.0)
+    assert one != two and one.startswith("h-p1-") and two.startswith("h-p1-")
+    assert launch_started(one) == launch_started(two) == 1795700000.0  # the start still ends the name
+    assert fleet_store.incarnation(host="h", pid=1, now=1795700000.0, nonce="ab") == "h-p1-ab-20261126T133320Z"
+
+
+def test_a_quick_restart_s_chunks_are_read_after_the_first_launcher_s(tmp_path):
+    """A launcher restarted on the same host in the same second writes seq 0 again, under its
+    own folder: a dashboard that already consumed the first folder's chunks reads it (one
+    cursor per folder)."""
+    objects = DirectoryObjectStore(str(tmp_path / "store"))
+    first, second = (fleet_store.incarnation(host="h", pid=1, now=1795700000.0) for _ in range(2))
+    rows = [{"event": "island_ready", "time_unix": 10.0 + i, "island": ISLAND, "island_id": 1} for i in range(3)]
+    objects.write(f"fleet/log/l1/{first}/00000000.jsonl", _text(rows[:1]))
+    objects.write(f"fleet/log/l1/{first}/00000001.jsonl", _text(rows[1:2]))
+    reader = fleet_store.log_reader(objects)
+    reducer = Reducer()
+    assert reader.pump(reducer) == 2
+    objects.write(f"fleet/log/l1/{second}/00000000.jsonl", _text(rows[2:]))
+    assert reader.pump(reducer) == 1 and len(reader.cursors) == 2
+    assert reducer.islands["1"]["last_ready_ts"] == 12.0
+
+
+# -- a reused run directory ------------------------------------------------------------------------
+
+def test_the_copy_starts_where_this_run_s_lines_start(tmp_path):
+    path = tmp_path / "runs" / "r" / "fleet.jsonl"
+    assert fleet_store.copy_start(path, "s3://store/a") == 0  # a new run directory
+    path.write_bytes(_text(A_ROWS))
+    size = path.stat().st_size
+    assert fleet_store.copy_start(path, "s3://store/a", learner_id=1) == 0  # the same run again
+    assert fleet_store.read_copy_record(path)["learner_id"] == 1
+    assert fleet_store.copy_start(path, "s3://store/b") == size  # another run's store: from the end
+    path.write_bytes(_text(A_ROWS + B_ROWS))
+    assert fleet_store.copy_start(path, "s3://store/b") == size  # that run's start is kept
+    other = tmp_path / "old" / "fleet.jsonl"
+    other.parent.mkdir()
+    other.write_bytes(_text(A_ROWS))  # written before the copy record existed
+    assert fleet_store.copy_start(other, "s3://store/a") == other.stat().st_size
+
+
+def test_a_reused_run_directory_uploads_only_this_run_s_lines(tmp_path, monkeypatch):
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+    (tmp_path / "run-i1").mkdir()
+    old = _text([{"event": "island_ready", "time_unix": 1.0, "island": ISLAND, "island_id": 0}])
+    (tmp_path / "run-i1" / "fleet.jsonl").write_bytes(old)  # an earlier run of this name
+    store = tmp_path / "store"
+    args = _launch_args(tmp_path, role="island", learner=1)
+    args.rl_checkpoint_store = str(store)
+    log = manifest._dashboard_fleet_log(args, {ISLAND: SimpleNamespace()}, {ISLAND: ("job", None)},  # noqa: SLF001
+                                        objects=DirectoryObjectStore(str(store)))
+    log.event("island_ready", ISLAND)
+    assert log.close() is True
+    uploaded = b"".join((store / k).read_bytes() for k in _store_keys(store))
+    assert uploaded == log.path.read_bytes()[len(old):] and b'"time_unix": 1.0' not in uploaded
+
+
+# -- yeto down -------------------------------------------------------------------------------------
+
+def _down_run(tmp_path, monkeypatch, *, record=True, store_objects=None):
+    from yeto import cli
+
+    monkeypatch.setattr(cli.runs, "run_dir", lambda run: tmp_path / run)
+    path = tmp_path / "r" / "fleet.jsonl"
+    path.parent.mkdir()
+    path.write_bytes(_text(B_ROWS[:1]))  # the launcher was killed: the island is still open
+    store = tmp_path / "store"
+    if record:
+        fleet_store.copy_start(path, str(store), learner_id=1)
+    if store_objects is not None:
+        monkeypatch.setattr("yeto.launch.island_lifecycle.store_objects", lambda uri: store_objects)
+    return cli, path, store
+
+
+def test_yeto_down_copies_the_island_stop_lines_into_the_store(tmp_path, monkeypatch):
+    cli, path, store = _down_run(tmp_path, monkeypatch)
+    assert cli._close_fleet_islands("r") == [ISLAND]  # noqa: SLF001
+    keys = _store_keys(store)
+    assert len(keys) == 1 and keys[0].startswith("fleet/log/l1/")
+    (rec,) = [json.loads(line) for line in (store / keys[0]).read_text().splitlines()]
+    assert rec["event"] == "island_stop" and rec["island_id"] == 1
+
+
+def test_yeto_down_of_a_local_only_run_copies_nothing(tmp_path, monkeypatch, capsys):
+    cli, path, store = _down_run(tmp_path, monkeypatch, record=False)
+    assert cli._close_fleet_islands("r") == [ISLAND]  # noqa: SLF001
+    assert not store.exists() and "WARN" not in capsys.readouterr().err
+    assert fleet_store.upload_appended(path, 0) is True  # no copy record: nothing to copy, not a failure
+
+
+def test_yeto_down_with_a_failing_store_still_closes_the_islands(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(fleet_store, "FINAL_UPLOAD_S", 0.3)  # the bounded final upload, short here
+    cli, path, store = _down_run(tmp_path, monkeypatch, store_objects=FailingObjects())
+    assert cli._close_fleet_islands("r") == [ISLAND]  # noqa: SLF001
+    assert _records(path)[-1]["event"] == "island_stop"
+    assert "WARN" in capsys.readouterr().err
+
+
+# -- arguments and status --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad", [0, 0.0, -1.0])
+def test_an_explicit_interval_must_be_positive(tmp_path, bad):
+    with pytest.raises(ValueError, match="interval_s must be > 0"):
+        fleet_store.start_uploader(DirectoryObjectStore(str(tmp_path)), tmp_path / "f.jsonl", interval_s=bad)
+
+
+class _Status:
+    def __init__(self, **status):
+        self._status = {"label": "x", "sources": 1, "requests": 1, "errors": 0, "failing": 0, "last_error": None,
+                        "last_error_at": None, "last_ok_at": None, "polled": True, **status}
+        self.objects = object()
+
+    def status(self):
+        return dict(self._status)
+
+    def pump(self, reducer):
+        return 0
+
+
+def test_the_store_status_is_ok_since_the_oldest_clean_poll():
+    both = fleet_store.StoreReaders(_Status(last_ok_at=20.0), _Status(last_ok_at=10.0))
+    assert both.status()["last_ok_at"] == 10.0
+    one_never = fleet_store.StoreReaders(_Status(last_ok_at=20.0), _Status(last_ok_at=None))
+    assert one_never.status()["last_ok_at"] is None
+    failed = fleet_store.StoreReaders(_Status(last_error="old", last_error_at=1.0, errors=1),
+                                      _Status(last_error="new", last_error_at=5.0, errors=2, failing=1))
+    status = failed.status()
+    assert (status["last_error"], status["last_error_at"], status["errors"], status["failing"]) == ("new", 5.0, 3, 1)
+    assert fleet_store.StoreReaders(_Status(), _Status(polled=False)).status()["polled"] is False

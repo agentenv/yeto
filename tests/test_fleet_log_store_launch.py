@@ -93,3 +93,33 @@ def test_the_tape_uploader_default_keys_are_main_s(tmp_path):
     assert objects.keys == ["tapes/syncer/h-1/00000000.jsonl"]
     for fn in (tape_upload.trainer_uploader, tape_upload.syncer_uploaders):
         assert "prefix" not in inspect.getsource(fn)
+
+
+def test_the_store_copy_stops_when_the_fleet_controller_cannot_be_built(monkeypatch, tmp_path):
+    """The fleet log (and its store copy) is built before the controller; a controller that
+    raises in its constructor still gets the copy stopped by the launcher's teardown."""
+    from yeto.dashboard import fleet_store
+
+    stopped = []
+
+    class Uploader:
+        island = "fleet"
+
+        def stop(self, timeout_s=None):
+            stopped.append(timeout_s)
+            return True
+
+    monkeypatch.setattr(fleet_store, "start_uploader", lambda *a, **k: Uploader())
+    cluster = FakeCluster(NAMES)
+    monkeypatch.setattr("yeto.launch.ssh_resident.SshOps", lambda: cluster)
+    record, clock = [], _drive(monkeypatch)
+    _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
+
+    def broken(*a, **kw):
+        raise RuntimeError("controller init failed")
+
+    monkeypatch.setattr(launcher, "FleetController", broken)
+    args = _args(tmp_path, "--island-lifecycle", "on", "--rl-checkpoint-store", str(tmp_path / "run-store"))
+    with pytest.raises(RuntimeError, match="controller init failed"):
+        launcher.run(args)
+    assert stopped == [fleet_store.FINAL_UPLOAD_S]

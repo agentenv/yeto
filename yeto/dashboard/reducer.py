@@ -346,6 +346,10 @@ class Reducer:
         self.fleet_records: deque = deque(maxlen=FLEET_VIEW_MAX)  # the view shows the last ones
         self.spot: deque = deque(maxlen=SPOT_MAX)
         self.cost_ticks: deque = deque(maxlen=FLEET_VIEW_MAX)
+        # island -> its timed fleet.jsonl lifecycle records [(time, seq, event)], in time order:
+        # an older record that arrives later (another host's store copy) is replayed in place
+        self.fleet_lifecycle: dict[str, list[tuple[float, int, str]]] = {}
+        self.fleet_shape_ts: dict[str, dict[str, float]] = {}  # island -> shape field -> its record's time
         self.events: deque = deque(maxlen=MAX_EVENTS)
         self.event_seq = 0
         self.max_ts: float | None = None
@@ -1447,11 +1451,34 @@ class Reducer:
         if iid is None:
             return
         isl = self.island(iid)
-        for key in ("cloud", "region", "gpu", "gpus", "price_key", "cpus", "memory_gib"):
-            if r.get(key) is not None:
-                isl[key] = r[key]
-        if r.get("island") is not None:
-            isl["name"] = r["island"]
+        life = self.fleet_lifecycle.setdefault(iid, [])
+        older = ts is not None and bool(life) and ts < life[-1][0]
+        shape_ts = self.fleet_shape_ts.setdefault(iid, {})
+        for key, field in (*((k, k) for k in ("cloud", "region", "gpu", "gpus", "price_key", "cpus",
+                                                 "memory_gib")), ("name", "island")):
+            # each shape field: the newest record that names it (an older one arriving later does not)
+            if r.get(field) is not None and (ts is None or ts >= shape_ts.get(key, ts)):
+                isl[key] = r[field]
+                if ts is not None:
+                    shape_ts[key] = ts
+        if ts is not None:
+            bisect.insort(life, (ts, self.event_seq, event))
+            if older:  # folded in time order again: the newest record still decides the state
+                self._replay_fleet_lifecycle(isl, life)
+                return
+        self._fold_fleet_lifecycle(isl, event, ts)
+
+    def _replay_fleet_lifecycle(self, isl: dict, life: list[tuple[float, int, str]]) -> None:
+        """The island's lifecycle fields from its timed records alone, in time order (the
+        fold of :meth:`_fold_fleet_lifecycle`, from a new island's values)."""
+        fresh = _new_island(isl["id"])
+        for key in ("fleet_state", "ready_ts", "last_ready_ts", "stop_ts", "lost_ts", "open_ts", "closed_s"):
+            isl[key] = fresh[key]
+        for t, _seq, event in life:
+            self._fold_fleet_lifecycle(isl, event, t)
+
+    @staticmethod
+    def _fold_fleet_lifecycle(isl: dict, event: str, ts: float | None) -> None:
         isl["fleet_state"] = event[len("island_"):]
         # wall clock accrues over ready -> lost/stop intervals (relaunches re-open one)
         if event == "island_ready" and ts is not None:

@@ -8,13 +8,16 @@ fleet: ``island_lifecycle``) therefore also copies the file there, the way an is
 event tape goes (:class:`yeto.rl.engine.tape_upload.TapeUploader`): every ``interval_s``
 the complete lines added since the last upload become one new object
 
-    ``fleet/log/<lane>/<host>-p<pid>-<UTC start>/<seq>.jsonl``
+    ``fleet/log/<lane>/<host>-p<pid>-<nonce>-<UTC start>/<seq>.jsonl``
 
 ``lane`` is ``l<k>`` for an island launch of a fleet launched island by island (learner
 id ``k``) and ``fleet`` for a launch of the whole fleet; each launcher process adds its
-own folder, so two hosts (or two launches of one host) never write the same key. The
-copy starts at the beginning of the local file: a launcher restarted on the same host
-uploads the earlier records again, and the readers fold each record once.
+own folder (a random nonce: two launchers of one host never share one, even with the same
+pid in the same second), so no two write the same key. The copy covers this run's part of
+the local file (:func:`copy_start`: a run directory reused by another run starts at the
+file's end); a launcher restarted for the same run uploads its earlier lines again, and the
+readers fold each record once. ``yeto down`` copies the ``island_stop`` lines it appends
+(:func:`upload_appended`).
 
 Observation only: a failed upload is a WARN on stderr and is retried with the next
 chunk; it never reaches the launcher. A launch without island records in a store (one
@@ -31,9 +34,11 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import socket
 import sys
 import time
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 LOG_PREFIX = "fleet/log"  # chunk keys: <LOG_PREFIX>/<lane>/<incarnation>/<seq>.jsonl
@@ -49,13 +54,64 @@ def lane(learner_id: Any = None) -> str:
     return FLEET_LANE
 
 
-def incarnation(*, host: str | None = None, pid: int | None = None, now: float | None = None) -> str:
-    """This launcher's folder: host, pid and UTC start (the start ends the name, as the
-    trainer tape folders do, so readers order a lane's folders by start)."""
+def incarnation(*, host: str | None = None, pid: int | None = None, now: float | None = None,
+                nonce: str | None = None) -> str:
+    """This launcher's folder: host, pid, a random nonce and UTC start. The nonce keeps two
+    launchers of one host apart even with the same pid in the same second (containers); the
+    start ends the name, as the trainer tape folders do, so readers order a lane's folders
+    by start."""
     host = host if host is not None else socket.gethostname()
     pid = os.getpid() if pid is None else int(pid)
+    nonce = secrets.token_hex(4) if nonce is None else str(nonce)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() if now is None else now))
-    return f"{host}-p{pid}-{stamp}"
+    return f"{host}-p{pid}-{nonce}-{stamp}"
+
+
+# -- which part of the local file belongs to this store ---------------------------------------
+#
+# A run directory (``~/.yeto/runs/<name>/``) outlives its run: a new run of the same name
+# appends to the same ``fleet.jsonl``. ``fleet.store.json`` next to it records the store the
+# file is copied to and the byte offset the copy starts at. A launch for the same store goes
+# on from that offset (a restarted launcher of the run uploads its earlier lines again: the
+# readers fold each record once); a launch for another store, or a file without the record
+# (written before this copy existed), starts at the file's end, so an earlier run's lines
+# never reach this run's store (the rule of ``tape_upload.syncer_uploaders(from_end=True)``).
+
+COPY_RECORD = "fleet.store.json"
+COPY_SCHEMA = "yeto.fleet.log-copy/v1"
+
+
+def copy_record_path(path: str | os.PathLike) -> Path:
+    return Path(path).with_name(COPY_RECORD)
+
+
+def read_copy_record(path: str | os.PathLike) -> dict | None:
+    try:
+        doc = json.loads(copy_record_path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) and doc.get("schema") == COPY_SCHEMA and doc.get("store") else None
+
+
+def copy_start(path: str | os.PathLike, store: str, *, learner_id: Any = None) -> int:
+    """The byte offset of ``path`` this launch's copy into ``store`` starts at (see above),
+    recorded for the next launch and for ``yeto down``. Never raises (a record that cannot be
+    written: the offset still holds for this launch)."""
+    p = Path(path)
+    try:
+        size = p.stat().st_size
+    except OSError:
+        size = 0
+    known = read_copy_record(p)
+    start = min(int(known.get("start") or 0), size) if known and known.get("store") == str(store) else size
+    doc = {"schema": COPY_SCHEMA, "store": str(store), "start": start,
+           "learner_id": learner_id if lane(learner_id) != FLEET_LANE else None}
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        copy_record_path(p).write_text(json.dumps(doc, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError as exc:
+        _stderr(f"[launcher] WARN: fleet.jsonl store copy: {COPY_RECORD} not written ({type(exc).__name__})")
+    return start
 
 
 class _Warn:
@@ -77,21 +133,58 @@ def _stderr(message: str) -> None:
 
 
 def start_uploader(objects: Any, path: str | os.PathLike, *, learner_id: Any = None, environ: Any = None,
-                   log: Callable[[str], None] = _stderr, interval_s: float | None = None) -> Any:
-    """The started copy of ``path`` into ``objects`` (module doc), or None: the upload
-    interval is 0 (``YETO_RL_TAPE_UPLOAD_S``), or it could not start (a WARN). Never raises."""
+                   log: Callable[[str], None] = _stderr, interval_s: float | None = None, offset: int = 0) -> Any:
+    """The started copy of ``path`` from byte ``offset`` into ``objects`` (module doc), or
+    None: the upload interval is 0 (``YETO_RL_TAPE_UPLOAD_S``), or it could not start (a
+    WARN). An explicit ``interval_s`` must be positive (ValueError: a caller's bug); otherwise
+    never raises."""
+    if interval_s is not None and not interval_s > 0:
+        raise ValueError(f"fleet.jsonl store copy: interval_s must be > 0 (got {interval_s!r}); "
+                         "turn the copy off with YETO_RL_TAPE_UPLOAD_S=0")
     try:
         from yeto.rl.engine.tape_upload import TapeUploader, upload_interval_s  # noqa: PLC0415
 
         interval = upload_interval_s(None, environ) if interval_s is None else interval_s
-        if interval is None or interval <= 0:
+        if interval is None:
             return None
         uploader = TapeUploader(objects, path, island=lane(learner_id), incarnation=incarnation(), interval_s=interval,
                                 log=_Warn(log), prefix=LOG_PREFIX)
+        uploader.offset = max(0, int(offset))
         return uploader.start()
     except Exception as exc:  # noqa: BLE001 - telemetry never stops a launch
         log(f"[launcher] WARN: fleet.jsonl store copy not started ({type(exc).__name__}: {exc})"[:300])
         return None
+
+
+def upload_appended(path: str | os.PathLike, offset: int, *, objects: Any = None,
+                    timeout_s: float | None = None, log: Callable[[str], None] = _stderr) -> bool:
+    """``yeto down``: the lines appended to ``path`` from ``offset`` on (the ``island_stop``
+    of the islands a killed launcher left open) into the store its copy record names, in the
+    record's lane, as one more folder; bounded. Nothing without a copy record (a run whose
+    fleet.jsonl stays local) or without new lines. A failure is a WARN; never raises.
+    Returns True when the store has every new line (or there is nothing to copy)."""
+    try:
+        record = read_copy_record(path)
+        if record is None:
+            return True
+        size = Path(path).stat().st_size
+        if size <= offset:
+            return True
+        if objects is None:
+            from yeto.launch.island_lifecycle import store_objects  # noqa: PLC0415
+
+            objects = store_objects(record["store"])
+        if objects is None:
+            return True
+        from yeto.rl.engine.tape_upload import TapeUploader  # noqa: PLC0415
+
+        uploader = TapeUploader(objects, path, island=lane(record.get("learner_id")), incarnation=incarnation(),
+                                interval_s=FINAL_UPLOAD_S, log=_Warn(log), prefix=LOG_PREFIX)
+        uploader.offset = int(offset)
+        return bool(uploader.stop(FINAL_UPLOAD_S if timeout_s is None else timeout_s))
+    except Exception as exc:  # noqa: BLE001 - telemetry never fails a down
+        log(f"[yeto] WARN: fleet.jsonl store copy: island_stop lines not copied ({type(exc).__name__}: {exc})"[:300])
+        return False
 
 
 def stop_uploader(uploader: Any, timeout_s: float = FINAL_UPLOAD_S) -> bool:
@@ -214,7 +307,6 @@ def read_store(objects: Any) -> list[list[dict]]:
 def main(argv: Any = None) -> int:
     """``merge --store URI [--fleet-log PATH]... [--out PATH]``: one ``fleet.jsonl``."""
     import argparse  # noqa: PLC0415
-    from pathlib import Path  # noqa: PLC0415
 
     parser = argparse.ArgumentParser(prog="python -m yeto.dashboard.fleet_store")
     sub = parser.add_subparsers(dest="cmd", required=True)
