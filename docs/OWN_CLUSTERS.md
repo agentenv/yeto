@@ -509,10 +509,11 @@ syncer listens on its own ports, 29400 and up). With it:
 - **One service at a time.** The service holds a lease in the run store
   (`fleet/syncer_service/lock`, 570 s, renewed with each heartbeat). A second service, on this
   host or another, refuses to start (exit 2) while that lease runs. A service restarted on the
-  same host takes its own lease back at once. The lease's token is the service's generation. A
-  service that cannot renew its lease stops its syncer and exits 1 (restarted) once its lease
-  had at most 374 s left before a renewal that failed (see "How the units restart"); another
-  host's service may take the lease once it ends.
+  same host takes its own lease back at once (the same holder name). The lease's token is the
+  service's generation. A service that cannot renew its lease stops its syncer and exits 1
+  (restarted) once its lease had at most 374 s left before a renewal that failed (see "How the
+  units restart"). A service on another host takes the lease only once it ended: up to 570 s
+  after the old service's last renewal.
 - **Its state.** The syncer's checkpoint and tape (`~/yeto-output/`) are under the unit's working
   directory (`HOME=<workdir>/home` for the syncer), and every run has its own working directory.
   A checkpoint there while the run store's syncer record is missing or names another run is
@@ -520,12 +521,16 @@ syncer listens on its own ports, 29400 and up). With it:
 - **Its records.** The service writes the syncer's record (`fleet/island_syncer.json`, with its
   generation) and a heartbeat every 30 s (`fleet/island_syncer_service.json`). The heartbeat says
   `starting` until the record is written, then `running`, and at the end `finished`, `failed` or
-  `stopped`. On a directory run store the record is written under the lock of the store's
-  conditional write, so the syncer launch's rewrite of it never overwrites a newer one. On S3 the
-  rewrite uses `If-Match`; the first one probes once whether the endpoint applies it, with a
-  probe object at the bucket's root (`.yeto/replace-if-probe/<uuid>`, outside every run's
-  prefix). The probe deletes it; a delete that fails leaves it behind, a few bytes that are safe
-  to remove.
+  `stopped`. The service writes the record conditionally: never once it is fenced, and only
+  over a record whose generation is not newer than its own (S3: `If-Match` on the record read;
+  a directory store: under the lock of its conditional write; a missing record: an exclusive
+  create), so a service whose lock another took never writes back over the new one's. The
+  syncer launch's rewrite of the record is conditional the same way. On S3 the first such write
+  probes once whether the endpoint applies `If-Match`, with a probe object under the store's
+  prefix (`<prefix>/.yeto/replace-if-probe/<uuid>`). The probe deletes it; a delete that fails
+  leaves it behind, a few bytes that are safe to remove. A probe the store key may not write
+  (403) means no conditional write: a warning, and the record is read again right before a plain
+  write.
 - **Its term** (`syncer_epoch`): the fleet's last record's when that record is this host's
   service's (a restart goes on at the same term), one more when another host wrote it (a syncer
   that starts over elsewhere fences the islands of the old one).
@@ -647,12 +652,17 @@ call), and each of its calls is cut off after 34 s whatever the store does. A se
 renewal fails fences itself (exit 1) when its lease had at most 374 s left before that
 renewal: the lock's margin (57 s), a beat, a poll of the service (15 s), the syncer's stop
 (its checkpoint written, up to 170 s) and three heartbeat calls that hang until they are cut
-off. At the fence the heartbeat thread stops the syncer itself (SIGTERM, SIGKILL after the
-grace), whatever the service's main thread waits for, and the syncer is never started again
-by that service. From the syncer's start on, the main thread's store calls (its records, its
-reads of the fleet's STOP) go through the heartbeat's client and are cut off after 34 s too. A
-store that hangs therefore never keeps a syncer running past the lease. Before the fence the
-lease leaves room for two heartbeat rounds that fail as slowly as they can.
+off. At the fence the heartbeat thread stops the syncer itself (its process group: SIGTERM,
+SIGKILL after the grace), at once: it waits neither for the main thread nor for a restart of
+the syncer in progress. A restart checks the fence before and after it starts a process, and
+stops one it started after the fence, so the service never starts a syncer again. A heartbeat
+thread that fails fences the service too, and the main thread fences it when it finds the
+lease left within the lock's margin (a heartbeat thread that is gone). From the syncer's start
+on, the main thread's store calls (its records, its reads of the fleet's STOP) go through the
+heartbeat's client and are cut off after 34 s too. Tests with the budget scaled down (stores
+that hang 15 to 585 s per call, a fence during a restart) show the syncer stopped before the
+lease ends every time. Before the fence the lease leaves room for two heartbeat rounds that
+fail as slowly as they can.
 
 At its end the service waits for the heartbeat's call in flight (up to 34 s, twice). With none
 left it writes its final heartbeat, then releases the lease. With one still in flight it does
@@ -661,20 +671,26 @@ and writes the final heartbeat only after that call, so a late `running` never c
 
 ### The ended marker
 
-A service that ended its run (the exits with an ended marker above) writes a marker to the run
-store (`fleet/onsite/<role>.ended`), then to its state directory
-(`<workdir>/rl-up/<run>/onsite-<role>.ended`): the exit code, the reason and the time. A write
-that fails is logged and the service still exits with its own code. Each start reads it
+A service that ended its run (the exits with an ended marker above) writes a marker to its
+state directory (`<workdir>/rl-up/<run>/onsite-<role>.ended`), then to the run store
+(`fleet/onsite/<role>.ended`, with a client of the heartbeat's short timeouts, cut off after
+34 s): the exit code, the reason and the time. A write that fails is logged and the service
+still exits with its own code. Each start reads it
 first, on this host and in the run store. While it exists, the service exits 0 at once and
 starts nothing. A reboot of the host, or the unit started on another host, never orders the
 run again after a breaker trip or a strict failure. A run store that does not answer (it may
 come up after the host at a boot) is asked again in the process for as long as it does not,
 backing off from 5 s to 60 s, with one log line per try; nothing is started meanwhile, and the
-service does not exit for it. A host without the run store's credentials is not a store that
-does not answer: missing store keys, or an AWS profile that is not configured on the host, are
-checked before the read (from the environment and the local AWS files, no request), and a
-client that finds no credential at the read is refused too. Both are a configuration error
-(exit 10). A refusal, a crash and a stop of the unit leave no marker.
+service does not exit for it. Two cases are refused before the read as a configuration error
+(exit 10), decided from the environment and the local AWS files only, with no request: the
+store's named profile (`YETO_RL_STORE_S3_PROFILE`) is not configured on the host, or the host
+has no credential source at all. A source here is the store's key pair, the `AWS_*` keys, a
+profile's keys, `credential_process`, a role or SSO in the AWS config, a container credential
+endpoint, a web identity token, or the instance metadata (unless `AWS_EC2_METADATA_DISABLED`).
+Anything else is left to the read. There a partial key or a missing profile is exit 10. A
+client that finds no credential while a dynamic source exists (the container endpoint, the web
+identity, the instance metadata, which may come up later) is asked again like a store that
+does not answer, with a new client each time. A refusal, a crash and a stop of the unit leave no marker.
 
 To start the run again, remove the marker:
 
@@ -714,7 +730,12 @@ removes the fleet's STOP from the run store. Then start the unit (`systemctl sta
   them. To end the run, stop it as above first.
 - **The syncer unit** (`KillMode=control-group`): `systemctl stop` sends the syncer SIGTERM; it
   writes its checkpoint and is killed only after 170 s (`TimeoutStopSec=180`). The next start
-  resumes from the checkpoint.
+  resumes from the checkpoint. The service's own end can take longer than `TimeoutStopSec`
+  when the store hangs: the syncer's stop (up to 170 s, plus 5 s for SIGKILL), then up to about
+  100 s waiting for the heartbeat's calls (about 277 s in all). systemd then SIGKILLs the
+  service. The syncer is already stopped by then, but the lease is not released: it runs out
+  570 s after the last renewal. A restart on the same host takes it back at once; another
+  host's service waits for it.
 
 ### Limits
 
