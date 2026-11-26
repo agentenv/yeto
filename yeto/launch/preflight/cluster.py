@@ -1012,8 +1012,8 @@ def container_checks(state: NodeState, req: Requirements, *, multi: bool) -> lis
 
 # ------------------------------------------------------------- the executor
 NO_IMAGE = "no trainer image resolved"
-NO_IMAGE_FIX = ("pass --image (yeto run up passes the trainer's --rl-image) or name the image in the "
-                "inventory (image: / images:)")
+NO_IMAGE_FIX = ("pass --image with the trainer image (yeto run up passes the image the trainer's launch "
+                "resolves); an inventory image: / images: stands in for it only when it names that same image")
 
 
 def container_job(node: Node, *, image: str | None, inner: str, env: Mapping[str, str], tag: str,
