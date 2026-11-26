@@ -222,8 +222,8 @@ def join_check(cfg: dict[str, Any], doc: dict[str, Any], member: dict[str, Any],
     from yeto.launch import island_join  # noqa: PLC0415
 
     fleet_argv = [str(a) for a in cfg["fleet"]["trainer_argv"]]
-    result = island_join.check_member(member, doc, fleet_argv=fleet_argv, run_id=il.fleet_prefix(fleet_argv),
-                                      ssh=ssh)
+    # a node leased by the island's own launch (its member prefix) is its own
+    result = island_join.check_member(member, doc, fleet_argv=fleet_argv, run_id=str(member["prefix"]), ssh=ssh)
     if not result.ok:
         raise IslandChangeError(f"island {member['name']}'s nodes cannot join: " + "; ".join(result.refusals))
     print(f"fleet island: island {member['name']}'s nodes pass the join checks (health, fabric group, lease)")

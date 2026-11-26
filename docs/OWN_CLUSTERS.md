@@ -1126,9 +1126,9 @@ written, and in the dry run too, the command checks the inventory's trainer node
 |---|---|
 | Count | The inventory does not list as many trainer nodes as `--gpu` says. |
 | In this fleet | A node (by name or SSH target) is a trainer node of another `ssh:` island of the fleet. |
-| Health | The node health check (one SSH call per node) finds a fault: GPU count or memory, an Xid, uncorrectable ECC, Fabric Manager. A multi-node island also needs the `NCCL_IB_HCA` ports active and at rate. A node that does not answer is refused. A device family without a health check is noted, not refused. |
+| Health | The node health check (one SSH call per node, the check the island's launch runs while it trains) finds a fault: GPU count or memory, an Xid, uncorrectable ECC, Fabric Manager. A multi-node island also needs the `NCCL_IB_HCA` ports active and at rate. A node that does not answer is refused. A device family without a health check, or a node with `node_health: off`, is noted, not refused. |
 | Fabric group | The inventory declares `fabric_group` and no one group holds the island's nodes. An inventory without any `fabric_group` only gets a note. |
-| Lease | The inventory's `lease_store` shows a node leased to another run. Without `lease_store` this is not checked, and a note says so. |
+| Lease | The inventory's `lease_store` shows a node leased to another run, or to another island of this fleet. A lease of the island's own launch (an earlier launch of the same island) is not a refusal. Without `lease_store` this is not checked, and a note says so. |
 
 A refusal exits 2, names every problem, and writes nothing. No learner id is claimed:
 

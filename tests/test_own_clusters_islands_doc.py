@@ -12,6 +12,7 @@ from pathlib import Path
 
 from test_fleet_island_changes import fleet_store  # noqa: F401 - fixture
 from test_island_join import Leases, Ssh, _inventory, stand_ins  # noqa: F401 - fixture
+
 from yeto.launch import island_join as ij
 from yeto.launch import island_straggler as st
 from yeto.rl import fleet_islands
