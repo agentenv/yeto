@@ -386,13 +386,15 @@ class _Fsdp2Harness:
 
 
 def _train_rounds(learner_id, plan, results, *, stop_after=None, pace_s=0.05, max_rounds=4000,
-                  harness=_Fsdp2Harness, in_pool=None, hold=None):
+                  harness=_Fsdp2Harness, in_pool=None, hold=None, trace=None):
     """One verl island process: train and sync until the final cut, or die
     (close its links, no LEAVE) after ``stop_after`` rounds. ``pace_s`` per
     local round: quorum 1 lets an island run far ahead of the syncer's steps.
     ``in_pool`` (an Event) is set once this process joined and cleared when it
     dies; ``hold()``, before each local round, may block until another island's
-    process is in the pool (events, never a wall-clock guess)."""
+    process is in the pool (events, never a wall-clock guess). ``trace(kind,
+    learner, round)`` logs each round's ``start`` and, once trained (before its
+    boundary pushes), ``trained``."""
     trainer = harness()
     island = trainer.island
     sync, _policy_state, stream = vfs.build_full_parameter_sync(island, plan, backend_identity_sha256="c" * 64)
@@ -415,7 +417,11 @@ def _train_rounds(learner_id, plan, results, *, stop_after=None, pace_s=0.05, ma
                 return
             if hold is not None:
                 hold()
+            if trace is not None:
+                trace("start", learner_id, round_id)
             trainer.train(learner_id, round_id)
+            if trace is not None:
+                trace("trained", learner_id, round_id)
             ids = (f"l{learner_id}-p{id(record)}-r{round_id}",)
             batch_hash = hashlib.sha256(ids[0].encode()).hexdigest()
             policy_hash = state.policy_tensor_hash()
@@ -450,7 +456,7 @@ def test_a_restarted_verl_island_catches_up_from_the_running_pool_and_finishes(s
 
 
 def run_catch_up_case(syncer_binary, tmp_path, monkeypatch, *, harness=_Fsdp2Harness, layout=None,
-                      plan_fn=None):
+                      plan_fn=None):  # returns the islands' records
     """Island 1 dies after 3 rounds and a new process of it joins the running
     pool (catch-up, no peer recovery) and finishes with island 0. ``harness``,
     ``layout`` and ``plan_fn`` give the island's trainer, its layout
@@ -565,19 +571,86 @@ def run_catch_up_case(syncer_binary, tmp_path, monkeypatch, *, harness=_Fsdp2Har
     assert pushed == [1] and closed["arrived"] == 1 and 0 in closed["absent"], (step, closed)
     assert all(base < closed["base_version"] and carried.get((learner, step), step) < step
                for learner, base in older), (step, closed, carried)
+    return results
 
 
-@needs_cargo
-def test_the_lead_cap_holds_a_fast_verl_island_to_the_slow_one(syncer_binary, tmp_path, monkeypatch):
-    """K = 1 with a fixed roster (quorum 2): the fast island waits at its
-    boundaries for the slow island's pushes; the cap fields reach its events."""
+def _held(drain, delay, *, in_order=False):
+    """``drain`` handing out each PULL or broadcast only ``delay(item)`` s after it
+    arrived; ``in_order`` also holds every later item behind a held one."""
+    pending: list = []
+    lock = threading.Lock()
+
+    def drained():
+        with lock:
+            pending.extend(drain())
+            now = time.monotonic()
+            if in_order:
+                out = []
+                while pending and now >= pending[0].received_at + delay(pending[0]):
+                    out.append(pending.pop(0))
+                return out
+            out = [item for item in pending if now >= item.received_at + delay(item)]
+            pending[:] = [item for item in pending if now < item.received_at + delay(item)]
+            return out
+    return drained
+
+
+def _inject(monkeypatch, injection):
+    """Delivery the lead cap must not depend on: the slow island's broadcasts
+    60 ms late; every other PULL 50 ms late, in order; PULL pairs crossed (island
+    0 gets each window's second step first, island 1 its first)."""
+    from yeto.rl.engine import full_parameter_stream as engine_stream
+
+    real_client = engine_stream.SyncerClient
+
+    def client_factory(*args, **kwargs):
+        client = real_client(*args, **kwargs)
+        learner = int(args[1])
+        if injection == "late-broadcasts" and learner == 1:
+            client.drain_updates = _held(client.drain_updates, lambda update: 0.06)
+        elif injection == "late-pulls":
+            client.drain_pulls = _held(client.drain_pulls, lambda permit: 0.05 * (permit.global_step % 2 == 0),
+                                       in_order=True)
+        elif injection == "crossed-pulls":
+            client.drain_pulls = _held(client.drain_pulls,
+                                       lambda permit: 0.08 * (permit.global_step % 2 == (learner + 1) % 2))
+        return client
+
+    if injection != "none":
+        monkeypatch.setattr(engine_stream, "SyncerClient", client_factory)
+
+
+def _lead(trace, fast=0, slow=1) -> int:
+    """Largest (rounds the fast island started) - (rounds the slow island trained)
+    at a start of the fast island. ``trained`` is logged before that round's
+    boundary pushes, so before any merge the push is part of."""
+    trained = {fast: 0, slow: 0}
+    lead = 0
+    for kind, learner, round_id in trace:
+        if kind == "trained":
+            trained[learner] = max(trained[learner], round_id + 1)
+        elif kind == "start" and learner == fast:
+            lead = max(lead, round_id + 1 - trained[slow])
+    return lead
+
+
+def run_lead_cap_case(syncer_binary, tmp_path, monkeypatch, *, injection="none", quorum=2, rounds=4):
+    """A fast (unpaced) and a slow island with K = 1; returns their records and the trace."""
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "verl-parity-lead-cap-key")
     monkeypatch.setenv("TOKIO_WORKER_THREADS", "4")
-    rounds, fragments = 4, len(_layout(matrix_merge="rda").fragments.fragments)
+    _inject(monkeypatch, injection)
+    fragments = len(_layout(matrix_merge="rda").fragments.fragments)
     process, port, profile = _start_syncer(syncer_binary, tmp_path, fragments=fragments, rounds=rounds, extra=(
         "--rl-sync-full-parameter-rounds", "async", "--rl-sync-final-cut", "download",
-        "--rl-sync-quorum", "2", "--rl-sync-max-local-rounds-ahead", "1"))
+        "--rl-sync-quorum", str(quorum), "--rl-sync-max-local-rounds-ahead", "1"))
     results: dict = {}
+    lock = threading.Lock()
+    trace: list = []
+
+    def log(kind, learner, round_id):
+        with lock:
+            trace.append((kind, learner, round_id))
+
     try:
         plans = []
         for i in range(2):
@@ -585,31 +658,77 @@ def test_the_lead_cap_holds_a_fast_verl_island_to_the_slow_one(syncer_binary, tm
                          matrix_merge="rda", pipeline=2, final_cut="download")
             plan[vfs.PLAN_KEY]["max_local_rounds_ahead"] = 1
             plans.append(plan)
-        threads = [threading.Thread(target=_train_rounds, args=(0, plans[0], results), kwargs={"pace_s": 0.0}),
-                   threading.Thread(target=_train_rounds, args=(1, plans[1], results), kwargs={"pace_s": 0.3})]
+        threads = [threading.Thread(target=_train_rounds, args=(0, plans[0], results),
+                                    kwargs={"pace_s": 0.0, "trace": log}),
+                   threading.Thread(target=_train_rounds, args=(1, plans[1], results),
+                                    kwargs={"pace_s": 0.3, "trace": log})]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join(timeout=180)
+        assert not any(thread.is_alive() for thread in threads), "islands did not finish"
         assert process.wait(timeout=30) == 0
     finally:
         if process.poll() is None:
             process.terminate()
-        log = process.communicate(timeout=10)[0]
+        log_text = process.communicate(timeout=10)[0]
     fast, slow = results[0][0], results[1][0]
-    assert "error" not in fast and "error" not in slow, (fast.get("error"), slow.get("error"), log[-2000:])
-    fast_rounds = [f for e, f in fast["events"] if e == "rl_full_parameter_round"]
-    slow_rounds = [f for e, f in slow["events"] if e == "rl_full_parameter_round"]
+    assert "error" not in fast and "error" not in slow, (fast.get("error"), slow.get("error"), log_text[-2000:])
+    assert fast["final_ack"] == slow["final_ack"] == [{"acknowledged": True}]
+    return fast, slow, trace
+
+
+def _rounds(record):
+    return [f for e, f in record["events"] if e == "rl_full_parameter_round"]
+
+
+@needs_cargo
+@pytest.mark.parametrize("injection", ["none", "late-broadcasts", "late-pulls", "crossed-pulls"])
+def test_the_lead_cap_holds_a_fast_verl_island_to_the_slow_one(syncer_binary, tmp_path, monkeypatch, injection):
+    """K = 1 with a fixed roster (quorum 2): the fast island waits at its
+    boundaries for the slow island's pushes; the cap fields reach its events.
+    The bound holds whatever order and delay PULLs and broadcasts arrive with."""
+    fast, slow, trace = run_lead_cap_case(syncer_binary, tmp_path, monkeypatch, injection=injection)
+    fast_rounds, slow_rounds = _rounds(fast), _rounds(slow)
     assert all(f["sync/max_local_rounds_ahead"] == 1 for f in fast_rounds)
     assert fast_rounds[-1]["sync/lead_waits"] > 0, fast_rounds[-1]
-    assert fast_rounds[-1]["sync/lead_wait_escapes"] == 0, fast_rounds[-1]  # no wait gave up and trained on
-    # Without the cap the unpaced island would run hundreds of local rounds meanwhile.
-    # This bound once failed on a loaded host (11 rounds against 8): the slow island's
-    # lead wait pushed each PULL arriving during the wait from the cut it had already
-    # pushed and so held itself at its boundary while the fast island trained a round
-    # per merge. A K = 1 wait no longer pushes from that cut (RolePairing.wait_for_lead).
-    assert len(fast_rounds) <= len(slow_rounds) + 2, (len(fast_rounds), len(slow_rounds))
-    assert fast["final_ack"] == slow["final_ack"] == [{"acknowledged": True}]
+    for record in (fast, slow):  # no wait gave up and trained on: no island held a step the other waited for
+        assert _rounds(record)[-1]["sync/lead_wait_escapes"] == 0, _rounds(record)[-1]
+    # Each local round pushes one window of P steps and the next starts once it
+    # merged: the fast island starts round b + 1 only after the slow island
+    # trained b rounds. (Without the cap the unpaced island would run hundreds of
+    # local rounds meanwhile.)
+    assert _lead(trace) <= 1, trace
+    assert len(fast_rounds) <= len(slow_rounds) + 1, (len(fast_rounds), len(slow_rounds))
+
+
+@needs_cargo
+def test_with_a_quorum_below_the_islands_the_lead_cap_neither_locks_nor_gives_up(syncer_binary, tmp_path,
+                                                                                    monkeypatch):
+    """Quorum 1 closes a step with its first push, so a window closes without the
+    slow island: K = 1 then bounds no lead, but no island waits for a step it is
+    not needed for (no escape) and both reach the final cut."""
+    fast, slow, _ = run_lead_cap_case(syncer_binary, tmp_path, monkeypatch, quorum=1)
+    for record in (fast, slow):
+        assert _rounds(record)[-1]["sync/lead_wait_escapes"] == 0, _rounds(record)[-1]
+
+
+def _capped_pool_plan(learner_id, port, profile, *, rounds, fragments):
+    plan = _pool_plan(learner_id, port, profile, rounds=rounds, fragments=fragments)
+    plan[vfs.PLAN_KEY]["max_local_rounds_ahead"] = 1
+    return plan
+
+
+@needs_cargo
+def test_the_lead_cap_lets_an_island_leave_and_a_new_process_of_it_catch_up(syncer_binary, tmp_path, monkeypatch):
+    """K = 1 in a pool: island 1 dies (its open steps close on island 0), a new
+    process of it joins the running pool, takes the window of the first step its
+    caught-up fragments leave open, and both finish without a wait giving up."""
+    results = run_catch_up_case(syncer_binary, tmp_path, monkeypatch, plan_fn=_capped_pool_plan)
+    for record in (results[0][0], results[1][1]):
+        rounds = _rounds(record)
+        assert rounds and all(f["sync/max_local_rounds_ahead"] == 1 for f in rounds)
+        assert rounds[-1]["sync/lead_wait_escapes"] == 0, rounds[-1]
 
 
 # ----------------------------------------------------------------------------- syncer-only options

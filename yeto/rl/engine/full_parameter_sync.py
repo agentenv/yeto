@@ -175,7 +175,8 @@ class FullParameterSyncProfile:
     partial_quorum: bool = False
     # Lead cap K (streaming only; None = off, the old behaviour): an
     # island trains at most K - 1 local rounds on top of an unmerged push of
-    # its own; K = 1 starts no round while one is unmerged (RolePairing.wait_for_lead).
+    # its own; K = 1 pushes one window of P global steps per local round and
+    # starts the next round once the window merged (RolePairing.lead_window).
     max_local_rounds_ahead: int | None = None
 
     def __post_init__(self) -> None:
@@ -315,9 +316,10 @@ class RolePairing:
         self.lead_waits = 0
         self.lead_wait_seconds = 0.0
         self.lead_wait_escapes = 0
-        # Set while a lead wait polls and must not open a pair that would hold
-        # the wait itself (:meth:`_wait_opens_no_blocker`).
-        self._no_new_pairs = False
+        # Lead cap K = 1: the global steps this island pushes from its current
+        # cut (:meth:`lead_window`), and the local round it was taken at.
+        self._lead_window: tuple[int, int] = (1, 0)
+        self._lead_window_round: int | None = None
         # Background pushes, decided at the first submit (a role
         # knows whether it can encode ahead once it is initialized); None
         # keeps every push on this thread.
@@ -446,8 +448,8 @@ class RolePairing:
                     # push is harvested, and is no replay.
                     continue
                 self._push_once(pair, observed, produced)
-            capacity = self._new_pair_capacity()
-            shared = sorted(set.intersection(*(set(keys) for keys in by_role.values())))
+            capacity = self.profile.effective_pipeline_depth - len(self.inflight)
+            shared = self._in_lead_window(sorted(set.intersection(*(set(keys) for keys in by_role.values()))))
             if self.profile.partial_quorum:
                 # A round whose broadcast is staged or applied closed without
                 # this island: pushing would only upload a refused delta.
@@ -472,12 +474,6 @@ class RolePairing:
             self.fail_stop(error)
             raise
         return {role: RoleProgress(submissions=tuple(values)) for role, values in produced.items()}
-
-    def _new_pair_capacity(self) -> int:
-        """Pipeline slots for new pairs: none while a lead wait holds them."""
-        if self._no_new_pairs:
-            return 0
-        return self.profile.effective_pipeline_depth - len(self.inflight)
 
     def _replay_permits(
         self, by_role: Mapping[str, Mapping[LogicalKey, Any]]
@@ -511,8 +507,9 @@ class RolePairing:
                 role: _candidate_map(stream.ready_submission_candidates(include_deferred=True), role=role)
                 for role, stream in self.streams.items()
             }
-            capacity = self._new_pair_capacity()
-            shared = sorted(set.intersection(*(set(keys) for keys in by_role.values())) - set(self.inflight))
+            capacity = self.profile.effective_pipeline_depth - len(self.inflight)
+            shared = self._in_lead_window(
+                sorted(set.intersection(*(set(keys) for keys in by_role.values())) - set(self.inflight)))
             if self.profile.partial_quorum:
                 shared = [key for key in shared if not self._round_closed(key[1], key[0])]
             fragment_ids = [key[1] for key in shared[: max(0, capacity)]]
@@ -933,17 +930,15 @@ class RolePairing:
     # -- local-round lead cap -----------------------------------------
 
     def lead_blockers(self) -> list[PairedSubmission]:
-        """In-flight pairs that stop the next local round under the lead cap K.
+        """In-flight pairs that stop the next local round under the lead cap K >= 2.
 
         At a boundary after local round ``r`` the next round is ``r + 1``.  A
         pair retained at local round ``p`` (its cut is round ``p``) blocks when
         ``p <= r + 1 - K``: training round ``r + 1`` would put ``K`` or more
-        rounds on top of that unmerged push.  With a fixed roster a merge needs
-        every island's push, so with K = 1 an island starts a round only after
-        every island pushed everything it pushed: it stays at most one local
-        round ahead of the slowest island.  A larger K allows K - 1 rounds on
-        top of an unmerged push; that bounds the island's c_steps per push,
-        not its absolute lead (pushes made one boundary late can repeat)."""
+        rounds on top of that unmerged push.  K - 1 rounds on top of an
+        unmerged push bound the island's c_steps per push, not its absolute
+        lead (pushes made one boundary late can repeat).  K = 1 waits for its
+        step window instead (:meth:`lead_window`)."""
 
         limit = self.profile.max_local_rounds_ahead
         if limit is None:
@@ -951,7 +946,7 @@ class RolePairing:
         return [pair for pair in self.inflight.values() if pair.local_round <= self.local_round + 1 - limit]
 
     def lead_unpushed(self) -> bool:
-        """Lead cap K: the island trained K rounds since it last retained a pair.
+        """Lead cap K >= 2: the island trained K rounds since it last retained a pair.
 
         Between a merge and the syncer's next PULL the island has no pair in
         flight, so :meth:`lead_blockers` is empty, yet every round it trains
@@ -962,55 +957,127 @@ class RolePairing:
         limit = self.profile.max_local_rounds_ahead
         return limit is not None and self.retained_round <= self.local_round - limit
 
-    def _wait_opens_no_blocker(self) -> bool:
-        """Whether a lead wait poll must open no new pair.
+    def _step_window_rule(self) -> bool:
+        return self.profile.max_local_rounds_ahead == 1
 
-        A pair opened now is retained at :attr:`local_round`; it blocks this
-        wait when ``local_round <= local_round + 1 - K``, i.e. for K = 1.  Such a
-        pair is opened only for the push the wait waits for
-        (:meth:`lead_unpushed`).  Otherwise each PULL that arrives while the
-        wait's own pushes merge would add a push from the same, already pushed
-        cut and hold the wait one more merge: a slow island, whose pushes
-        complete the merges a fast island already pushed to, then sits at
-        its boundary while the fast island trains a round per merge, and the
-        fast island's lead grows without a bound.  The held PULLs are answered
-        at the next boundary, from the newer cut."""
+    def _step_closed(self, step: int) -> bool:
+        """Global step ``step`` merged (applied or staged), with or without this island."""
+        return self._round_closed((step - 1) % self.profile.fragments, step)
 
-        limit = self.profile.max_local_rounds_ahead
-        return limit is not None and self.local_round <= self.local_round + 1 - limit and not self.lead_unpushed()
+    def _first_open_step(self) -> int:
+        """The smallest global step not closed yet (``total + 1`` when none is open).
+
+        Step ``t`` merges fragment ``(t - 1) mod F`` (also on a sharded head, whose
+        shards run this schedule restricted to their fragments), and a fragment's
+        version is the step that last merged it, so each fragment's next step
+        follows from its version; staged broadcasts close later steps too."""
+
+        total, fragments = self.profile.total_fragment_steps, self.profile.fragments
+        first = total + 1
+        for fragment_id in range(fragments):
+            version = min(stream.fragment_versions[fragment_id] for stream in self.streams.values())
+            step = version + fragments if version > 0 else fragment_id + 1
+            while step <= total and self._round_closed(fragment_id, step):
+                step += fragments
+            first = min(first, step)
+        return first
+
+    def lead_window(self) -> tuple[int, int] | None:
+        """Lead cap K = 1: the global steps ``(first, last)`` this island answers
+        from its current cut; None when the rule is off (no cap, or K >= 2).
+
+        The steps ``1..total`` are cut into fixed windows of P (the pipeline
+        depth) consecutive steps.  At each local round the island takes the
+        window of the smallest step not closed yet and keeps it for the round:
+        it pushes every PULL of that window from this cut (at the boundary and
+        while it waits, so a PULL that arrives late or out of order is still
+        answered from this cut), holds every other PULL until a later boundary,
+        and trains the next round only once every step of the window closed.
+
+        With a fixed roster every step needs every island's push, so every
+        island pushes window ``b`` from its own ``b``-th cut: when an island
+        starts round ``b + 1``, every other island has pushed from cut ``b``,
+        i.e. trained at least ``b`` rounds.  A fast island is at most one local
+        round ahead of the slowest, whatever order or delay PULLs and
+        broadcasts arrive with, and no wait can hold another island's step
+        (each island answers the same window).
+
+        When a step can close without this island (a quorum below the number
+        of islands, a soft deadline, an island that left), the window closes
+        without it and the island moves on to the window of the smallest open
+        step: no wait blocks on an island that is not needed, but an island
+        that missed a window no longer pushes window ``b`` from cut ``b``, so
+        the cap bounds no lead across islands then.  A joining or relaunched
+        process takes the window of the smallest step its caught-up fragments
+        leave open.  The last window ends at the last step; the terminal phase
+        ends any wait (``any_finalizing``) and lifts the window, so the final
+        cut answers every PULL left.
+
+        Cost: one window (P steps) is in flight per local round, also on a
+        sharded syncer head whose shards could run P steps each."""
+
+        if not self._step_window_rule():
+            return None
+        if self._lead_window_round != self.local_round:
+            pipeline, total = self.profile.effective_pipeline_depth, self.profile.total_fragment_steps
+            first = (self._first_open_step() - 1) // pipeline * pipeline + 1
+            self._lead_window = (first, min(first + pipeline - 1, total))
+            self._lead_window_round = self.local_round
+        return self._lead_window
+
+    def _in_lead_window(self, keys: list[LogicalKey]) -> list[LogicalKey]:
+        """K = 1: the keys of this round's window.  Once the terminal phase
+        started (``any_finalizing``) no round trains after this cut, so the
+        final cut answers every PULL, also those after its window: the last
+        rounds' PULLs can arrive while a wait holds an earlier window."""
+        window = self.lead_window()
+        if window is None or self.any_finalizing:
+            return keys
+        first, last = window
+        return [key for key in keys if first <= key[0] <= last]
+
+    def lead_window_open(self) -> bool:
+        """K = 1: a step of this round's window has not closed yet."""
+        window = self.lead_window()
+        return window is not None and any(not self._step_closed(step) for step in range(window[0], window[1] + 1))
+
+    def _lead_blocked(self) -> bool:
+        if self._step_window_rule():
+            return self.lead_window_open()
+        return bool(self.lead_blockers()) or self.lead_unpushed()
 
     async def wait_for_lead(self, serve: Any = None) -> float:
-        """Lead cap: block at this boundary while :meth:`lead_blockers` is not
-        empty or :meth:`lead_unpushed` holds.
+        """Lead cap: block at this boundary while K = 1's step window is open
+        (:meth:`lead_window`), or, for K >= 2, while :meth:`lead_blockers` is
+        not empty or :meth:`lead_unpushed` holds.
 
-        The wait keeps the island's sync duties: every poll replays and
-        harvests its pushes, applies arrived broadcasts, and runs ``serve``
-        (peer snapshots).  It materializes and pushes new PULLs (from this
-        boundary's cut) only where such a push cannot hold the wait itself
-        (:meth:`_wait_opens_no_blocker`).  It stops at once when the terminal
-        phase starts (``any_finalizing``): the terminal barrier then waits
-        instead.
+        The wait keeps the island's sync duties: every poll materializes and
+        pushes the PULLs it has candidates for (from this boundary's cut; with
+        K = 1 only those of the window), replays and harvests its pushes,
+        applies arrived broadcasts, and runs ``serve`` (peer snapshots).  It
+        stops at once when the terminal phase starts (``any_finalizing``): the
+        terminal barrier then waits instead.
 
         No new timer: each pair's wait timeout keeps running inside
         :meth:`submit_ready`, so a broadcast that never comes still fails
         there.  The lead wait gives up (and the island trains on, the old
-        behaviour) once the oldest blocking pair has waited half of
-        ``wait_timeout`` since its last push, before that pair could time out.
-        This also breaks a theoretical deadlock where each island waits for a
-        push the other can make only after training (possible only when two
-        broadcasts, or two PULLs a K = 1 wait holds, reach the two islands in
-        different orders).
+        behaviour) once the oldest pair in flight has waited half of
+        ``wait_timeout`` since its last push, or, with none in flight, half of
+        it since the island last retained a pair, before a pair could time
+        out.
 
         Returns the seconds this boundary waited."""
 
-        blockers = self.lead_blockers()
-        unpushed = self.lead_unpushed()
-        if (not blockers and not unpushed) or self.any_finalizing or self.failure is not None:
+        if not self._lead_blocked() or self.any_finalizing or self.failure is not None:
             return 0.0
         started = time.monotonic()
         poll = max(self.profile.poll_seconds, LEAD_WAIT_POLL_S)
         escaped = False
-        if blockers:
+        window = self.lead_window()
+        if window is not None:
+            reason = f"steps {window[0]}..{window[1]} of its window are not all merged"
+        elif self.lead_blockers():
+            blockers = self.lead_blockers()
             oldest = min(pair.local_round for pair in blockers)
             reason = f"{len(blockers)} pair(s) pushed at local round {oldest}.. are unmerged"
         else:
@@ -1019,22 +1086,16 @@ class RolePairing:
               f"(lead cap {self.profile.max_local_rounds_ahead})", file=sys.stderr, flush=True)
         while True:
             await asyncio.sleep(poll)
-            self._no_new_pairs = self._wait_opens_no_blocker()
-            try:
-                await self.prepare_submissions()
-                self.submit_ready()
-            finally:
-                self._no_new_pairs = False
+            await self.prepare_submissions()
+            self.submit_ready()
             await self.commit_staged_broadcasts()
             if serve is not None:
                 await serve()
-            blockers = self.lead_blockers()
-            unpushed = self.lead_unpushed()
-            if (not blockers and not unpushed) or self.any_finalizing:
+            if not self._lead_blocked() or self.any_finalizing:
                 break
-            since = min(pair.retained_at for pair in blockers) if blockers else self.retained_round_at
-            give_up = since + self.profile.wait_timeout / 2
-            if time.monotonic() >= give_up:
+            pending = list(self.inflight.values()) if window is not None else self.lead_blockers()
+            since = min(pair.retained_at for pair in pending) if pending else self.retained_round_at
+            if time.monotonic() >= since + self.profile.wait_timeout / 2:
                 escaped = True
                 break
         waited = time.monotonic() - started
