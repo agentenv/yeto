@@ -120,3 +120,135 @@ def test_the_guide_modal_example_is_refused_until_a_real_price_is_filled(run_wit
     assert run_with(samplers, {"usd": 450}).budget_problem() is not None
     modal["provider"]["price_usd_h"] = 70.0
     assert run_with(samplers, {"usd": 450}).budget_problem() is None
+
+
+# -- the monitor's spend never turns NaN or drops on a bad price (run.budget stays armed) -----
+
+def _billed_run(run_with, monkeypatch, tmp_path, pools, budget=None, members=None):
+    """A run (no fleet: the customer's spend_usd path) whose every pool has one member billed
+    for the last hour, and no trainer hours."""
+    import time  # noqa: PLC0415
+
+    state = tmp_path / "nc"
+    state.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(state))
+    run = run_with(pools, budget or {"usd": 10_000})
+    now = time.time()
+    run.state.update({"run_t0": now - 3600, "ups": [{"pid": 1, "start": now - 3600, "seen": now, "end": None}]})
+    for ref in run.pools:
+        doc = {"members": members if members is not None else [{"state": "ready", "granted": now - 3600}]}
+        (state / f"pool-{ref.load()['shard_base']}.json").write_text(json.dumps(doc))
+    assert run.fleet_plan() is None
+    return run
+
+
+def _warnings(capsys, text):
+    return sum(text in line for line in capsys.readouterr().out.splitlines())
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -5.0])
+def test_a_bad_pool_usd_per_h_is_priced_from_its_config(run_with, monkeypatch, tmp_path, capsys, bad):
+    """A usd_per_h that is NaN, inf or negative is not a price (the run config refuses one; a
+    pool ref built past that check, e.g. by a reconcile): the pool counts at its provider
+    config's price (as without the override), the spend stays finite, one WARNING per up."""
+    import dataclasses  # noqa: PLC0415
+    import math  # noqa: PLC0415
+
+    import time  # noqa: PLC0415
+
+    from yeto.launch.pool.money import to_usd  # noqa: PLC0415
+
+    now = time.time()
+    run = _billed_run(run_with, monkeypatch, tmp_path, [_modal(70.0)],
+                      members=[{"state": "ready", "granted": now - 3600},
+                               {"state": "ready", "granted": now - 3600, "hourly_ucr": 10.0}])
+    run.pools = [dataclasses.replace(run.pools[0], usd_per_h=bad)]
+    assert run.node_usd_per_h(0) == 70.0
+    for _ in range(2):  # each member at its own offer, as a pool without the override
+        spend = run.spend_usd()
+        assert math.isfinite(spend) and spend == pytest.approx(70.0 + to_usd(10.0, "ucr"), rel=1e-3)
+    assert _warnings(capsys, "usd_per_h") == 1
+    run.cfg["budget"]["usd"] = 50  # run.budget still trips
+    assert run.breach(trainer=False) is not None
+
+
+def test_an_unset_pool_usd_per_h_is_priced_from_its_config_as_before(run_with, monkeypatch, tmp_path, capsys):
+    """None: the provider config's price, each member at its own offer (a member without one
+    at the pool's price); no WARNING. The number is the plain sum of the pools' spends."""
+    import time  # noqa: PLC0415
+
+    now = time.time()
+    run = _billed_run(run_with, monkeypatch, tmp_path, [_modal(70.0)],
+                      members=[{"state": "ready", "granted": now - 3600},
+                               {"state": "ready", "granted": now - 3600, "hourly_ucr": None}])
+    assert run.pools[0].usd_per_h is None and run.node_usd_per_h(0) == 70.0
+    assert run.spend_usd() == pytest.approx(140.0, rel=1e-3)
+    assert "WARNING" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0, "x", True])
+def test_a_members_bad_offer_rate_counts_at_the_pools_price(run_with, monkeypatch, tmp_path, capsys, bad):
+    import math  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    now = time.time()
+    run = _billed_run(run_with, monkeypatch, tmp_path, [_modal(70.0)],
+                      members=[{"state": "ready", "granted": now - 3600, "hourly_ucr": bad}])
+    for _ in range(2):
+        spend = run.spend_usd()
+        assert math.isfinite(spend) and spend == pytest.approx(70.0, rel=1e-3)
+    assert _warnings(capsys, "hourly_ucr") == 1
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0])
+def test_a_bad_provider_price_is_priced_as_a_pool_that_states_none(run_with, monkeypatch, tmp_path, capsys, bad):
+    """The provider config's price_usd_h NaN, inf or negative: the price of the same pool
+    without one (a Modal pool's gpu x gpus at the unified price table), one WARNING; a pool
+    the table cannot price either (sky without offers) counts at budget.nc_usd_per_h."""
+    table = run_with([_modal(None)], {"usd": 10_000}).node_usd_per_h(0)
+    run = _billed_run(run_with, monkeypatch, tmp_path, [_modal(bad)], budget={"usd": 10_000, "nc_usd_per_h": 9.0})
+    for _ in range(2):
+        assert run.node_usd_per_h(0) == table and run.spend_usd() == pytest.approx(table, rel=1e-3)
+    assert _warnings(capsys, "its provider config's price") == 1
+    sky = {"name": "sky", "provider": {"kind": "sky", "price_usd_h": bad}, "shard_base": "s", "slots": [1]}
+    run = _billed_run(run_with, monkeypatch, tmp_path / "sky", [sky], budget={"usd": 10_000, "nc_usd_per_h": 9.0})
+    assert run.node_usd_per_h(0) == 9.0 and run.spend_usd() == pytest.approx(9.0, rel=1e-3)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0, "x"])
+def test_with_no_price_at_all_a_node_counts_at_the_mi355x_rate_not_zero(run_with, monkeypatch, tmp_path, capsys,
+                                                                         bad):
+    """No usd_per_h, a National Compute pool and a budget.nc_usd_per_h that is not a price:
+    the unified table's MI355X node rate (an unpriced node's rate), never NaN and never 0."""
+    run = _billed_run(run_with, monkeypatch, tmp_path, [run_with.nc], budget={"usd": 10_000, "nc_usd_per_h": bad})
+    rate = up._nc_node_usd_h()
+    assert rate > 0 and run.node_usd_per_h(0) == rate
+    for _ in range(2):
+        assert run.spend_usd() == pytest.approx(rate, rel=1e-3)
+    assert _warnings(capsys, "budget.nc_usd_per_h") == 1
+
+
+def test_the_spend_of_good_prices_is_the_plain_sum_of_the_pools(run_with, monkeypatch, tmp_path):
+    """The clamp changes nothing for real prices: the same float as the sum of each pool's spend."""
+    run = _billed_run(run_with, monkeypatch, tmp_path, [run_with.nc, _modal(70.0, usd_per_h=12.5)],
+                      budget={"usd": 10_000, "nc_usd_per_h": 3.25})
+    frozen = up.time.time()
+    monkeypatch.setattr(up.time, "time", lambda: frozen)
+    assert run.spend_usd() == sum(run.node_spend_usd(i, frozen) for i in range(2)) + run.trainer_hours(frozen) * 100
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -5.0, None])
+def test_a_pool_spend_that_is_not_an_amount_counts_its_hours_at_the_mi355x_rate(run_with, monkeypatch, tmp_path,
+                                                                                 capsys, bad):
+    """Past the price checks (a bug): the pools' sum is clamped as the fleet's, and a pool whose
+    spend is not an amount counts its billed hours at the MI355X rate, never NaN, inf or 0."""
+    import math  # noqa: PLC0415
+
+    run = _billed_run(run_with, monkeypatch, tmp_path, [run_with.nc, _modal(70.0)], budget={"usd": 10_000})
+    real = up.Run.node_spend_usd
+    monkeypatch.setattr(up.Run, "node_spend_usd", lambda self, i=0, now=None: bad if i == 1 else real(self, i, now))
+    rate = up._nc_node_usd_h()
+    for _ in range(2):
+        spend = run.spend_usd()
+        assert math.isfinite(spend) and spend == pytest.approx(2 * rate, rel=1e-3)
+    assert _warnings(capsys, "is not an amount") == 1
