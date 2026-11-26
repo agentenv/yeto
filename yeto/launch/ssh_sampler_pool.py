@@ -22,9 +22,12 @@ What runs on a node, for each start (all idempotent):
 * the yeto tree of the launcher's commit (``git archive``) under
   ``<workdir>/yeto/<sha>``, the member's rendered spec under
   ``<workdir>/sampler/<shard>.json``;
-* the sampler, ``python -m yeto.rl.engine.engine_sampler --spec``, detached,
-  either in a container (``runtime: container``: podman or docker) or as a
-  process of a venv on the host (``runtime: venv``: no container runtime);
+* the sampler, detached, either in a container (``runtime: container``: podman or
+  docker) or as a process of a venv on the host (``runtime: venv``: no container
+  runtime): by default the node runtime (``python -m yeto.node run``,
+  :mod:`yeto.node.route`) starts it, and its ready record, heartbeats and exit go
+  to the run store; ``node_runtime: false`` (in ``provider`` or the pool config)
+  starts ``python -m yeto.rl.engine.engine_sampler --spec`` directly, as before;
 * its log in ``<workdir>/logs/<shard>.log`` (container: ``<engine> logs``),
   read back by :meth:`SshSamplerPoolOps.logs`; its event tape next to the spec.
 
@@ -143,6 +146,9 @@ CONTAINER_KEYS = frozenset({"engine", "image", "pull_ref", "pull", "security_opt
 VENV_KEYS = frozenset({"python", "source", "ld_preload", "pythonpath"})
 PREFLIGHT_KEYS = frozenset({"min_free_gib", "require_idle", "min_cards"})
 AUTO_IMAGE = "auto"  # container.image: each node's image from the engine image catalog
+# ``node_runtime`` unset: the node runtime starts the sampler, as on the sky route;
+# ``node_runtime: false`` keeps the sampler start of before
+NODE_RUNTIME_DEFAULT = True
 # NPU_HOST_DEVICES / NPU_HOST_MOUNTS (what an Ascend container needs from the host besides
 # the cards) now live in node_inventory with the other per-family defaults; imported above.
 
@@ -199,9 +205,9 @@ class SshPoolConf:
     # while another slot's node is free: its slot moves to a spare node (unified-sampler-pool 3.3);
     # 0: no hold (the lost node's slot is offered at once)
     lost_node_hold_s: float = 1800.0
-    # the node starts ``python -m yeto.node run`` (yeto.node.route), which starts the sampler;
-    # false: the sampler directly, as before (kept for one release)
-    node_runtime: bool = False  # opt-in: python -m yeto.node run starts the sampler
+    # the node starts ``python -m yeto.node run`` (yeto.node.route), which starts the sampler
+    # (the default); false: the sampler directly, as before (kept for one release)
+    node_runtime: bool = True
 
 
 def _strs(value: Any, key: str) -> tuple[str, ...]:
@@ -307,8 +313,8 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
         raise ValueError(f"ssh provider: lost_node_hold_s must be a number of seconds >= 0, not {hold!r}")
     from yeto.node.route import enabled as node_runtime_enabled  # noqa: PLC0415
 
-    try:  # provider.node_runtime, else the pool config's: opt-in (default false)
-        node_runtime = node_runtime_enabled(cfg, default=False, section=section)
+    try:  # provider.node_runtime, else the pool config's (default true; false: the sampler start of before)
+        node_runtime = node_runtime_enabled(cfg, default=NODE_RUNTIME_DEFAULT, section=section)
     except ValueError as error:
         raise ValueError(f"ssh provider: {error}") from None
     return SshPoolConf(nodes=tuple(nodes), workdir=workdir.rstrip("/"), runtime=runtime, container=container,

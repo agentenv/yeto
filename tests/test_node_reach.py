@@ -242,8 +242,9 @@ def test_every_ssh_of_a_start_probe_and_stop_goes_through_the_reach(tmp_path, mo
 
 def test_a_direct_nodes_argv_is_unchanged(tmp_path, monkeypatch):
     """Every ssh argv of a start / probe / drain of a node without reach, word for word as
-    the pool sent it before reach existed (golden recorded on the code before this change)."""
-    ops, run = _pool(tmp_path, monkeypatch, node="edge")
+    the pool sent it before reach existed (golden recorded on the code before this change), on the
+    sampler start of before (``node_runtime: false``)."""
+    ops, run = _pool(tmp_path, monkeypatch, node="edge", node_runtime=False)
     m = SimpleNamespace(account=0, ticket=ops.order(0), shard="f09-0", data_slot=None, replaces_shard=None,
                         predecessor_lost=False)
     ops.start(m, ["f09-0"])

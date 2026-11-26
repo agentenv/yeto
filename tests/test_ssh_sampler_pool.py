@@ -175,12 +175,15 @@ class FakeRun:
             out = "YETO_SSH_STARTED container=yeto-sampler-f09-0\n"
         elif "YETO_NC_PROBE" in cmd:
             out = "YETO_NC_PROBE status=running exit=0 joined=1 age=3 tw=0 tok=- run=- wq=- vh=0 vm=-\n"
+        elif "YETO_NODE_ABSENT_" in cmd:  # the node runtime's store on the node holds nothing yet
+            out = "YETO_NODE_ABSENT_1\n"
         else:
             out = "stopped\n"
         return SimpleNamespace(returncode=0, stdout=out, stderr="")
 
 
-def test_ops_start_probe_drain(tmp_path, monkeypatch):
+def test_ops_start_probe_drain_on_the_sampler_start_of_before(tmp_path, monkeypatch):
+    """``node_runtime: false``: the pool starts the sampler itself (its start of before)."""
     class Pop:
         stdout = None
 
@@ -194,8 +197,8 @@ def test_ops_start_probe_drain(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.tasks, "sampler_spec", lambda spec, sampler_id, shards: dict(spec, sampler_id=sampler_id))
     monkeypatch.setattr(cli.tasks, "apply_sampler_overrides", lambda spec, **kw: spec)
     run = FakeRun()
-    cfg = pool_cfg(tmp_path)
-    ops = sp.SshSamplerPoolOps(cfg, conf=conf(), run=run, state_dir=tmp_path)
+    cfg = pool_cfg(tmp_path, node_runtime=False)
+    ops = sp.SshSamplerPoolOps(cfg, conf=conf(node_runtime=False), run=run, state_dir=tmp_path)
     t = ops.order(0)
     m = SimpleNamespace(account=0, ticket=t, shard="f09-0", data_slot=None, replaces_shard=None,
                         predecessor_lost=False)
@@ -215,6 +218,39 @@ def test_ops_start_probe_drain(tmp_path, monkeypatch):
     assert stop.index("kill --signal TERM") < stop.index("podman stop -t 10")
     assert ops.poll(m).state == "ended"
     assert not any("pkill" in c or "pgrep" in c for c in cmds)
+
+
+def test_ops_start_probe_drain_on_the_node_runtime_by_default(tmp_path, monkeypatch):
+    """No ``node_runtime`` key: the node runtime starts the sampler; the pool's probe and
+    drain of the container are the same."""
+    class Pop:
+        stdout = None
+
+        def __init__(self, *a, **k):
+            pass
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(sp.subprocess, "Popen", Pop)
+    monkeypatch.setattr(cli.tasks, "sampler_spec", lambda spec, sampler_id, shards: dict(spec, sampler_id=sampler_id))
+    monkeypatch.setattr(cli.tasks, "apply_sampler_overrides", lambda spec, **kw: spec)
+    run = FakeRun()
+    ops = sp.SshSamplerPoolOps(pool_cfg(tmp_path), conf=conf(), run=run, state_dir=tmp_path)
+    assert ops.conf.node_runtime
+    m = SimpleNamespace(account=0, ticket=ops.order(0), shard="f09-0", data_slot=None, replaces_shard=None,
+                        predecessor_lost=False)
+    ops.start(m, ["f09-0"])
+    cmds = [c[0][-1] for c in run.calls if c[0][0] == "ssh"]
+    run_cmd = next(c for c in cmds if "run -d" in c)
+    assert f"-m yeto.node run --assignment {m.ticket} --store /srv/yeto/run0/store" in run_cmd
+    assert "yeto.rl.engine.engine_sampler" not in run_cmd and "ASCEND_RT_VISIBLE_DEVICES=0" in run_cmd
+    assert any(f"assignments/{m.ticket}.json" in c for c in cmds)
+    assert ops.probe(m).joined
+    ops.drain(m)
+    stop = run.calls[-1][0][-1]
+    assert "podman kill --signal TERM yeto-sampler-f09-0" in stop
+    assert ops.poll(m).state == "ended"
 
 
 def test_preflight_refusal_stops_the_start(tmp_path):
