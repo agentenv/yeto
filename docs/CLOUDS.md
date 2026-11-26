@@ -76,7 +76,9 @@ its objects, and, for sky autodown, `ec2:DescribeInstances` plus
 `ec2:TerminateInstances` and `ec2:StopInstances` limited to instances carrying
 the cluster's `skypilot-cluster-name` tag. Add the managed `AmazonEC2ContainerRegistryReadOnly`
 policy only if nodes should log in to ECR themselves. The launching identity also needs
-`iam:PassRole` on that role.
+`iam:PassRole` on that role. An AWS node mounts a bucket with its instance profile only: a
+bucket in another AWS account needs a bucket policy that grants that role (it used to
+mount with the uploaded profile), or a store reached by object API with its own key.
 
 When an island starts, it warns `cloud credential files present on this island:
 ...` if a credential file is there anyway (a launch that kept the upload, a launch

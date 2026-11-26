@@ -30,6 +30,15 @@ cloud the sky config accepts it for, except:
 The request snapshots the client config when it is submitted, so the override only
 has to hold for the ``sky.launch`` call (the pattern of
 ``storage.model_store_sky_config``). The shared API server's own config is not changed.
+
+On the client, sky's config override is one per process (no per-request config
+context there): it swaps the process config and restores, on exit, the config it saw
+on entry. yeto submits from several threads (the launcher's island and syncer orders,
+the fleet controller's relaunches, sampler pools), so two overlapping overrides would
+leave one of them in the process config for every later launch, or let one submit
+carry another's override. :data:`SUBMIT_LOCK` is held from before an override is
+entered until its ``sky.launch`` has returned, by every submit, with an override or
+without one.
 """
 
 from __future__ import annotations
@@ -39,6 +48,7 @@ import functools
 import os
 import re
 import sys
+import threading
 from typing import Any, Callable, Iterator, Mapping
 
 NO_UPLOAD = "NO_UPLOAD"
@@ -49,6 +59,9 @@ UPLOAD_ENV = "YETO_SKY_UPLOAD_CLOUD_CREDENTIALS"
 # skypilot-v1 profile (EC2 and S3 full access); see docs/CLOUDS.md for a minimal policy
 AWS_INSTANCE_PROFILE_ENV = "YETO_SKY_AWS_INSTANCE_PROFILE"
 _INSTANCE_PROFILE_NAME = re.compile(r"[\w+=,.@-]{1,128}")
+# every yeto sky.launch submit, with its client config overrides (module docstring);
+# reentrant: an island submit holds it around the model-store override and this one
+SUBMIT_LOCK = threading.RLock()
 
 
 @functools.lru_cache(maxsize=1)
@@ -157,21 +170,23 @@ def identity_config(task, name: str, environ: Mapping[str, str] | None = None, *
 def launch_identity(task, name: str, environ: Mapping[str, str] | None = None, *,
                     log: Callable[[str], None] = print) -> Iterator[dict[str, Any]]:
     """Hold :func:`identity_config` in the client sky config around one ``sky.launch``
-    submit; yields the override. Without the real sky package (a test double in its
+    submit, under :data:`SUBMIT_LOCK` (the caller's ``sky.launch`` goes inside the
+    block); yields the override. Without the real sky package (a test double in its
     place) nothing is overridden."""
-    loaded = sys.modules.get("sky")
-    if loaded is not None and not hasattr(loaded, "__path__"):
-        yield {}
-        return
-    try:
-        from sky import skypilot_config
-        from sky.utils import registry, schemas  # noqa: F401 - identity_clouds reads them
-    except ImportError:
-        yield {}
-        return
-    config = identity_config(task, name, environ, log=log)
-    if not config:
-        yield config
-        return
-    with skypilot_config.override_skypilot_config(config):
-        yield config
+    with SUBMIT_LOCK:
+        loaded = sys.modules.get("sky")
+        if loaded is not None and not hasattr(loaded, "__path__"):
+            yield {}
+            return
+        try:
+            from sky import skypilot_config
+            from sky.utils import registry, schemas  # noqa: F401 - identity_clouds reads them
+        except ImportError:
+            yield {}
+            return
+        config = identity_config(task, name, environ, log=log)
+        if not config:
+            yield config
+            return
+        with skypilot_config.override_skypilot_config(config):
+            yield config

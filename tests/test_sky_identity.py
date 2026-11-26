@@ -182,3 +182,70 @@ def test_a_test_double_in_place_of_sky_gets_no_override(monkeypatch):
     monkeypatch.setitem(sys.modules, "sky", types.ModuleType("sky"))
     with si.launch_identity(_task("AWS"), "c1", {}) as config:
         assert config == {}
+
+
+def test_overlapping_submits_from_two_threads_leave_no_override_behind(monkeypatch):
+    """sky's client config override is one per process: A (an AWS node: gcp and aws left
+    out) and B (a GCP node: its own gcp file kept) overlap, A leaves first. Each submit
+    sees exactly its own override, and the process config is the one before both."""
+    import threading
+    import time
+
+    pytest.importorskip("sky")
+    from sky import skypilot_config
+
+    monkeypatch.setattr(si, "_configured", lambda cloud: False)
+
+    def now(cloud):
+        return skypilot_config.get_nested((cloud, "remote_identity"), None)
+
+    before = {c: now(c) for c in ("aws", "gcp")}
+    a_in, b_try, a_out = threading.Event(), threading.Event(), threading.Event()
+    seen: dict[str, dict] = {}
+    errors: list[BaseException] = []
+
+    def a():
+        try:
+            with si.launch_identity(_task("AWS"), "a", {}, log=lambda _: None):
+                a_in.set()
+                b_try.wait(5)
+                time.sleep(0.3)  # B is trying to enter now
+                seen["a"] = {c: now(c) for c in ("aws", "gcp")}
+        except BaseException as error:  # noqa: BLE001
+            errors.append(error)
+        finally:
+            a_out.set()
+
+    def b():
+        try:
+            a_in.wait(5)
+            b_try.set()
+            with si.launch_identity(_task("GCP"), "b", {}, log=lambda _: None):
+                seen["b_entered_after_a"] = a_out.is_set()
+                a_out.wait(5)  # without the lock: B still inside after A left
+                seen["b"] = {c: now(c) for c in ("aws", "gcp")}
+        except BaseException as error:  # noqa: BLE001
+            errors.append(error)
+
+    threads = [threading.Thread(target=a), threading.Thread(target=b)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(15)
+    assert not errors and not any(t.is_alive() for t in threads)
+    assert seen["b_entered_after_a"]
+    assert seen["a"] == {"aws": si.NO_UPLOAD, "gcp": si.NO_UPLOAD}
+    assert seen["b"] == {"aws": si.NO_UPLOAD, "gcp": before["gcp"]}
+    assert {c: now(c) for c in ("aws", "gcp")} == before
+
+
+def test_every_client_config_override_in_yeto_is_taken_under_the_submit_lock():
+    sites = []
+    for path in sorted((REPO / "yeto").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"override_skypilot_config\(", text):
+            sites.append(path.relative_to(REPO).as_posix())
+            head = text[:match.start()]
+            block = head[head.rfind("\ndef "):]
+            assert "with SUBMIT_LOCK:" in block, f"{path.relative_to(REPO)}: override outside SUBMIT_LOCK"
+    assert sorted(sites) == ["yeto/launch/sky_identity.py", "yeto/launch/sky_ops.py"]

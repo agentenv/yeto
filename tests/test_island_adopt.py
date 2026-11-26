@@ -761,7 +761,12 @@ def test_every_order_site_of_the_launcher_checks_the_lock_first():
     ssh = inspect.getsource(tp.SshSource.start)
     assert ssh.index("prov.guard_order(") < ssh.index("start_resident_ssh(")
     assert "guard_order=None if island_states is None else island_states.guard_order" in src
-    sky_launch = src.index("rid = sky.launch(syncer_task, cluster_name=syncer_cluster)")
+    # the syncer's order statement: its sky.launch, held in the credential-upload override
+    # (yeto.launch.sky_identity) that opens on the line right before it
+    order = "with launch_identity(syncer_task, syncer_cluster):\n"
+    sky_launch = src.index(order)
+    assert src[sky_launch + len(order):].lstrip().startswith(
+        "rid = sky.launch(syncer_task, cluster_name=syncer_cluster)")
     assert "guard_order(syncer_cluster)" in src[sky_launch - 300:sky_launch]
 
 
