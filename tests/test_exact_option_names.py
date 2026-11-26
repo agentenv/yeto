@@ -165,12 +165,13 @@ def test_look_alike_options_are_not_offered():
 
 
 def test_every_entry_point_under_yeto_parses_full_names_only():
-    """Every parser under ``yeto/`` is an ``ExactArgumentParser``; the two files shipped
-    alone to a node (no yeto package there) build a plain one with ``allow_abbrev=False``
-    and import nothing from yeto."""
+    """Every parser under ``yeto/`` is an ``ExactArgumentParser``. Three modules run
+    without the rest of yeto and keep stdlib argparse with ``allow_abbrev=False``, on
+    the parser and every subcommand: the two tools shipped alone to a node, and the
+    code pack unpacker a node imports from a partly unpacked pack."""
     import re
 
-    standalone = {"yeto/launch/weights_sync.py", "yeto/launch/preflight/bench.py"}
+    standalone = {"yeto/launch/weights_sync.py", "yeto/launch/preflight/bench.py", "yeto/codepack.py"}
     call = re.compile(r"(\w*)ArgumentParser\((?:[^()]|\([^()]*\))*\)")
     offenders = []
     for path in sorted((REPO / "yeto").rglob("*.py")):
@@ -185,13 +186,13 @@ def test_every_entry_point_under_yeto_parses_full_names_only():
                 continue
             offenders.append(f"{rel}: {found.group(0)[:60]}")
         if rel in standalone:
-            imported = {m.split(".")[0] for m in re.findall(r"(?m)^\s*(?:from|import) ([\w.]+)", src)}
-            assert "yeto" not in imported, rel
+            top_level = re.findall(r"(?m)^(?:from|import) ([\w.]+)", src)
+            assert not [m for m in top_level if m == "yeto" or m.startswith(("yeto.", "."))], rel
             assert "parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False)" in src, rel
     assert offenders == []
 
 
-@pytest.mark.parametrize("module", ["yeto.launch.weights_sync", "yeto.launch.preflight.bench"])
+@pytest.mark.parametrize("module", ["yeto.launch.weights_sync", "yeto.launch.preflight.bench", "yeto.codepack"])
 def test_the_standalone_node_tools_refuse_a_prefix(module, capsys):
     import importlib
 
@@ -200,6 +201,7 @@ def test_the_standalone_node_tools_refuse_a_prefix(module, capsys):
         "yeto.launch.weights_sync": (["sync", "--source", "s3://b/m", "--root", "/r", "--model", "m",
                                       "--revision", "a" * 40, "--work", "2"], "--work 2"),  # --workers
         "yeto.launch.preflight.bench": (["ports", "--ports", "1", "--peer", "h"], "--peer h"),  # --peers
+        "yeto.codepack": (["verify", "--digest", "0" * 64, "--di", "."], "--di ."),  # --dir
     }[module]
     with pytest.raises(SystemExit) as exc:
         mod.main(argv)
