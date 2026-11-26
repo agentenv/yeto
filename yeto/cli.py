@@ -30,6 +30,7 @@ import threading
 import time
 
 from . import runs
+from .exact_argparse import ExactArgumentParser
 from .losses import LOSS_FUNCTIONS
 from .rl.engine.run_flags import CLI, add_rl_flags
 from .launch.syncer_region import default_syncer_region
@@ -848,7 +849,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
 
 def parse_args(argv=None):
     """Parse launch flags only (kept for callers that predate subcommands)."""
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = ExactArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     _add_launch_args(p)
     return p.parse_args(argv)
 
@@ -947,7 +948,9 @@ def _add_local_rl_args(p: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    # full option names only (sub-parsers inherit the class): a prefix such as
+    # --rollout-num-gpus never silently sets --rollout-num-gpus-per-engine
+    p = ExactArgumentParser(
         prog="yeto",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,

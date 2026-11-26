@@ -112,8 +112,9 @@ def _adopt_contract_settings(args, adopted: dict, *, source: str) -> None:
     import argparse
 
     from ..cli import _add_launch_args
+    from ..exact_argparse import ExactArgumentParser
 
-    parser = argparse.ArgumentParser()
+    parser = ExactArgumentParser()
     _add_launch_args(parser)
     conflicts = []
     for dest, value in adopted.items():

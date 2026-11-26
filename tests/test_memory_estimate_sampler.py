@@ -45,7 +45,7 @@ LAUNCHES = (
      ("--tuning", "lora", "--rl-sync-preset", "strict-avg"), (0, 1)),
     ("full_parameter_fixed_partition", "qwen3_0p6b", "modal:1x8xh100,modal:1x8xh100",
      ("--tuning", "full", "--rl-sync-preset", "full-parameter", "--rl-placement", "fixed-partition",
-      "--rollout-num-gpus", "4"), (0, 1)),
+      "--rl-rollout-gpus", "4"), (0, 1)),
     ("pair_trainer", "qwen3_8b", "modal:1x8xh100,modal:1x8xh100",
      ("--tuning", "lora", "--rl-single-island-no-sync", "--rl-island-sample-role", "0:sampler",
       "--rl-island-sample-role", "1:trainer"), (1,)),

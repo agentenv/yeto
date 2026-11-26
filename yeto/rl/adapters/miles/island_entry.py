@@ -44,7 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     from yeto.rl.adapters.miles.elastic_hook import add_recommend_arguments
     from yeto.wandb_logger import add_arguments as add_wandb_arguments
 
-    parser = argparse.ArgumentParser(prog="python3 -m yeto.rl.adapters.miles.island_entry")
+    from yeto.exact_argparse import ExactArgumentParser
+
+    # full option names only: the launcher renders every island flag spelled out
+    parser = ExactArgumentParser(prog="python3 -m yeto.rl.adapters.miles.island_entry")
     add_rl_flags(parser, ISLAND)  # yeto/rl/engine/run_flags.py
     add_recommend_arguments(parser)  # elastic hook
     add_wandb_arguments(parser)
