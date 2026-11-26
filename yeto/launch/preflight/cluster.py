@@ -1011,6 +1011,11 @@ def container_checks(state: NodeState, req: Requirements, *, multi: bool) -> lis
 
 
 # ------------------------------------------------------------- the executor
+NO_IMAGE = "no trainer image resolved"
+NO_IMAGE_FIX = ("pass --image (yeto run up passes the trainer's --rl-image) or name the image in the "
+                "inventory (image: / images:)")
+
+
 def container_job(node: Node, *, image: str | None, inner: str, env: Mapping[str, str], tag: str,
                   timeout_s: float, files: Mapping[str, str] | None = None) -> str:
     """Bash for one node: write ``files`` to a temp dir and run ``inner`` there, in the
@@ -1155,6 +1160,12 @@ class ClusterPreflight:
         self._raw(step, node.name, text)
         return rc, text
 
+    def _image_of(self, state: NodeState) -> str:
+        """The image a docker node pulls and runs: ``image``, else the node's own ("" for
+        none: the pull and the container probe FAIL, nothing named "None" is pulled)."""
+        image = self.image or state.node.image
+        return str(image).strip() if image else ""
+
     def _parallel(self, fn: Callable[[Any], Any], items: Sequence[Any]) -> list[Any]:
         if not items:
             return []
@@ -1265,7 +1276,10 @@ class ClusterPreflight:
         self.log(f"[preflight] {command} pull on {len(docker)} node(s)")
 
         def one(state: NodeState) -> Check:
-            image = str(self.image or state.node.image)
+            image = self._image_of(state)
+            if not image:
+                state.pulled = False
+                return Check(state.name, "image_pull", FAIL, NO_IMAGE, NO_IMAGE_FIX)
             t0 = self.clock()
             rc, text = self._run(state.node, f"{command} pull -q {shlex.quote(image)}", 3600.0, "pull")
             if rc == 0:
@@ -1286,6 +1300,8 @@ class ClusterPreflight:
         self.log(f"[preflight] container probes on {len(docker)} node(s)")
 
         def one(state: NodeState) -> list[Check]:
+            if not self._image_of(state):
+                return [Check(state.name, "container", FAIL, NO_IMAGE, NO_IMAGE_FIX)]
             job = container_job(state.node, image=self.image, inner=probe_script(CONTAINER_SECTIONS),
                                 env=self._env(state.node, len(self.nodes)), tag="probe", timeout_s=240)
             rc, text = self._run(state.node, job, 600.0, "container")
@@ -1811,6 +1827,10 @@ def main(args: argparse.Namespace, *, ops: SshOps | None = None) -> int:
         image = trainer_image(args.image, nodes)
     except (InventoryError, SshIslandError, ValueError) as exc:
         print(f"[yeto] preflight: {exc}", file=sys.stderr)
+        return 2
+    if not image and not (args.no_pull and args.no_container) and any(
+            n.runtime == "docker" and not n.image for n in nodes):  # the pull and the probes need one
+        print(f"[yeto] preflight: {NO_IMAGE} for the docker nodes: {NO_IMAGE_FIX}", file=sys.stderr)
         return 2
     if args.run_dir:
         out_dir = Path(args.run_dir).expanduser()

@@ -861,6 +861,9 @@ def default_rl_image(*, recipe: str | None = None, tuning: str | None = None) ->
     ``tuning="full"`` selects :data:`MILES_K31_NEXT9_IMAGE`.
     """
 
+    from yeto.rl.image_registry import current_registry  # noqa: PLC0415
+
+    # the registry named when the default is taken (unchanged since import in a launch process)
     if recipe == "kimi_k31" and tuning == "full":
-        return MILES_K31_NEXT9_IMAGE
-    return MILES_NEXT_IMAGE
+        return current_registry(MILES_K31_NEXT9_IMAGE)
+    return current_registry(MILES_NEXT_IMAGE)

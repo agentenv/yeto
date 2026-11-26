@@ -28,4 +28,23 @@ def pinned_image(name: str, digest: str, *, docker_prefix: bool = True) -> str:
     return f"docker:{ref}" if docker_prefix else ref
 
 
-__all__ = ["DEFAULT_REGISTRY", "REGISTRY_ENV", "image_registry", "pinned_image"]
+IMPORT_REGISTRY = image_registry()  # the registry the module-level pins (pins.MILES_*_IMAGE) were built with
+
+
+def current_registry(image: str) -> str:
+    """A pinned default built at import (:data:`IMPORT_REGISTRY`) on the registry
+    ``YETO_IMAGE_REGISTRY`` names now: the same string unless the variable changed since
+    (``yeto run up`` resolves its trainer's image under the run config's ``env``, which
+    the trainer's own launch process starts with). Any other reference is returned as is."""
+    now = image_registry()
+    if now == IMPORT_REGISTRY:
+        return image
+    for prefix in ("docker:", ""):
+        old = f"{prefix}{IMPORT_REGISTRY}/"
+        if image.startswith(old) and "@sha256:" in image:
+            return f"{prefix}{now}/{image[len(old):]}"
+    return image
+
+
+__all__ = ["DEFAULT_REGISTRY", "IMPORT_REGISTRY", "REGISTRY_ENV", "current_registry", "image_registry",
+           "pinned_image"]

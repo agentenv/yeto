@@ -10,36 +10,52 @@ from __future__ import annotations
 def resolve_default_rl_image(args) -> None:
     """Fill an omitted ``--rl-image`` with the engine's pinned default."""
 
-    if getattr(args, "training_mode", "sft") != "rl":
+    image, line = rl_image_choice(args)
+    if image is None:  # not an RL launch
         return
+    args.rl_image = image  # an explicit --rl-image: itself
+    if line:
+        import sys
+
+        print(f"[launcher] {line}", file=sys.stderr, flush=True)
+
+
+def rl_image_choice(args) -> tuple[str | None, str]:
+    """``(image, line)``: the ``--rl-image`` a launch of ``args`` runs with, without
+    changing ``args``: its own ``--rl-image``; else, for an ssh: trainer fleet whose
+    inventory names no image, the site image catalog's record (:mod:`.site_images`) or
+    the built-in default; else the engine's pinned default. ``line``: what the launch
+    prints about a filled-in image ("" when it prints nothing). ``(None, "")`` for a
+    launch that is not RL. :func:`resolve_default_rl_image` fills ``args`` with it; the
+    cluster preflight of ``yeto run up`` (:func:`yeto.launch.preflight.gate.launch_rl_image`)
+    takes the same image."""
+
+    if getattr(args, "training_mode", "sft") != "rl":
+        return None, ""
     from ..rl.engine import backends
 
     try:  # decoupling 5.4: a backend without a registered adapter is refused here
         backends.get(getattr(args, "rl_backend", None) or backends.DEFAULT_BACKEND)
     except backends.UnknownBackend as exc:
         raise ValueError(str(exc)) from None
-    if getattr(args, "rl_image", None) is None:
-        import sys
+    if getattr(args, "rl_image", None) is not None:
+        return args.rl_image, ""
+    nodes, why = _site_catalog_trainer_nodes(args)
+    if nodes is not None:  # an all-ssh: trainer fleet whose inventory names no image
+        from . import site_images
 
-        nodes, why = _site_catalog_trainer_nodes(args)
-        if nodes is not None:  # an all-ssh: trainer fleet whose inventory names no image
-            from . import site_images
-
-            try:
-                choice = site_images.select(
-                    None, getattr(args, "model", None), "trainer", nodes,
-                    engine=getattr(args, "rl_backend", None) or backends.DEFAULT_BACKEND,
-                    path=site_images.inventory_catalog_path(getattr(args, "rl_node_inventory", None)),
-                    default=lambda: _builtin_rl_image(args))
-            except site_images.SiteImagesError as exc:
-                raise ValueError(str(exc)) from None
-            args.rl_image = f"docker:{choice.ref}" if choice.source == site_images.SOURCE_SITE else choice.ref
-            print(f"[launcher] {choice.line('ssh trainer')}", file=sys.stderr, flush=True)
-            return
-        args.rl_image = _builtin_rl_image(args)
-        if why:
-            print(f"[launcher] trainer image {args.rl_image} (source: built-in default; {why})", file=sys.stderr,
-                  flush=True)
+        try:
+            choice = site_images.select(
+                None, getattr(args, "model", None), "trainer", nodes,
+                engine=getattr(args, "rl_backend", None) or backends.DEFAULT_BACKEND,
+                path=site_images.inventory_catalog_path(getattr(args, "rl_node_inventory", None)),
+                default=lambda: _builtin_rl_image(args))
+        except site_images.SiteImagesError as exc:
+            raise ValueError(str(exc)) from None
+        image = f"docker:{choice.ref}" if choice.source == site_images.SOURCE_SITE else choice.ref
+        return image, choice.line("ssh trainer")
+    image = _builtin_rl_image(args)
+    return image, (f"trainer image {image} (source: built-in default; {why})" if why else "")
 
 
 def _builtin_rl_image(args) -> str:
