@@ -670,7 +670,7 @@ def test_an_image_interpreter_that_is_not_a_plain_path_is_refused(tmp_path, pyth
     assert ops.scripts == [] and ops.launch.calls == []  # nothing ran
 
 
-def test_the_hf_token_goes_to_the_node_from_the_launcher_and_is_never_printed(tmp_path):
+def test_the_hub_token_goes_to_the_node_from_the_launcher_and_is_never_printed(tmp_path):
     plan = _trainer_plan(tmp_path)
     prune = plan.steps[0]
     rendered = prune.render({sm.REF: PINNED, sm.PYTHON: PY}, {"HF_TOKEN": "tok-123", "OTHER": "x"})
@@ -1095,3 +1095,58 @@ def test_a_pool_that_never_pulls_still_gets_the_image_pulled_by_the_adoption(tmp
     out = capsys.readouterr().out
     assert f"podman pull {sm.REF} on ['b300-0', 'b300-1'] in parallel; the pool's container.pull is never (it " \
         "starts only images already on its nodes): this pull is what puts the image there" in out
+
+
+def _launch_value(argv, flag):
+    return sm._flag_value(list(argv), flag)
+
+
+def test_the_smoke_trains_with_the_attention_backend_the_fit_checks(tmp_path):
+    auto = _trainer_plan(tmp_path)
+    assert sm.ATTENTION not in auto.steps[1].argv  # auto: the recipe decides, as before
+    plan = _trainer_plan(tmp_path, attention_backend="unfused")
+    for step in plan.steps[1:]:  # train and resume
+        assert _launch_value(step.argv, sm.ATTENTION) == "unfused" and list(step.argv).count(sm.ATTENTION) == 1
+    same = _trainer_plan(tmp_path, attention_backend="unfused", extra_args=(f"{sm.ATTENTION}=unfused",))
+    assert list(same.steps[1].argv).count(f"{sm.ATTENTION}=unfused") == 1 and sm.ATTENTION not in same.steps[1].argv
+    with pytest.raises(sm.SmokeError, match="--attention-backend flash but --smoke-arg "
+                                            "--rl-training-attention-backend unfused"):
+        _trainer_plan(tmp_path, attention_backend="flash", extra_args=(sm.ATTENTION, "unfused"))
+
+
+@pytest.mark.parametrize("asked, smoke_arg, want", [
+    ("auto", None, "auto"), ("unfused", None, "unfused"), ("auto", "flash", "flash"), ("flash", "flash", "flash"),
+])
+def test_the_attention_backend_comes_from_the_flag_or_the_smoke_arg(asked, smoke_arg, want):
+    extra = (f"{sm.ATTENTION}={smoke_arg}",) if smoke_arg else ()
+    assert sm.smoke_attention(asked, extra) == want
+
+
+def test_the_cli_holds_the_fit_to_the_smoke_s_attention_backend(tmp_path, capsys, monkeypatch):
+    seen = {}
+
+    class Captured:
+        def __init__(self, request, **kw):
+            seen["request"] = request
+            self.report = ia.AdoptReport(request)
+
+        def run(self):
+            raise ia.AdoptError("manifest", "stopped by the test")
+
+    base = (TAGGED, "--model", "Qwen/Qwen3-30B-A3B", "--role", "trainer", "--inventory",
+            _inventory(tmp_path, card="A10G", hbm_gib=24, cards_per_node=1),
+            "--model-config", REGISTRY_CONFIGS / "qwen3_30b_a3b.json", "--smoke-store", "s3://b/s")
+    assert ia.main(_cli(*base, "--attention-backend", "unfused", "--dry-run"), ops=SimpleNamespace(run=None)) == 0
+    out = capsys.readouterr().out
+    assert "3. fit: " in out and "; the trainer's unfused attention (flash: sm90+ cards)" in out
+    assert f"{sm.ATTENTION} unfused" in out
+    monkeypatch.setattr(ia, "Adopter", Captured)
+    assert ia.main(_cli(*base, f"--smoke-arg={sm.ATTENTION}=flash")) == 1
+    assert seen["request"].attention_backend == "flash"  # what the fit refuses on the A10G node
+    assert ia.flash_trainer_problem(seen["request"].probe_node, seen["request"].attention_backend)
+    capsys.readouterr()
+    assert ia.main(_cli(*base, "--attention-backend", "flash", f"--smoke-arg={sm.ATTENTION}=unfused",
+                        "--dry-run")) == 2
+    assert "the fit would check another backend than the smoke trains with" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        _cli(*base, "--attention-backend", "flashy")

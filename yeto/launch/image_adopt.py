@@ -426,6 +426,28 @@ def node_card_arch(node: Node) -> str | None:
     return str(arch).lower() if arch else None
 
 
+# The trainer's flash attention (Megatron --attention-backend flash) trains on Hopper and
+# newer only: on A10G (sm86) cards the Miles image's forward pass runs and the backward
+# fails ("Unsupported compute capability"), while unfused trains (own-cluster rehearsal,
+# 2026-11-26). A sampler's inference attention is not held to it.
+FLASH_TRAINER_MIN_ARCH = "sm90"
+
+
+def flash_trainer_problem(node: Node, attention_backend: str | None) -> str | None:
+    """The problem of a trainer on ``node`` with the ``flash`` attention backend below
+    :data:`FLASH_TRAINER_MIN_ARCH` (None: another backend, a card at or above it, or a
+    card of no CUDA architecture known here)."""
+    if (attention_backend or "auto") != "flash":
+        return None
+    arch = node_card_arch(node)
+    have, need = _cc(arch or ""), _cc(FLASH_TRAINER_MIN_ARCH)
+    if have is None or need is None or have[1] >= need[1]:
+        return None
+    return (f"node {node.name}: the trainer's flash attention needs {FLASH_TRAINER_MIN_ARCH}+ cards; on {node.card} "
+            f"({arch}) its backward pass fails (\"Unsupported compute capability\"): pass --attention-backend "
+            "unfused (the smoke trains with it; it holds the full score matrix, short sequences only)")
+
+
 def card_arch_fit(facts: ImageFacts, node: Node, *, strict: bool = False) -> tuple[str | None, str | None]:
     """``(problem, note)`` of the image's built card architectures on ``node``'s cards
     (problem None: they serve them, or the node's architecture is unknown; note: how).
@@ -523,6 +545,10 @@ def fit_problems(request: AdoptRequest, ref: str, facts: ImageFacts,
             if note:
                 notes.append(note)
         if request.role == "trainer":
+            flash = flash_trainer_problem(node, request.attention_backend)
+            if flash:  # the backend's own floor, before the image's (which flash would lift)
+                problems.append(flash)
+                continue
             found = trainer_image_check.image_problem(ref, node.card, attention_backend=request.attention_backend)
             if found:
                 (problems if found[1] else warnings).append(f"node {node.name}: {found[0]}")
@@ -824,8 +850,10 @@ def add_parser(sub: Any) -> Any:
     a.add_argument("--catalog", default=None, help="the site image catalog (default: the inventory's site_images:)")
     a.add_argument("--min-image-free-gib", type=float, default=120.0,
                    help="free GiB the image root (docker data root / containerd store) of every node needs")
-    a.add_argument("--attention-backend", default="auto",
-                   help="the trainer's attention backend, for the trainer image floor (default auto)")
+    a.add_argument("--attention-backend", default="auto", choices=["auto", "flash", "fused", "unfused"],
+                   help="the trainer's attention backend: the fit holds the image floor and flash's sm90+ floor "
+                        "to it, and the smoke trains with it (--rl-training-attention-backend; default auto: the "
+                        "recipe's)")
     a.add_argument("--strict-arch", action="store_true",
                    help="the image must carry a cubin of exactly the node's card architecture (no CUDA "
                         "minor-version or PTX compatibility)")
@@ -895,7 +923,7 @@ def _plan(args: Any, request: AdoptRequest, run_id: str) -> Any:
             request.probe_node, model=request.model, config=_model_config(args), engine=request.engine,
             store=args.smoke_store, run_id=run_id, workdir=workdir, model_revision=args.model_revision,
             model_path=args.model_path, layers=args.smoke_layers, extra_args=tuple(args.smoke_arg),
-            keep=args.keep_smoke_artifacts)
+            keep=args.keep_smoke_artifacts, attention_backend=request.attention_backend)
         return plan
     spec = _sampler_spec(args)
     return image_smoke.sampler_plan(request.probe_node, spec=spec, run_id=run_id, release=args.release,
@@ -1000,9 +1028,12 @@ def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
         catalog = args.catalog or str(site_images.inventory_catalog_path(args.inventory))
         spec_engine = engine_images.spec_needs(_sampler_spec(args))["engine_pref"] if args.role == "sampler" \
             and args.sampler_spec else None
+        # trainer: the backend the fit checks is the one the smoke trains with (--attention-backend or a --smoke-arg)
+        attention = image_smoke.smoke_attention(args.attention_backend, tuple(args.smoke_arg)) \
+            if args.role == "trainer" else args.attention_backend
         request = AdoptRequest(ref=args.ref, model=args.model, role=args.role, nodes=tuple(nodes),
                                engine=args.engine, node=args.node, catalog=catalog,
-                               min_image_free_gib=args.min_image_free_gib, attention_backend=args.attention_backend,
+                               min_image_free_gib=args.min_image_free_gib, attention_backend=attention,
                                strict_arch=args.strict_arch, allow_busy=args.allow_busy, spec_engine=spec_engine,
                                container_sudo=sudo)
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -1023,7 +1054,9 @@ def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
                  f"1. manifest: HEAD of {args.ref} in its registry; a tag is pinned to its digest "
                  f"(below: {image_smoke.REF})",
                  f"2. probe on {node.name}: {probe_script(image_smoke.REF, node, sudo=sudo)[:200]} ...",
-                 f"3. fit: CPU, device runtime, built card architectures and the {args.role} engine on {role}",
+                 f"3. fit: CPU, device runtime, built card architectures and the {args.role} engine on {role}"
+                 + (f"; the trainer's {request.attention_backend} attention (flash: {FLASH_TRAINER_MIN_ARCH}+ cards)"
+                    if args.role == "trainer" else ""),
                  f"4. pull: ssh + host probe (image root >= {args.min_image_free_gib:g} GiB free), then "
                  + "; ".join(f"{engine_command(engine, sudo)} pull {image_smoke.REF} on {names}"
                              for engine, names in _by_engine(request.nodes).items())

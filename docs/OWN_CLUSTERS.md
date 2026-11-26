@@ -754,7 +754,12 @@ to adopt the image. The steps, in order:
    check`): the smoke runs real kernels on the card. `--strict-arch` asks for a
    cubin of exactly the node's architecture. A ROCm node's `gfx` target must be
    built (feature suffixes such as `:xnack-` are ignored). A mismatch names the
-   rule and the node's card.
+   rule and the node's card. A trainer's `--attention-backend flash` needs sm90+
+   cards on every node of the role: below that (an A10G, `sm86`) its backward pass
+   fails, so the fit refuses it and names `--attention-backend unfused` instead. The
+   smoke trains with the backend the fit checked (`--rl-training-attention-backend`,
+   also taken from a `--smoke-arg`; the two must agree). A sampler is not held to
+   this floor.
 4. **pull**: every node of the role (spares included, `roles: [trainer-spare]`)
    is checked over SSH, and its image root (the docker data root, or
    `/var/lib/containerd` with the containerd image store, or podman's storage

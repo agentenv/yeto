@@ -79,6 +79,7 @@ PROMPTS = [{"prompt": "What is 2 + 2? Put the answer in \\boxed{}.", "label": "4
 # launch flags the smoke sets unless --smoke-arg gives them: a rate (one step: it barely matters); no model
 # preflight from the launcher (the cut exists only on the node: the prune step made and checked it)
 LAUNCH_DEFAULTS = (("--inner-lr", "1e-6"), ("--preflight-model", "off"))
+ATTENTION = "--rl-training-attention-backend"  # the trainer's attention backend (yeto image adopt --attention-backend)
 BYTES_PER_PARAM = {"bf16": 2.0, "fp16": 2.0, "fp32": 4.0, "fp8": 1.0, "int8": 1.0, "mxfp4": 0.53, "int4": 0.53,
                    "nvfp4": 0.56}
 MAX_LAYERS = 16  # the MFU 16L cut
@@ -302,6 +303,17 @@ def _flag_value(args: Sequence[str], flag: str) -> str | None:
     return found
 
 
+def smoke_attention(attention_backend: str | None, extra_args: Sequence[str]) -> str:
+    """The trainer's attention backend the fit checks and the smoke trains with:
+    ``--attention-backend``, else a ``--smoke-arg`` of :data:`ATTENTION`, else ``auto``
+    (the recipe's). The two naming different backends is a :class:`SmokeError`."""
+    asked, given = attention_backend or "auto", _flag_value(extra_args, ATTENTION)
+    if given is not None and asked != "auto" and given != asked:
+        raise SmokeError(f"--attention-backend {asked} but --smoke-arg {ATTENTION} {given}: the fit would check "
+                         "another backend than the smoke trains with; give one")
+    return given or asked
+
+
 def _replace_flag(flags: list[str], extra: Sequence[str]) -> list[str]:
     """``flags`` without the ``--flag value`` pairs ``extra`` gives again (the operator's
     value wins: a registry placeholder such as ``<expert_selection.json>``)."""
@@ -319,11 +331,12 @@ def _replace_flag(flags: list[str], extra: Sequence[str]) -> list[str]:
 def trainer_plan(node: Node, *, model: str, config: Mapping[str, Any], engine: str | None, store: str | None,
                  run_id: str, workdir: Path, model_revision: str | None = None, model_path: str | None = None,
                  layers: int | None = None, extra_args: Sequence[str] = (), python: str | None = None,
-                 keep: bool = False) -> SmokePlan:
+                 keep: bool = False, attention_backend: str = "auto") -> SmokePlan:
     """The trainer smoke's steps (module doc). Raises :class:`SmokeError` for what is
     missing: a backend without a train-only replay, a node without ``scratch``, no
     store for the checkpoint, a registry placeholder no ``--smoke-arg`` fills.
-    ``keep``: the cleanup leaves the artifacts and prints where they are."""
+    ``keep``: the cleanup leaves the artifacts and prints where they are;
+    ``attention_backend`` (not ``auto``): the launch trains with it (:data:`ATTENTION`)."""
     engine_name = profile_of(node).container
     if node.runtime != "docker" or engine_name != "docker":
         raise SmokeError(f"node {node.name} runs {node.runtime} (container {engine_name}): the trainer smoke runs "
@@ -342,6 +355,9 @@ def trainer_plan(node: Node, *, model: str, config: Mapping[str, Any], engine: s
                          "its train-only replay is not wired")
     trust, trust_notes = remote_code(config, layout["recommendation"].family, extra_args)
     extra_args = [a for a in extra_args if a not in (TRUST, NO_TRUST)]
+    attention = smoke_attention(attention_backend, extra_args)
+    if attention != "auto" and _flag_value(extra_args, ATTENTION) is None:
+        extra_args += [ATTENTION, attention]  # as a --smoke-arg: it replaces a registry flag of its own
     n = layout["layers"]
     slug = f"{_slug(model)}-{n}layer"
     repo = f"{SMOKE_MODEL_ORG}/{slug}"

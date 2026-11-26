@@ -320,9 +320,62 @@ def test_the_trainer_floor_still_applies_to_a_known_trainer_image(tmp_path):
     facts = ia.parse_probe(probe_out(arch_list=["sm_80", "sm_90"]))
     problems, _, _ = ia.fit_problems(request([a100], tmp_path), ref, facts, "miles")
     assert len(problems) == 1 and "node b300-0: trainer image" in problems[0] and "sm90+" in problems[0]
-    lifted = dataclasses.replace(request([a100], tmp_path), attention_backend="flash")
+    lifted = dataclasses.replace(request([a100], tmp_path), attention_backend="unfused")
     problems, warnings, _ = ia.fit_problems(lifted, ref, facts, "miles")
-    assert problems == [] and "the flash attention backend takes another path" in warnings[0]
+    assert problems == [] and "the unfused attention backend takes another path" in warnings[0]
+    flash = dataclasses.replace(request([a100], tmp_path), attention_backend="flash")
+    problems, warnings, _ = ia.fit_problems(flash, ref, facts, "miles")  # flash's own floor, not the lift
+    assert len(problems) == 1 and "flash attention needs sm90+ cards; on A100-80GB (sm80)" in problems[0]
+    assert warnings == []
+
+
+A10G_FACTS = probe_out(arch_list=["sm_80", "sm_86", "sm_90", "sm_100", "sm_103"],
+                       packages={**MILES_FACTS["packages"], "vllm": "0.11.0"})
+
+
+@pytest.mark.parametrize("card, backend, role, refused", [
+    ("A10G", "flash", "trainer", True),      # sm86: flash's backward fails (the rehearsal)
+    ("L40S", "flash", "trainer", True),      # sm89: still below sm90
+    ("H100", "flash", "trainer", False),     # sm90: the floor itself
+    ("B300", "flash", "trainer", False),     # sm103
+    ("A10G", "unfused", "trainer", False),   # unfused trains on sm86
+    ("A10G", "fused", "trainer", False),     # the floor is flash's only
+    ("A10G", "auto", "trainer", False),
+    ("A10G", "flash", "sampler", False),     # inference attention: no such floor
+])
+def test_the_trainer_s_flash_attention_needs_sm90(tmp_path, card, backend, role, refused):
+    node = b300(0, card=card, hbm_gib=24.0 if card == "A10G" else 80.0)
+    req = request([node], tmp_path, role=role, attention_backend=backend)
+    problems, _, _ = ia.fit_problems(req, PINNED, ia.parse_probe(A10G_FACTS), "miles" if role == "trainer" else "vllm")
+    if refused:
+        assert problems == [f"node b300-0: the trainer's flash attention needs sm90+ cards; on {card} "
+                            f"({ia.node_card_arch(node)}) its backward pass fails (\"Unsupported compute "
+                            "capability\"): pass --attention-backend unfused (the smoke trains with it; it holds "
+                            "the full score matrix, short sequences only)"]
+    else:
+        assert problems == []
+
+
+def test_flash_on_sm86_stops_the_adoption_at_fit_on_any_node_of_the_role(tmp_path):
+    nodes = [b300(0, card="H100", hbm_gib=80.0), b300(1, card="A10G", hbm_gib=24.0)]
+    req = request(nodes, tmp_path, attention_backend="flash")
+    with pytest.raises(ia.AdoptError, match=r"step fit failed: node b300-1: the trainer's flash attention needs "
+                                            r"sm90\+ cards; on A10G \(sm86\)") as raised:
+        adopter(req, FakeNodes(nodes, probe=A10G_FACTS), smoke=passing_smoke()).run()
+    assert "node b300-0:" not in str(raised.value)  # the H100 node passes the floor
+    assert not (tmp_path / "site-images.yaml").exists()
+    ok = request(nodes, tmp_path, attention_backend="unfused")
+    adopter(ok, FakeNodes(nodes, probe=A10G_FACTS), smoke=passing_smoke()).run()
+    assert [r.ref for r in si.load(tmp_path / "site-images.yaml")] == [PINNED]
+
+
+@pytest.mark.parametrize("arch, refused", [("sm86", True), ("sm90", False), ("sm100", False), ("gfx950", False),
+                                           (None, False)])
+def test_the_flash_floor_reads_the_node_s_architecture(arch, refused, monkeypatch):
+    node = b300(0)
+    monkeypatch.setattr(ia, "node_card_arch", lambda n: arch)
+    assert (ia.flash_trainer_problem(node, "flash") is not None) is refused
+    assert ia.flash_trainer_problem(node, "unfused") is None and ia.flash_trainer_problem(node, None) is None
 
 
 def test_a_catalog_sampler_image_is_held_to_its_record(tmp_path):
