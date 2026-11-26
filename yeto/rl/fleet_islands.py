@@ -106,9 +106,11 @@ def next_learner_id(objects: Any, plan: Any, doc: dict[str, Any], name: str | No
 
 
 def compile_island(cfg: dict[str, Any], plan: Any, *, k: int, name: str, gpu: str, usd_per_h: float | None,
-                   samplers: list[Any], island_argv: list[str] | None = None) -> tuple[dict[str, Any], list[dict]]:
+                   samplers: list[Any], island_argv: list[str] | None = None,
+                   inventory: str | None = None) -> tuple[dict[str, Any], list[dict]]:
     """The trainer member and the sampler pool members of a new island k, compiled as
-    :func:`yeto.rl.fleet.compile_fleet` compiles island k of the run config."""
+    :func:`yeto.rl.fleet.compile_fleet` compiles island k of the run config. ``inventory``:
+    the node inventory of an ``ssh:`` island (its launch's ``--rl-node-inventory``)."""
     if not fleet_mod.NAME.fullmatch(str(name)):
         raise IslandChangeError(f"island name must be a word of letters, digits, '.', '_' or '-' (got {name!r})")
     where = f"island {name}"
@@ -142,6 +144,10 @@ def compile_island(cfg: dict[str, Any], plan: Any, *, k: int, name: str, gpu: st
     argv = il.island_argv(trainer_argv, island, plan, learners=len(plan.islands),
                           section_argv=il.island_section_argv(cfg, trainer_argv))
     argv += il.member_table_flags(k)
+    if inventory is not None:
+        if not str(gpu).startswith("ssh:"):
+            raise IslandChangeError(f"{where}: --inventory is the node inventory of an ssh: island (--gpu {gpu})")
+        argv += ["--rl-node-inventory", str(inventory)]
     member = il.trainer_member(island, plan, argv, prefix=f"{il.fleet_prefix(trainer_argv)}-i{k}",
                                fleet_shape=il.fleet_shape(trainer_argv))
     return member, members
@@ -208,6 +214,19 @@ def move(doc: dict[str, Any], cfg: dict[str, Any], name: str, *, gpu: str, usd_p
     if shape:
         member["fleet_shape"] = shape  # the moved island's layout is checked against the fleet's
     return member
+
+
+def join_check(cfg: dict[str, Any], doc: dict[str, Any], member: dict[str, Any], *, ssh: Any = None) -> None:
+    """An added ``ssh:`` island's nodes (``yeto.launch.island_join``): free in this fleet,
+    healthy, in one fabric group and not leased to another run; refused naming each problem."""
+    from yeto.launch import island_join  # noqa: PLC0415
+
+    fleet_argv = [str(a) for a in cfg["fleet"]["trainer_argv"]]
+    result = island_join.check_member(member, doc, fleet_argv=fleet_argv, run_id=il.fleet_prefix(fleet_argv),
+                                      ssh=ssh)
+    if not result.ok:
+        raise IslandChangeError(f"island {member['name']}'s nodes cannot join: " + "; ".join(result.refusals))
+    print(f"fleet island: island {member['name']}'s nodes pass the join checks (health, fabric group, lease)")
 
 
 # -- the launch's own dry run -------------------------------------------------------------------
@@ -295,6 +314,9 @@ def add_parser(fsub: Any) -> None:
     a.add_argument("--gpu", required=True, help="its trainer cluster (yeto launch --gpu, one cluster)")
     a.add_argument("--usd-per-h", type=float, default=None, help="its trainer's price (spend view)")
     a.add_argument("--samplers", required=True, help="a JSON file: the island's samplers list (pool entries)")
+    a.add_argument("--inventory", default=None, metavar="PATH",
+                   help="an ssh: island's node inventory (its trainer nodes); they are checked first: free in "
+                   "this fleet, healthy, one fabric group, not leased to another run")
     a.add_argument("--trainer-arg", action="append", default=None, metavar="ARG",
                    help="its own trainer flag (--rl-release-every / --rl-max-policy-age / --rl-sample-wait-s), "
                    "repeatable: --trainer-arg=--rl-release-every --trainer-arg=2")
@@ -331,9 +353,11 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
             k = next_learner_id(objects, plan, doc, args.name)
             member, pools = compile_island(run.cfg, plan, k=k, name=args.name, gpu=args.gpu,
                                            usd_per_h=args.usd_per_h, samplers=samplers,
-                                           island_argv=args.trainer_arg)
+                                           island_argv=args.trainer_arg, inventory=args.inventory)
             add(doc, member, pools)
             launch_member = member
+            if str(member["gpu"]).startswith("ssh:"):
+                join_check(run.cfg, current, member)
         elif args.island_command == "remove":
             remove(doc, args.name)
         else:
@@ -368,7 +392,7 @@ def main(args: Any, *, prepare: Callable[[Any], None] | None = None) -> int:
         if claimed != int(launch_member["learner_id"]):  # another add claimed it meanwhile: compile again
             launch_member, pools = compile_island(run.cfg, plan, k=claimed, name=args.name, gpu=args.gpu,
                                                   usd_per_h=args.usd_per_h, samplers=samplers,
-                                                  island_argv=args.trainer_arg)
+                                                  island_argv=args.trainer_arg, inventory=args.inventory)
     member_now = launch_member
 
     def change(fresh: dict[str, Any]) -> None:
