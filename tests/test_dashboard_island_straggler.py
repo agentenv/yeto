@@ -138,6 +138,60 @@ def test_the_controller_s_mark_reaches_the_card_through_the_island_records(tmp_p
     assert "straggler" not in out["texts"] and "straggler" not in out["nodes"]
 
 
+def _mark_of(r, k="1"):
+    return _cards(r)[k]["straggler"]
+
+
+def test_straggler_events_out_of_order_across_sources_end_as_the_newest_says():
+    """A host's store copy read after the other host's file (#910): the clear arrives before
+    the report it closes, or a report before a later clear. The newest by time decides, the
+    replay of the island's lifecycle leaves the mark alone, and the same event twice counts once."""
+    r = _reducer()
+    end = r.max_ts
+    r.feed(_cleared(at=end + 60), source="new-host")
+    r.feed(_flagged(at=end + 50), source="old-host")  # older: read late
+    assert _mark_of(r) is None  # not reported for good after its clear
+    r.feed({"event": "island_lost", "time_unix": end + 40, "island": "fleet-qa-l1-modal", "island_id": 1},
+           source="old-host")  # an older lifecycle record: the island's lifecycle is replayed
+    assert _mark_of(r) is None
+    r.feed(_flagged(at=end + 70), source="old-host")
+    r.feed(_flagged(at=end + 70), source="new-host")  # the same report from both copies
+    assert _mark_of(r)["missed_cycles"] == 3
+    r.feed(_cleared(at=end + 65), source="new-host")  # a clear older than the report
+    assert _mark_of(r)["missed_cycles"] == 3
+    page = r.overview(now=r.max_ts)
+    assert [i["id"] for i in page["islands"]].count("1") == 1
+
+
+def test_a_source_whose_clock_steps_back_folds_its_marks_in_write_order():
+    """One file: a report, then its clear stamped earlier (the host's clock stepped back).
+    The file's order decides, as for its lifecycle records."""
+    r = _reducer()
+    end = r.max_ts
+    r.feed(_flagged(at=end + 50), source="fleet.jsonl")
+    r.feed(_cleared(at=end + 20), source="fleet.jsonl")  # written after, stamped before
+    assert _mark_of(r) is None
+    r.feed(_flagged(at=end + 30), source="fleet.jsonl")  # and reported again after it
+    assert _mark_of(r)["missed_cycles"] == 3
+
+
+def test_the_mark_is_the_island_of_its_learner_id_not_of_its_launch_index(tmp_path):
+    """#910: an island launch of a per-island fleet runs its island as island 0 of its
+    launch, and fleet.jsonl names it by its learner id. The controller's straggler event
+    lands on that learner's card."""
+    from yeto.dashboard.fleet import from_env
+
+    log = from_env(tmp_path / "fleet.jsonl", {"r-i1-l0-trainer": "task"}, learner_ids={"r-i1-l0-trainer": 1})
+    log.event(st.EVENT, "r-i1-l0-trainer", **st.signal_fields(
+        st.Straggler(island=1, cleared=False, missed_cycles=3, merges=12, fragments=4, cycles=3, newest_step=40,
+                     last_merged_step=28, absent=True, reason="no push merged"), st.WAIT))
+    (row,) = [json.loads(line) for line in (tmp_path / "fleet.jsonl").read_text().splitlines()]
+    assert row["island_id"] == 1  # not the -l0 index of its name
+    r = _reducer()
+    r.feed(dict(row, time_unix=r.max_ts + 10))
+    assert _mark_of(r, "1")["missed_cycles"] == 3 and not _cards(r)["0"].get("straggler")
+
+
 def test_the_event_stream_shows_the_straggler_events(tmp_path):
     end = fleet_reducer().max_ts  # the newest events: the stream shows the latest 15
     events = _smoke(tmp_path, _reducer(_flagged(at=end + 10), _cleared(at=end + 20)))["events"]
