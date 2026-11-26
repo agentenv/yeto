@@ -1041,6 +1041,9 @@ class Steps:
     nccl_sizes: str = "16M,128M,1G"
     nccl_iters: int = 20
     nccl_all: bool = True  # also run the collectives on every node at once
+    # the node pairs of the NCCL collectives: disjoint (0,1), (2,3), ...; or every pair,
+    # in rounds of disjoint pairs (``yeto cluster probe``: the transport of each pair)
+    nccl_pairs: str = "disjoint"  # disjoint | all
     master_port: int = 29611
     ib_port: int = 18515
 
@@ -1051,8 +1054,10 @@ class ClusterPreflight:
     def __init__(self, nodes: Sequence[Node], *, image: str | None = None, ops: SshOps | None = None,
                  req: Requirements | None = None, steps: Steps | None = None, out_dir: Path | None = None,
                  log: Callable[[str], None] = lambda m: print(m, file=sys.stderr, flush=True),
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, max_parallel: int = 32) -> None:
         self.nodes = list(nodes)
+        # nodes / node pairs at once; 2 at least: both ends of a pair run together
+        self.max_parallel = max(2, int(max_parallel))
         self.image = image
         self.ops = ops or SshOps()
         self.req = req or Requirements()
@@ -1084,7 +1089,7 @@ class ClusterPreflight:
     def _parallel(self, fn: Callable[[Any], Any], items: Sequence[Any]) -> list[Any]:
         if not items:
             return []
-        with ThreadPoolExecutor(max_workers=max(1, min(32, len(items)))) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, min(self.max_parallel, len(items)))) as pool:
             return list(pool.map(fn, items))
 
     def _env(self, node: Node, n: int, **extra: str) -> dict[str, str]:
@@ -1352,7 +1357,8 @@ class ClusterPreflight:
     def _nccl(self, ready: Sequence[NodeState]) -> list[Check]:
         if len(ready) < 2:
             return [Check("cluster", "nccl", SKIP, "fewer than two nodes can run the container")]
-        groups: list[list[list[NodeState]]] = [[[ready[i], ready[j]] for i, j in r] for r in disjoint_pairs(len(ready))]
+        rounds = round_robin(len(ready)) if self.steps.nccl_pairs == "all" else disjoint_pairs(len(ready))
+        groups: list[list[list[NodeState]]] = [[[ready[i], ready[j]] for i, j in r] for r in rounds]
         if self.steps.nccl_all and len(ready) > 2:
             groups.append([list(ready)])
         files = {BENCH_FILE: bench_source()}
@@ -1630,7 +1636,16 @@ def resolve_nodes(gpu: str, inventory: str | None) -> list[Node]:
     if rest.endswith((".yaml", ".yml", ".json")) or path.is_file():
         if inventory and Path(inventory).expanduser() != path:
             raise InventoryError("give the inventory once: --gpu ssh:<inventory> or --rl-node-inventory")
-        return island_nodes(load_inventory(path), "trainer")
+        from .. import fabric_groups
+
+        every = load_inventory(path)
+        nodes = island_nodes(every, "trainer")
+        ok, message, hint_only = fabric_groups.check_placement(nodes, len(nodes), inventory=every)
+        if not ok:
+            raise InventoryError(f"the trainer nodes of {path} are not one fabric group: {message}")
+        if hint_only:
+            fabric_groups.placement_hint(message, log_only=True)
+        return nodes
     if not inventory:
         raise InventoryError(f"--gpu {gpu} needs --rl-node-inventory (the nodes to check)")
     from ...gpu_spec import parse_gpu_spec
@@ -1638,7 +1653,7 @@ def resolve_nodes(gpu: str, inventory: str | None) -> list[Node]:
     (island,) = parse_gpu_spec(gpu)
     args = argparse.Namespace(rl_node_inventory_nodes=load_inventory(inventory))
     try:
-        return list(inventory_trainer_nodes(args, island))
+        return list(inventory_trainer_nodes(args, island, hint_to_log=True))
     except SshIslandError as exc:
         raise InventoryError(str(exc)) from None
 

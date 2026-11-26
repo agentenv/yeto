@@ -268,3 +268,173 @@ uses another own-cluster field (`fabric_group`).
 Known follow-up: the nodes do not renew their own leases. When the launcher is gone,
 a node stays out of other runs only while its lease is kept, or while the takeover
 check finds the old run's processes on it.
+
+## Fabric groups
+
+A multi-node trainer island needs nodes that reach each other at RDMA rate. Two
+nodes on different switches, or a node whose HCA is down, still talk over TCP:
+NCCL falls back to `NET/Socket` without failing, and the island runs many times
+slower. A fabric group is a set of nodes in which every two nodes reach each
+other over IB / RoCE at link rate. `yeto cluster probe` measures the groups and
+writes them into the inventory as `fabric_group`; the launcher then keeps every
+multi-node island inside one group.
+
+### Probing
+
+<!-- doc-test: probe -->
+```bash
+yeto cluster probe --inventory nodes.yaml --dry-run    # the plan and its time only: no SSH, no file
+yeto cluster probe --inventory nodes.yaml              # measure and print the groups
+yeto cluster probe --inventory nodes.yaml --write      # ... and write fabric_group into nodes.yaml
+yeto cluster check --inventory nodes.yaml --need 2     # the groups the file declares; where 2 nodes go
+```
+
+The probe runs on idle nodes only. It starts the trainer image on every node
+and runs benchmarks across the fabric, which would disturb a running job and be
+disturbed by it. Before anything else it lists the GPU processes
+(`nvidia-smi --query-compute-apps`) and the `yeto-` containers (`docker ps`) of
+every node. A busy node, or one whose GPU processes cannot be listed, refuses
+the whole probe (exit 3) with the node and what runs there. Probe the idle nodes
+with `--nodes`, or pass `--force` to probe anyway. The TCP port check of the
+preflight runs as well; a port already in use is a WARN, as in `yeto preflight`.
+
+The probe runs the cross-node steps of `yeto preflight` (it reuses them, it has
+no benchmark of its own), inside the trainer image with each node's
+`docker_args`:
+
+- `ib_write_bw` between every pair of nodes, rail by rail (HCA i to HCA i, the
+  HCAs of the node's `NCCL_IB_HCA`);
+- the NCCL collectives on every pair of nodes with `NCCL_DEBUG=INFO`, read for
+  the transport NCCL picked.
+
+Two nodes share an edge when all of these hold:
+
+- their `ib_write_bw` check passes against a known link rate (every rail at
+  least 80 % of its link rate, `Requirements.ib_pass_fraction`); an unknown link
+  rate is a WARN and no edge;
+- their NCCL run goes over `NET/IB` (without GPUDirect RDMA still counts: the
+  transport is IB);
+- neither node failed an HCA check of the preflight (`ib_ports`, `ib_hca`, `gid`,
+  `dev_infiniband`), and each has as many active rails as HCAs it declares
+  (`NCCL_IB_HCA`, else every port of its fabric's link layer).
+
+A group must be a clique, so each connected component is cut until it is one.
+The node with the most missing edges leaves (ties: the last by name) until the
+rest are all connected to each other. The nodes that left are grouped again among
+themselves. The probe prints every missing edge inside a component. A node left
+alone is `fabric unavailable`, with its reasons: the failed node check, the pairs
+whose `ib_write_bw` failed, or whose NCCL fell back to `NET/Socket`.
+
+```text
+fabric group fg-3f9a0c12: b300-0, b300-1 (2 node(s))
+missing edge b300-0<->b300-2: NCCL: NCCL runs over NET/Socket (TCP), not NET/IB
+fabric unavailable: b300-2: to b300-0: NCCL: NCCL runs over NET/Socket (TCP), not NET/IB
+```
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | every probed node is in a group and no edge is missing |
+| 1 | a node is fabric unavailable, an edge is missing, or the deadline cut the probe short |
+| 2 | a usage or inventory error |
+| 3 | a node is busy |
+
+| Flag | Default | Description |
+|---|---|---|
+| `--inventory` | required | the SSH node inventory (YAML / JSON) |
+| `--nodes` | every node | probe only these nodes (comma-separated names; CUDA nodes only) |
+| `--image` | the inventory's | the trainer image (`ib_write_bw`, torch with NCCL) |
+| `--no-pull` | off | do not `docker pull` the image |
+| `--nccl-pairs` | `all` | NCCL on every pair, or on disjoint pairs only (see below) |
+| `--ib-seconds`, `--nccl-sizes`, `--nccl-iters` | `3`, `16M,128M`, `10` | benchmark length |
+| `--max-parallel` | `16` | nodes, or node pairs, probed at once (at least 2; a pair runs both ends together) |
+| `--deadline` | `3600` | seconds for the whole probe; a probe it cuts short writes nothing and exits 1 |
+| `--force` | off | probe busy nodes too |
+| `--write` | off | write `fabric_group` of every probed node into the file |
+| `--dry-run` | off | print the plan and an estimate of its time; no SSH |
+| `--json` | off | print groups, unavailable nodes, edges, missing edges and pair problems as JSON |
+
+`--nccl-pairs disjoint` runs NCCL only on disjoint pairs (0+1, 2+3, ...). A pair
+without its own run then counts when both of its nodes ran `NET/IB` with another
+node. That is an inference: it misses a fallback to `NET/Socket` that only that
+one pair has. `all`, the default, runs every pair and judges each pair by its own
+run. `ib_write_bw` runs on every pair either way.
+
+Pairs grow as n(n-1)/2: 6 nodes are 15 pairs in 5 rounds of disjoint pairs, and
+the dry run prints an estimate. The fabric rarely changes, so probe once when the
+machines arrive and again after recabling or a switch change, not before every
+run.
+
+### Group names
+
+Group names stay the same as nodes come and go:
+
+1. old names (the inventory's `fabric_group`) go to new groups by the number of
+   nodes they share, most first over every pair of old name and new group, each
+   name and each group once: a node added to a probed fabric joins its group's
+   name, and removing a node renames nothing;
+2. a new group is named `fg-` plus a hash of its fabric: the IB subnet prefixes
+   of its compute ports, or the IP networks of its RoCE ports;
+3. when the fabric gives no distinct key, `fg-` plus a hash of its sorted node
+   names.
+
+A name held by an inventory node outside the probe (`--nodes`) is never reused
+for another group. You may also write a name by hand (letters, digits, `.`, `_`,
+`-`; at most 64 characters). `unavailable` is reserved.
+
+### Writing the inventory
+
+Only `--write` writes. Only the `fabric_group` lines change: every other byte of
+a YAML inventory (comments, anchors, flow mappings) is kept.
+
+- A probed node in a group gets `fabric_group: <name>`.
+- A fabric unavailable node gets `fabric_group: unavailable`. Such a node never
+  joins a multi-node island; a single-node island takes it as before.
+- When the probed node holds an anchor that unprobed nodes merge
+  (`- &b300 ...` then `{<<: *b300, ...}`), those nodes get their current value
+  written on themselves (`fabric_group: null`) so the anchor's new group does not
+  reach them.
+
+The edited text is read back and compared with the original, then written to a
+temporary file next to the target, synced to disk and renamed over it. A symlink
+is followed and kept, the mode is kept, and the owner too where the writer may
+set it. Without `--write` the probe writes no file at all.
+
+```yaml
+nodes:
+  - name: b300-0
+    fabric_group: fg-3f9a0c12
+    host: ops@192.0.2.20
+    # (the other fields as before)
+```
+
+### Placement
+
+The rule applies to multi-node trainer islands (`--gpu ssh:NxMxCARD` with
+N > 1, and `--gpu ssh:<inventory file>`); a single-node island has no fabric
+constraint.
+
+- Once any node of the inventory has the `fabric_group` key (`null` included),
+  the island's nodes must all be healthy nodes of one group. Otherwise
+  `yeto launch` (and its dry run) and `yeto preflight` refuse before any SSH,
+  naming the groups and their node counts: `the island needs 6 healthy nodes of
+  one fabric group; group fg-3f9a0c12 has only 4, group fg-8d21e7b0 has only 2`.
+  A node without a group, or `unavailable`, is listed as such: probe it, or
+  remove it from the trainer role.
+- The choice is fixed (`yeto/launch/fabric_groups.py`, `pick_placement`):
+  excluded nodes leave first (not healthy, quarantined, leased by another run).
+  Then the group with the most free nodes that holds the island wins (ties: the
+  group name), and its nodes go by name. A caller whose node could not be taken
+  excludes it and asks again, so the next node of the same group fills in.
+- Healthy here means not excluded by the caller. The running health check of
+  the nodes is wired into this filter once it lands (the node health change);
+  until then a node counts as healthy.
+- An inventory without any `fabric_group` key (every inventory written before
+  the probe existed, the customer's included) places islands as before, in the
+  inventory's order. A real launch prints one note into the launcher log
+  suggesting `yeto cluster probe`. A dry run and `yeto preflight` print nothing
+  (the note goes to the logger only), so their output stays byte for byte what
+  it was. `yeto cluster probe` and `yeto cluster check` always print the note.
+
+To drop the rule, delete the `fabric_group` lines.
