@@ -895,6 +895,9 @@ class IslandSpares:
     # (lost node, incarnation) whose own stop was confirmed: that stop is owed no more
     stopped: set[tuple[str, int]] = field(default_factory=set)
     stop_threads: list[Any] = field(default_factory=list, repr=False)  # background stops of lost nodes
+    # node -> the quarantine (island, reason, owed, lease_holder) the store refused: kept out of
+    # this island's picks and owing its stops here until the record is written (each check tries)
+    pending: dict[str, dict[str, Any]] = field(default_factory=dict)
     waiting: bool = False
     limited: bool = False  # the replacement limit was reported
     wait_s: float = 0.0
@@ -1042,7 +1045,10 @@ def spare_candidates(spares: IslandSpares, island: str, current: Sequence[Node],
             skipped[node.name] = f"fabric group {fabric_group(node) or 'none'} (the island's is {group or 'none'})"
         else:
             candidates.append(node)
-            if (record := spares.records.own_quarantine(node.name)) is not None:
+            if node.name in spares.pending:  # its record not written yet: this launcher keeps it out
+                skipped[node.name] = (f"quarantined ({str(spares.pending[node.name].get('reason') or '')[:120]}; "
+                                      "its record not written to the store yet)")
+            elif (record := spares.records.own_quarantine(node.name)) is not None:
                 skipped[node.name] = f"quarantined ({str(record.get('reason') or '')[:120]})"
             elif (record := spares.records.shared_quarantined(node.name)) is not None:  # another run's
                 skipped[node.name] = (f"quarantined: {describe(node.name, record)}; once fixed, "
@@ -1175,7 +1181,10 @@ def close_owed_elsewhere(spares: IslandSpares, node: Node, ops: Any) -> tuple[bo
     run_id = spares.records.run_id
     try:
         with _owed_lock(run_id, node.name):
-            closed = ssh_trainer_ledger.release_owed_elsewhere(run_id=run_id, node=node.name, stop=stopped)
+            closed = ssh_trainer_ledger.release_owed_elsewhere(run_id=run_id, node=node.name, stop=stopped,
+                                                               strict=True)
+    except ssh_trainer_ledger.LedgerUnread as error:  # its owed rows not known: owed, not a candidate now
+        return False, f"the ledger could not be read ({error})"[:300]
     except Exception as error:  # noqa: BLE001 - not known whether it still runs: not a candidate now
         return False, f"its owed stops not run ({type(error).__name__}: {error})"[:300]
     if closed:

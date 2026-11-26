@@ -2429,3 +2429,208 @@ def test_the_trainer_pick_leaves_out_a_node_quarantined_in_the_run_store(tmp_pat
     args = SimpleNamespace(cluster_prefix=f"oc-f-{tmp_path.name}", rl_checkpoint_store=str(tmp_path / "store"))
     picked = sti.lease_trainer_nodes(args, [b300(i) for i in range(3)], 2, leases, name="isl", wait_s=0)
     assert [n.name for n in picked] == ["b300-1", "b300-2"]
+
+
+# ------------------------------------------------------------------ REV-920b
+def test_down_stops_an_earlier_incarnation_an_old_node_did_not_confirm_or_keeps_the_island(tmp_path):
+    """REV-920b M-a: after a rollback whose stop of incarnation 1 b300-0 did not confirm,
+    down() stops 1 there first; while it is not confirmed, down() is False and the island keeps
+    its leases, claims and the row of 1; once confirmed, all of it goes."""
+    run = _rollback_unstopped(tmp_path, unstopped="b300-0")
+    assert 1 in run.ops.islands["isl"].islands.unreleased
+    before = run.cluster.calls.count(("kill", "b300-0", 1))
+    assert run.ops.down("isl") is False
+    assert run.cluster.calls.count(("kill", "b300-0", 1)) == before + 1
+    rec = run.ops.islands["isl"]
+    assert run.spares.records.holder("b300-0") == "isl" and rec.lock is not None
+    assert "run1/isl-i1" in open_rows(tmp_path)
+    run.cluster.kill_rc.clear()
+    assert run.ops.down("isl") is True
+    assert run.spares.records.holder("b300-0") is None and rec.lock is None
+    assert "run1/isl-i1" not in open_rows(tmp_path)
+
+
+def test_a_rollback_with_an_unconfirmed_old_node_keeps_the_incarnation_row_open(tmp_path):
+    """REV-920b L-c (m01): b300-0 and the spare both leave incarnation 1 unconfirmed: the
+    spare owes its own row, and the row of 1 stays open for b300-0."""
+    leases = FakeLeases()
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[spare(3), spare(4)], leases=leases)
+    real = cluster.start
+
+    def start(node, script):
+        if node.name == "b300-2" and "setsid bash -c" in script and cluster._k(script) == 1:
+            raise RuntimeError("ssh start refused on rank 2")
+        return real(node, script)
+
+    cluster.start = start
+    cluster.kill_rc.update({"b300-0": 1, "b300-3": 1})
+    assert ops.relaunch(None, "isl") is None
+    rows = open_rows(tmp_path)
+    assert "run1/isl-i1" in rows and "run1/isl-i1-owed-b300-3" in rows
+    assert 1 in ops.islands["isl"].islands.unreleased
+
+
+def _refusing(records, *names):
+    real = records.quarantine
+    state = {"down": True}
+
+    def quarantine(name, **kw):
+        if state["down"] and name in names:
+            raise isp.SpareError("store write refused (503)")
+        return real(name, **kw)
+
+    records.quarantine = quarantine
+    return state
+
+
+def test_a_loss_whose_quarantine_the_store_refuses_owes_a_row_and_is_written_once_the_store_is_back(tmp_path):
+    """REV-920b M-b: _mark_lost with a store that refuses the write: the node owes its stop in a
+    ledger row, this island does not pick it again, its claim keeps the run's other islands off
+    it; once the store answers, a check writes the record and gives the claim up."""
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[spare(3)])
+    store_state = None
+    rec = ops.islands["isl"]
+    lines: list[str] = []
+    ops.log = lines.append
+    store_state = _refusing(spares.records, "b300-2")
+    spares.lost.pop(2, None)
+    ops._mark_lost(rec, 2, "XID 79")
+    assert "run1/isl-i0-owed-b300-2" in open_rows(tmp_path)
+    assert spares.records.holder("b300-2") == "isl" and "b300-2" in spares.pending
+    assert ops._owes(rec, "b300-2", 0) and ops._still_owed(rec, spares.pool[2], 0)
+    assert any("CRITICAL" in ln and "holds its claim and owes its stops" in ln for ln in lines)
+    _c, _g, skipped, _m, _k = isp.spare_candidates(spares, "isl", list(rec.spec.nodes), [1, 2])
+    assert "not written to the store yet" in skipped["b300-2"]  # this island leaves it out too
+    store_state["down"] = False
+    ops._replace_checked(rec)  # a check: the record is written now
+    assert spares.records.own_quarantine("b300-2") is not None and "b300-2" not in spares.pending
+    assert spares.records.holder("b300-2") is None
+
+
+def test_a_rollback_spare_whose_quarantine_was_refused_is_pickable_once_written_and_released(tmp_path):
+    """REV-920b M-b / L-c (m04): the rollback spare's quarantine is refused: its claim stays
+    with isl; the store comes back, down() writes the record and gives the claim up; once its
+    stop goes through and release-node runs, isb takes it."""
+    import dataclasses
+
+    leases = FakeLeases()
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[spare(3), spare(4)], leases=leases)
+    state = _refusing(spares.records, "b300-3")
+    real = cluster.start
+
+    def start(node, script):
+        if node.name == "b300-2" and "setsid bash -c" in script and cluster._k(script) == 1:
+            raise RuntimeError("ssh start refused on rank 2")
+        return real(node, script)
+
+    cluster.start, cluster.kill_rc["b300-3"] = start, 1
+    assert ops.relaunch(None, "isl") is None
+    cluster.start = real
+    assert spares.records.own_quarantine("b300-3") is None and spares.records.holder("b300-3") == "isl"
+    assert "run1/isl-i1-owed-b300-3" in open_rows(tmp_path)
+    sb = dataclasses.replace(islands_spec(), nodes=(b300(5), b300(6), b300(7)))
+    other, _ = make_spares(tmp_path, sb, [spare(3)])
+    pick = isp.pick_spare(other, "isb", list(sb.nodes), {1: "lost"}, ops=cluster, health={"b300-3": (True, "healthy")})
+    assert pick.node is None and "held by island isl" in pick.skipped["b300-3"]
+    state["down"] = False
+    assert ops.down("isl")
+    assert spares.records.own_quarantine("b300-3") is not None and spares.records.holder("b300-3") is None
+    cluster.kill_rc.clear()
+    inv = _inventory(tmp_path, [*islands_spec().nodes, spare(3), spare(4)])
+    assert isp.release_node_main(inventory=inv, name="b300-3", store=str(tmp_path / "store"), ssh=cluster,
+                                 objects=store, kill_grace_s=1, say=lambda m: None, leases=leases) == 0
+    pick = isp.pick_spare(other, "isb", list(sb.nodes), {1: "lost"}, ops=cluster, health={"b300-3": (True, "healthy")})
+    assert pick.node is not None and pick.node.name == "b300-3"
+    assert not [r for r in open_rows(tmp_path) if "b300-3" in r]
+
+
+def test_a_confirmed_stop_of_a_node_whose_quarantine_was_refused_owes_nothing_more(tmp_path):
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[spare(3)])
+    rec = ops.islands["isl"]
+    _refusing(spares.records, "b300-2")
+    spares.lost.pop(2, None)
+    ops._mark_lost(rec, 2, "XID 79", answers=True)  # still answers: stopped in the background
+    join_stops(spares)
+    assert ("kill", "b300-2", 0) in cluster.calls
+    assert spares.pending["b300-2"]["owed"] == [] and not ops._owes(rec, "b300-2", 0)
+    assert "run1/isl-i0-owed-b300-2" not in open_rows(tmp_path)
+
+
+def test_a_candidate_whose_ledger_cannot_be_read_is_passed_over(tmp_path, monkeypatch):
+    """REV-920b L-a (m09): the run's ledger cannot be read: the candidate's owed rows are not
+    known, so it is not a candidate this round."""
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[spare(3)])
+    assert ops.relaunch(None, "isl") == 1
+    cluster.unreachable.discard("b300-1")
+    store.delete("fleet/nodes/b300-1/quarantine.json")  # released elsewhere, its owed row open
+
+    def broken(self):
+        raise OSError("ledger unreadable")
+
+    monkeypatch.setattr(ResourceLedger, "open_resources", broken)
+    ok, why = isp.close_owed_elsewhere(spares, spares.pool[1], cluster)
+    assert not ok and "the ledger could not be read" in why
+    assert not [c for c in cluster.calls if c[0] == "kill" and c[1] == "b300-1" and c[2] == 0]
+
+
+def test_a_rollback_whose_only_unconfirmed_stop_is_a_lost_spare_owes_its_incarnation_nowhere_else(tmp_path):
+    """REV-920b (m02): only the lost spare b300-3 did not confirm the stop of incarnation 1: its
+    own row and record owe that stop, so the island does not carry 1 as unreleased and down()
+    stops it on no old node again."""
+    run = _rollback_unstopped(tmp_path)
+    rec = run.ops.islands["isl"]
+    assert 1 not in rec.islands.unreleased
+    before = [c for c in run.cluster.calls if c[0] == "kill" and c[2] == 1]
+    assert run.ops.down("isl")
+    after = [c for c in run.cluster.calls if c[0] == "kill" and c[2] == 1]
+    assert after == before
+
+
+def test_an_unhealthy_candidate_does_not_run_its_owed_stops(tmp_path):
+    """REV-920b (m08): an unhealthy candidate is no candidate: its owed stop is not run in
+    the checks and its row stays open."""
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[spare(3)])
+    assert ops.relaunch(None, "isl") == 1
+    cluster.unreachable.discard("b300-1")
+    store.delete("fleet/nodes/b300-1/quarantine.json")  # released elsewhere, its owed row open
+    cluster.sick.add("b300-1")
+    checked = isp.check_candidates(spares, "isl", list(ops.islands["isl"].spec.nodes), {1: "lost"}, ops=cluster)
+    assert checked["b300-1"][0] is False and checked["b300-1"][1].startswith("unhealthy")
+    assert ("kill", "b300-1", 0) not in cluster.calls
+    assert "run1/isl-i0-owed-b300-1" in open_rows(tmp_path)
+
+
+def test_a_candidate_whose_owed_stop_raises_is_passed_over(tmp_path, monkeypatch):
+    """REV-920b (m09): the owed stop raises (not a ledger read error): not known whether the
+    old incarnation still runs there, so the candidate is passed over and its row stays open."""
+    from yeto.launch import ssh_trainer_ledger
+
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[spare(3)])
+    assert ops.relaunch(None, "isl") == 1
+    cluster.unreachable.discard("b300-1")
+    store.delete("fleet/nodes/b300-1/quarantine.json")
+
+    def boom(row, ops=None, dry_run=False, ssh=None):
+        raise RuntimeError("ssh agent gone")
+
+    monkeypatch.setattr(ssh_trainer_ledger, "cleanup_release", boom)
+    ok, why = isp.close_owed_elsewhere(spares, spares.pool[1], cluster)
+    assert not ok and why.startswith("its owed stops not run (RuntimeError: ssh agent gone")
+    assert "run1/isl-i0-owed-b300-1" in open_rows(tmp_path)
+
+
+def test_two_refused_quarantines_of_one_node_owe_both_stops(tmp_path):
+    """REV-920b M-b: a second quarantine of a node whose first one the store refused adds its
+    stop to the one kept in memory; once written, the record lists both."""
+    cluster, ops, spares, store, clock = lost_island(tmp_path, extra=[spare(3)])
+    rec = ops.islands["isl"]
+    state = _refusing(spares.records, "b300-2")
+    node = spares.pool[2]
+    for inc in (0, 1):
+        assert not ops._quarantine(rec, node, reason=f"lost at {inc}",
+                                   owed=[isp.owed_stop("run1", "isl", inc, 2, False)])
+    assert ops._owes(rec, "b300-2", 0) and ops._owes(rec, "b300-2", 1)
+    state["down"] = False
+    ops._flush_pending(rec)
+    doc = spares.records.own_quarantine("b300-2")
+    assert sorted(int(o["incarnation"]) for o in doc["owed"]) == [0, 1]

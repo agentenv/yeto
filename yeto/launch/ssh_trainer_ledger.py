@@ -117,19 +117,26 @@ def release_owed(*, run_id: str, island: str, incarnation: int, node: str) -> tu
     return OWED_RELEASED, str(ledger.path)
 
 
-def release_owed_elsewhere(*, run_id: str, node: str, stop: Any = None) -> list[str]:
+class LedgerUnread(RuntimeError):
+    """The run's ledger could not be read (:func:`release_owed_elsewhere` with ``strict``)."""
+
+
+def release_owed_elsewhere(*, run_id: str, node: str, stop: Any = None, strict: bool = False) -> list[str]:
     """``node`` is picked again and has no quarantine record: its owed stops were run
     elsewhere (``yeto cluster release-node`` on a machine without this run's ledger), so
     the run's open owed rows of that node close (``reason: released elsewhere``) and it is
     not billed twice. ``stop(row)``: run the row's stop first, the row closes only when it
-    returns True. Returns the rows closed."""
+    returns True. Returns the rows closed. A ledger that cannot be read closes nothing; with
+    ``strict`` it raises :class:`LedgerUnread` (its rows are not known; a missing file has none)."""
     from yeto.cost.ledger import record_safely
 
     try:
         ledger = _run_ledger(run_id)
         rows = [r for r in ledger.open_resources()
                 if r.kind == KIND and str(r.id).startswith(f"{run_id}/") and str(r.id).endswith(f"-owed-{node}")]
-    except Exception:  # noqa: BLE001 - no ledger: nothing billed here
+    except Exception as error:  # noqa: BLE001 - no ledger: nothing billed here
+        if strict:
+            raise LedgerUnread(f"{type(error).__name__}: {error}") from error
         return []
     closed = []
     for row in rows:

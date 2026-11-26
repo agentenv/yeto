@@ -570,7 +570,9 @@ class SshIslandOps:
                 return None
 
     def down(self, name: str) -> bool:
-        """Release the island's current incarnation; True once every node confirmed it."""
+        """Release the island's current incarnation, and any earlier one not confirmed stopped
+        on a node; True once every node confirmed them (else its leases, claims and ledger
+        rows are kept)."""
         rec = self.islands.get(name)
         if rec is None:
             return True
@@ -579,8 +581,15 @@ class SshIslandOps:
             return True
         self._join_owed_retries(rec)
         with self._lock:
+            self._flush_pending(rec)
+            lost = self._lost_names(rec)
+            # an earlier incarnation not confirmed stopped on a node (a failed start on spares):
+            # stopped first; not confirmed, the island stays held (leases, claims, its ledger row)
+            earlier_ok = True
+            for k in sorted(set(rec.islands.unreleased) - {int(rec.incarnation)}):
+                earlier_ok &= rec.islands.release_incarnation(k, skip=lost, owed=frozenset())
             # a lost node is not waited for: it owes its stop (its own ledger row, release-node)
-            ok = self._release(rec, rec.incarnation, skip=self._lost_names(rec))
+            ok = self._release(rec, rec.incarnation, skip=lost) and earlier_ok
             if ok and rec.spares is not None:  # its nodes are free for another island of the run
                 for node in rec.spec.nodes:
                     rec.spares.records.unclaim(node.name, rec.name)
@@ -826,6 +835,11 @@ class SshIslandOps:
         holder = lease_holder_id(sp.leases) if sp.leases is not None else None
         if self._quarantine(rec, node, reason=reason, owed=owed, lease_holder=holder):
             sp.records.unclaim(node.name, rec.name)  # not written: the claim keeps the run's islands off it
+        elif inc is not None:  # no record to owe it in: its stop is in a ledger row of its own now
+            from . import ssh_trainer_ledger  # noqa: PLC0415
+
+            ssh_trainer_ledger.record_owed(run_id=rec.spec.run_id, island=rec.name, incarnation=inc, node=node,
+                                           rank=rank, docker=rec.spec.docker, kill_grace_s=self.kill_grace_s)
         keep = getattr(sp.leases, "keep_all", None)
         if keep is not None:  # its cross-run lease is held (out of the renewals) until release-node
             try:
@@ -855,11 +869,20 @@ class SshIslandOps:
     def _still_owed(self, rec: _Island, node: Any, inc: int) -> bool:
         """The node's quarantine record (read now) still lists its stop of ``inc`` (a
         release-node may have run it, and removed the record, since)."""
+        if self._pending_owes(rec, node.name, inc):
+            return True
         doc = rec.spares.records.own_quarantine(node.name)
         if doc is not None and doc.get("unreadable"):  # not known: owed (a stop is idempotent)
             return True
         return any(str(o.get("island")) == rec.name and int(o.get("incarnation", -1)) == int(inc)
                    for o in (doc or {}).get("owed") or ())
+
+    @staticmethod
+    def _pending_owes(rec: _Island, name: str, inc: int) -> bool:
+        """A quarantine the store refused (``spares.pending``) lists that stop of ``name``."""
+        held = rec.spares.pending.get(name)
+        return held is not None and any(str(o.get("island")) == rec.name and int(o.get("incarnation", -1)) == int(inc)
+                                        for o in held.get("owed") or ())
 
     def _run_owed_stop(self, rec: _Island, node: Any, inc: int, container: str | None, *, what: str) -> bool:
         """One owed stop of ``node`` (no ops lock); True once it went through. The record is
@@ -887,6 +910,10 @@ class SshIslandOps:
             return False
         with sp.owed_lock:  # the release that records owed stops reads this under the same lock
             sp.stopped.add((node.name, int(inc)))  # the release owes it no row, even if the marker below fails
+            held = sp.pending.get(node.name)
+            if held is not None:  # a quarantine not written yet owes it no more either
+                held["owed"] = [o for o in held.get("owed") or ()
+                                if not (str(o.get("island")) == rec.name and int(o.get("incarnation", -1)) == int(inc))]
             try:
                 sp.records.settle(node.name, run_id=self.run_id, island=rec.name, incarnation=inc)
             except Exception as error:  # noqa: BLE001 - its record still lists the stop (release-node runs it again)
@@ -943,15 +970,38 @@ class SshIslandOps:
             self.log(f"[launcher] WARN: {rec.name}: its lease record not put back ({warn})")
 
     def _quarantine(self, rec: _Island, node: Any, **kw: Any) -> bool:
-        """``NodeRecords.quarantine``; False (said CRITICAL) when the store refused it, e.g. a
-        record it could not read (its owed stops would be written over)."""
+        """``NodeRecords.quarantine``; False when the store refused it (e.g. a record it could
+        not read, whose owed stops would be written over): the quarantine is kept in memory
+        (``spares.pending``: out of this island's picks, its stops owed), the caller keeps the
+        node's claim (the run's other islands), and each check writes it again
+        (:meth:`_flush_pending`)."""
+        sp = rec.spares
         try:
-            rec.spares.records.quarantine(node.name, island=rec.name, **kw)
+            sp.records.quarantine(node.name, island=rec.name, **kw)
             return True
-        except Exception as error:  # noqa: BLE001 - reported; the caller keeps the claim
+        except Exception as error:  # noqa: BLE001 - kept in memory, written again at each check
+            held = sp.pending.get(node.name) or {}
+            sp.pending[node.name] = {**held, **kw, "owed": [*(held.get("owed") or ()), *map(dict, kw.get("owed") or ())]}
             self.log(f"[launcher] CRITICAL: {rec.name}: node {node.name} is not quarantined in the store ({error}); "
-                     "this launcher keeps it out of its islands")
+                     "this launcher keeps it out of its picks, holds its claim and owes its stops, and writes "
+                     "the record again at each check")
             return False
+
+    def _flush_pending(self, rec: _Island) -> None:
+        """Write the quarantines the store refused before (:meth:`_quarantine`); once one is
+        written, the node's claim is given up (its record keeps every island off it)."""
+        sp = rec.spares
+        if sp is None or not sp.pending:
+            return
+        for name, kw in list(sp.pending.items()):
+            try:
+                sp.records.quarantine(name, island=rec.name, **kw)
+            except Exception as error:  # noqa: BLE001 - tried again at the next check
+                self.log(f"[launcher] {rec.name}: the quarantine of {name} still not written ({error})")
+                continue
+            sp.pending.pop(name, None)
+            sp.records.unclaim(name, rec.name)  # a lost node or a lost spare: its record holds it now
+            self.log(f"[launcher] {rec.name}: the quarantine of {name} is written to the store now")
 
     @staticmethod
     def _lease_holder(sp: Any) -> str | None:
@@ -1092,6 +1142,8 @@ class SshIslandOps:
     def _replace_checked(self, rec: _Island) -> int | None:
         """:meth:`_replace` with the spares' health checks outside the ops lock: check, pick
         under the lock, and check the next candidates when a checked one was taken meanwhile."""
+        with self._lock:
+            self._flush_pending(rec)  # quarantines the store refused before
         if rec.spares.waiting:  # a backoff check: a lost node back (a network partition) gets its owed stop
             self._retry_owed_stops(rec)
         health: dict[str, tuple[bool, str]] = {}
@@ -1312,6 +1364,8 @@ class SshIslandOps:
     def _owes(self, rec: _Island, name: str, incarnation: int) -> bool:
         """Whether lost node ``name`` still owes its stop of ``incarnation`` (its quarantine
         record in this run lists it; a node another run quarantined never ran it)."""
+        if self._pending_owes(rec, name, incarnation):
+            return True
         doc = rec.spares.records.own_quarantine(name)
         if doc is None:
             return False
