@@ -11,6 +11,10 @@
 #   python -c "from yeto.launch.node_inventory import load_inventory; \
 #     print(len(load_inventory('inventory.own-b300-nodes.yaml')))"
 
+# Leases across runs (optional; docs/OWN_CLUSTERS.md): uncomment to let one run at a time hold
+# each node.
+# lease_store: s3://<bucket>/yeto-node-leases/<site>
+
 nodes:
   - &trainer
     name: own-b300-0

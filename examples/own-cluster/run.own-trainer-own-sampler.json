@@ -1,5 +1,5 @@
 {
-  "comment": "Own cluster as both the trainer and the sampler pool: async GRPO of Qwen3-4B (full parameters) on a 2-node trainer island of own 8 x B300 nodes (SSH + Docker, inventory.own-b300-nodes.yaml, roles: [trainer]) fed by an own SSH sampler pool of one 8 x B300 node (roles: [sampler]; Qwen3-4B vLLM, TP8) that starts its sampler through the unified node runtime. Every node is your own: the run spends nothing (trainer.usd_per_h 0, the ssh pool bills nothing; budget.usd is only a guard cap that a priced part would trip); budget.wall_h is the run.wall_clock breaker, which every run up restarts. docs/OWN_CLUSTERS.md. yeto run up --config THIS.json --dry-run (add --check-nodes to check over SSH that the three nodes reach the store and the registry), then without --dry-run (it runs that check before it orders anything).",
+  "comment": "Own cluster as both the trainer and the sampler pool: async GRPO of Qwen3-4B (full parameters) on a 2-node trainer island of own 8 x B300 nodes (SSH + Docker, inventory.own-b300-nodes.yaml, roles: [trainer]) fed by an own SSH sampler pool of one 8 x B300 node (the inventory's roles: [sampler] node; Qwen3-4B vLLM, TP8) that starts its sampler through the unified node runtime. <trainer-image> is the trainer image (as in examples/k31: name it; without --rl-image the launch resolves it from the site image catalog, else the built-in default). <sampler-image> must be a vLLM build that runs on B300 (sm103), e.g. the catalog's vllm-cuda-k31 image. Every node is your own: the run spends nothing (trainer.usd_per_h 0, the ssh pool bills nothing). budget.usd is a guard cap only: run up's preflight refuses budget.usd 0 while it prices any part of the run. budget.wall_h is the run.wall_clock breaker (3 h when unset), which every run up restarts. docs/OWN_CLUSTERS.md. yeto run up --config THIS.json --dry-run (add --check-nodes to check over SSH that the three nodes reach the store and the registry), then without --dry-run (it runs that check before it orders anything).",
   "run": "<run>",
   "store": "s3://<bucket>/runs/<run>",
   "samplers": [
@@ -8,9 +8,6 @@
       "provider": {
         "kind": "ssh",
         "inventory": "<inventory.own-b300-nodes.yaml>",
-        "nodes": [
-          "own-b300-2"
-        ],
         "workdir": "/srv/yeto/<run>",
         "runtime": "container",
         "container": {
@@ -48,6 +45,8 @@
       "ssh:2x8xb300",
       "--rl-node-inventory",
       "<inventory.own-b300-nodes.yaml>",
+      "--rl-image",
+      "docker:<trainer-image>",
       "--cluster-prefix",
       "<run>",
       "--model",
