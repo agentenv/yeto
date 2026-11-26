@@ -795,20 +795,30 @@ def _seed_ssh_journals(args, records, refs, ssh_names, environ=None, states=None
     return seeded
 
 
-def _watch_handoff(args, island_states, environ=None) -> None:
+def _watch_handoff(args, island_states, environ=None, *, started: float | None = None) -> None:
     """An island launch of an on-site control plane (``JOURNAL_FROM_STORE_ENV``): its island
     state store watches the run's hand-off flag (``yeto.runs.handoff_flag_path``), which the
-    control host writes when it is fenced (another host drives the run): this launcher then
-    acts as fenced (exit 12, nothing torn down, its records lock released), and the island
-    trains on until the other host's takeover launch reattaches it. A flag an earlier
-    control host left is removed first: it was meant for an earlier launch of this name."""
+    control host writes when another control host drives the run: this launcher then acts
+    as fenced (exit 12, nothing torn down, its records lock released), and the island trains
+    on until the other host's takeover launch reattaches it. A flag written before this
+    launch started (``started``: its run registry entry's start, else now) was meant for an
+    earlier launch of this name and is removed; a newer one is kept and acted on. A launch
+    without ``JOURNAL_FROM_STORE_ENV`` (one started by an older yeto too) watches no flag."""
     if (environ if environ is not None else os.environ).get(JOURNAL_FROM_STORE_ENV) != "1":
         return
     from . import runs
 
     flag = runs.handoff_flag_path(args.cluster_prefix)
+    if started is None:
+        try:
+            started = float((runs.load_run(args.cluster_prefix) or {}).get("started_at") or time.time())
+        except (TypeError, ValueError):
+            started = time.time()
     try:
-        flag.unlink(missing_ok=True)
+        if flag.stat().st_mtime < started:
+            flag.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass
     except OSError as error:
         print(f"[launcher] WARNING: the hand-off flag {flag} left by an earlier launch was not removed "
               f"({error}); it is not watched", file=sys.stderr)

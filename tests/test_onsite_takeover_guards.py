@@ -6,6 +6,7 @@ island on other nodes than the ones it runs on. Local store, fake launches, fake
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -492,8 +493,9 @@ def test_a_fenced_control_host_s_launch_hands_its_island_over_at_once(tmp_path, 
         lock.release()
     lock, states = _launch_holding(objects, 0, LATER - 10)
     monkeypatch.setenv(launcher.JOURNAL_FROM_STORE_ENV, "1")
-    runs.request_handoff("run-i0", "an earlier control host")  # left for an earlier launch: removed
-    launcher._watch_handoff(SimpleNamespace(cluster_prefix="run-i0"), states)
+    flag = runs.request_handoff("run-i0", "an earlier control host")  # left for an earlier launch: removed
+    os.utime(flag, (1_000.0, 1_000.0))
+    launcher._watch_handoff(SimpleNamespace(cluster_prefix="run-i0"), states, started=2_000.0)
     assert not runs.handoff_flag_path("run-i0").exists()
     lock.clock = lambda: LATER - 5
     states.guard_order("an order")  # holds: not handed off
@@ -519,7 +521,7 @@ def test_an_island_launch_watches_the_hand_off_flag_of_an_on_site_control_plane_
     monkeypatch.delenv(launcher.JOURNAL_FROM_STORE_ENV, raising=False)
     states = lifecycle.IslandStateStore(DirectoryObjectStore(tmp_path / "store"), log=lambda m: None)
     runs.request_handoff("run-i0", "x")
-    launcher._watch_handoff(SimpleNamespace(cluster_prefix="run-i0"), states)
+    launcher._watch_handoff(SimpleNamespace(cluster_prefix="run-i0"), states, started=0.0)
     assert states.handoff_flag is None and runs.handoff_flag_path("run-i0").exists()  # untouched
     launcher._watch_handoff(SimpleNamespace(cluster_prefix="run-i0"), states,
                             environ={launcher.JOURNAL_FROM_STORE_ENV: "1"})
@@ -591,4 +593,81 @@ def test_a_launch_another_host_took_over_after_this_host_read_it_is_left_alone(t
     assert [p for p, _ in b_launches.starts] == ["run-i0", "run-i1"]
     assert c._take_over(0, seen) is None  # noqa: SLF001
     assert c_launches.starts == [] and c.load(0)["host"] == "host-b"
-    assert any("was taken over by host host-b meanwhile" in m for m in logs)
+    assert any("record changed meanwhile (now host host-b" in m for m in logs)
+
+
+
+def test_a_hand_off_written_after_the_launch_started_is_kept_and_acted_on(tmp_path, monkeypatch):
+    """L2: the flag written once this launch started (its control host fenced right after it
+    spawned the launch) is not taken for an earlier launch's: it is kept, and the launch
+    hands its island over."""
+    from yeto import launcher, runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    objects = DirectoryObjectStore(tmp_path / "store")
+    lock, states = _launch_holding(objects, 0, LATER - 10)
+    lock.clock = lambda: LATER - 5
+    flag = runs.request_handoff("run-i0", "fenced right after the spawn")
+    os.utime(flag, (2_000.0, 2_000.0))
+    launcher._watch_handoff(SimpleNamespace(cluster_prefix="run-i0"), states, started=1_999.0,
+                            environ={launcher.JOURNAL_FROM_STORE_ENV: "1"})
+    assert flag.exists()
+    with pytest.raises(lifecycle.IslandRecordsFenced):
+        states.guard_order("an order")
+    assert isinstance(states.fenced, lifecycle.IslandRecordsHandedOff)
+
+
+def test_the_launch_start_comes_from_its_run_registry_entry(tmp_path, monkeypatch):
+    from yeto import launcher, runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    runs.create_run("run-i0", {"rl_fleet_role": "island"})
+    runs.update_run("run-i0", started_at=5_000.0)
+    states = lifecycle.IslandStateStore(DirectoryObjectStore(tmp_path / "store"), log=lambda m: None)
+    old, new = runs.request_handoff("run-i0", "old"), None
+    os.utime(old, (4_000.0, 4_000.0))
+    launcher._watch_handoff(SimpleNamespace(cluster_prefix="run-i0"), states,
+                            environ={launcher.JOURNAL_FROM_STORE_ENV: "1"})
+    assert not old.exists()
+    new = runs.request_handoff("run-i0", "new")
+    os.utime(new, (6_000.0, 6_000.0))
+    launcher._watch_handoff(SimpleNamespace(cluster_prefix="run-i0"), states,
+                            environ={launcher.JOURNAL_FROM_STORE_ENV: "1"})
+    assert new.exists()
+
+
+def test_a_launch_record_that_only_changed_its_state_is_left_alone(tmp_path):
+    """Read again under the claim: host A's run up (still alive, not fenced yet) moved island
+    0 (RUNNING to MOVING) after host B read the record. B lets go; it never writes the old
+    RUNNING record over A's MOVING one."""
+    objects, store, _a, locks = started_on_a(tmp_path)
+    for lock in locks.values():
+        lock.release()
+    logs: list[str] = []
+    b, b_launches = worker_on(objects, store, "host-b", LATER, logs)
+    seen = b.load(0)
+    a = tw.TrainerWorker(store, objects, FakeLaunches(), lifecycle.IslandStateStore(objects, log=lambda m: None),
+                         log=lambda m: None, host="host-a", clock=lambda: LATER - 1)
+    a.save(0, {**seen, "state": tw.MOVING})  # only the state changes
+    assert b._take_over(0, seen) is None  # noqa: SLF001
+    assert b_launches.starts == [] and b.load(0)["state"] == tw.MOVING and b.load(0)["host"] == "host-a"
+    assert any("record changed meanwhile" in m and "state moving" in m for m in logs)
+
+
+@pytest.mark.parametrize("ids, taken", [(("machine-id:a", "machine-id:b"), True), (("machine-id:a", "machine-id:a"), False),
+                                        ((None, "machine-id:b"), False)])
+def test_two_hosts_of_one_host_name_are_told_by_their_machine_ids_for_a_takeover(tmp_path, ids, taken):
+    """L5: hosts A and B are both named ``ubuntu``. With different machine ids, A's launch is
+    another host's (taken over once lost); with the same id it is this host's own; without
+    A's id, the names decide (the same: never taken over)."""
+    objects, store = fleet(tmp_path, [member(0, gpu="ssh:2x8xb300")])
+    tw.TrainerWorker(store, objects, FakeLaunches(), lifecycle.IslandStateStore(objects, log=lambda m: None),
+                     log=lambda m: None, host="ubuntu", host_id=ids[0], clock=lambda: T0).step()
+    b, launches = worker_on(objects, store, "ubuntu", LATER, host_id=ids[1])
+    record = b.load(0)
+    assert record["host_id"] == ids[0]
+    assert b._lost_host(0, record) is taken  # noqa: SLF001
+    b.step()
+    assert bool(b.load(0).get("taken_over")) is taken
+    if taken:
+        assert [p for p, _ in launches.starts] == ["run-i0"]

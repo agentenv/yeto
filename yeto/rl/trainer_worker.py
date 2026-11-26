@@ -279,6 +279,8 @@ class TrainerWorker:
     # why this worker's controller drives the fleet no more (None: it does)
     fenced: Callable[[], str | None] = lambda: None
     host: str = field(default_factory=socket.gethostname)  # recorded with each launch it starts
+    # this host's machine id (yeto.rl.up_state_mirror.host_identity; None: told by ``host`` alone)
+    host_id: str | None = None
     # the island launches this host's run registry knows under the fleet's island prefixes (no store read)
     local_launches: Callable[[], Any] = lambda: ()
     unknown_alarm_steps: int = 20  # steps in a row a store failure lasts before an ERROR (and every so many after)
@@ -426,7 +428,7 @@ class TrainerWorker:
         if record is None or record.get("state") in (DONE, FAILED, REMOVED, DOWN):
             return
         prefix = str(record.get("prefix_now"))
-        if (record.get("host") in (None, self.host) and prefix not in self._stop_forwarded
+        if ((not record.get("host") or self._this_host(record)) and prefix not in self._stop_forwarded
                 and self.ops.alive(prefix)):  # one this worker did not know yet (it restarted)
             self._stop_forwarded.add(prefix)
             self.ops.request_stop(prefix, f"fleet stop: {why}")
@@ -472,7 +474,8 @@ class TrainerWorker:
         return self.save(k, {**(record or {}), "name": member.get("name"), "prefix": member["prefix"],
                              "prefix_now": prefix, "incarnation": incarnation, "spec": spec_of(member),
                              "gpu": member.get("gpu"), "state": STARTING, "relaunches": relaunches,
-                             "host": self.host, "usd_per_h": member.get("usd_per_h"), "closed_at": None, "argv": argv,
+                             "host": self.host, "host_id": self.host_id, "usd_per_h": member.get("usd_per_h"),
+                             "closed_at": None, "argv": argv,
                              "generation": generation, "pid": pid, "started_at": round(self.clock(), 3),
                              "why": why, "ended": None, "handoffs": 0, "billing_open": None,
                              "reattach": None, "takeover_blocked": None, "takeover_launch": bool(takeover) or None,
@@ -710,7 +713,7 @@ class TrainerWorker:
         """Island ``k``'s launch runs on another host (not terminal there): this worker
         cannot see it, so it neither adopts, judges nor starts it."""
         host = record.get("host")
-        if not host or host == self.host or record.get("state") in TERMINAL or record.get("state") == DOWN:
+        if not host or self._this_host(record) or record.get("state") in TERMINAL or record.get("state") == DOWN:
             return False
         if k not in self._foreign_logged:
             self._foreign_logged.add(k)
@@ -881,8 +884,16 @@ class TrainerWorker:
     def _lost_host(self, k: int, record: dict[str, Any]) -> bool:
         """Island ``k``'s launch was started by another control host and is not over."""
         host = record.get("host")
-        return bool(host) and host != self.host and record.get("state") not in TERMINAL \
+        return bool(host) and not self._this_host(record) and record.get("state") not in TERMINAL \
             and record.get("state") != DOWN
+
+    def _this_host(self, record: dict[str, Any]) -> bool:
+        """Launch ``record`` was started by this host: by machine id when both have one, else
+        by host name (two hosts of one name without a machine id are taken for one)."""
+        from yeto.rl.up_state_mirror import same_host  # noqa: PLC0415
+
+        return same_host({"host": record.get("host"), "host_id": record.get("host_id")},
+                         {"host": self.host, "host_id": self.host_id})
 
     def _take_over(self, k: int, record: dict[str, Any]) -> dict[str, Any] | None:
         """Take island ``k``'s launch over from the control host that started it, once that
@@ -939,14 +950,18 @@ class TrainerWorker:
         try:
             current = self.load(k)
             if not _same_launch(current, record):
-                # another host took it over (and released its claim) between this worker's read
-                # and its claim: its record names that host now, whose launch is not lost
-                self._foreign_once(k, f"its launch {record.get('prefix_now')} was taken over by host "
-                                      f"{(current or {}).get('host')} meanwhile: not taken over here")
+                # the record changed between this worker's read and its claim (another host took
+                # it over and released its claim, or the old host's run up still wrote it): left
+                # alone; the next step reads it again
+                self._foreign_once(k, f"its launch {record.get('prefix_now')} record changed meanwhile (now host "
+                                      f"{(current or {}).get('host')}, state {(current or {}).get('state')}): "
+                                      "not taken over here")
                 return None
+            record = current  # the takeover goes on from the record read under the claim
             # read under the claim: the lost launch writes its island record no more
             ended = self._ended_there(k, record)
-            claim = {"host": self.host, "from": host, "token": claimed.token, "at": round(now, 3),
+            claim = {"host": self.host, "host_id": self.host_id, "from": host, "token": claimed.token,
+                     "at": round(now, 3),
                      "prefix": record.get("prefix_now"), "incarnation": record.get("incarnation"),
                      "ended": ended}
             try:  # information only: the lock's token is the fence
@@ -958,7 +973,7 @@ class TrainerWorker:
                 base = {**self._closed(record), "started_at": round(now, 3), "closed_at": None}
             else:  # it ended there: billed up to its end (its own host's clock, as its start), nothing reopens
                 base = closed(record, _ended_at(ended.get("since"), record.get("started_at"), now))
-            taken = self.save(k, {**base, "host": self.host, "taken_over": claim})
+            taken = self.save(k, {**base, "host": self.host, "host_id": self.host_id, "taken_over": claim})
         finally:
             claimed.release()  # the island launch started next claims the token after it
         self._event(k, f"taken over from host {host}: its launch's lease ran out (records lock token "
@@ -1047,12 +1062,10 @@ TAKEOVER_SOURCES = frozenset({"ssh", "modal"})
 
 
 def _same_launch(current: dict[str, Any] | None, record: dict[str, Any]) -> bool:
-    """``current`` (the launch record read under a takeover's claim) is still the launch
-    ``record`` names: the same host, start, incarnation, prefix and takeover."""
-    if not isinstance(current, dict):
-        return False
-    return all(current.get(f) == record.get(f) for f in ("host", "started_at", "incarnation", "prefix_now",
-                                                          "taken_over"))
+    """``current`` (the launch record read under a takeover's claim) is still the record
+    ``record`` was, unchanged: every write (:func:`save_record`) stamps ``updated``, and any
+    field that changed counts too (its state included)."""
+    return isinstance(current, dict) and current == record
 
 
 def island_name(record: dict[str, Any]) -> str | None:

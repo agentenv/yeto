@@ -783,19 +783,38 @@ start the control unit on another host. `yeto run up` there takes the run over:
      lock, the forced-stop check, the preflight, the cluster preflight, the fleet plan, the
      sandbox prepare). It takes its number and writes the mirror first right before the pools
      start, after reading the mirror again (restored again, its own steps kept, when another
-     host wrote it meanwhile; a forced stop found then refuses it too). A `run up` that is
-     refused (exit 2 or 10) never fences the host that drives the run.
+     host wrote it meanwhile; a forced stop found then refuses it too). That first write must
+     be confirmed: one the store does not take, or one that loses to another host's write
+     (a number past the one it started from), refuses the start with exit 2. Its unit tries
+     again 30 s later and reads the mirror again; the claim of a number it did not write is
+     given back. A `run up` that is refused (exit 2 or 10) never fences the host that drives
+     the run, and never orders anything.
+   - A stop or a breaker trip writes the mirror at once and then checks the fence: a `run up`
+     that finds another host's newer state there stops, trips and tears down nothing more
+     (no STOP flag, no `yeto down` of the island launches) and exits 76.
    - At its exit, `run up` writes the last state the 30 s interval had kept back.
-   - A fenced `run up` asks its host's island launches (registered in this host's run
+   - A `run up` fenced by another control host (a newer mirror number, or another writer of
+     `fleet/applied.json`) asks its host's island launches (registered in this host's run
      registry) of an SSH or Modal island to hand their islands over: it writes the `HANDOFF`
-     flag in each launch's run directory. At its next poll (15 s) the launch acts as fenced:
+     flag in each launch's run directory. A `run up` fenced only because it is cut off from
+     the run store (no successor is known) writes no flag: its island launches go on
+     supervising their islands, and another host takes them over once their leases ran out. At its next poll (15 s) the launch acts as fenced:
      it orders and tears down nothing more, ends with exit 12 and releases its records lock,
      while the island trains on. The new host then takes that island over without waiting
      for the lease to run out (the start grace below still applies). A sky island's launch
      is not asked: no other host can take it over, so it goes on supervising its island. A
-     launch that starts removes a flag an earlier control host left. A launch that did not
+     launch that starts removes a flag written before it started (left for an earlier launch
+     of its name); one written after its start is kept and acted on. A launch that did not
      see the flag (its host lost, or cut off from the run store with its control host) is
      taken over once its lease ran out.
+   - An island launch started without `YETO_ISLAND_JOURNAL_FROM_STORE=1` (by a yeto from
+     before the on-site takeover, for example) watches no flag. It keeps its records lock as
+     long as it runs, so the new host waits for its lease and never takes it over while it
+     lives. To hand such an island over, end its launcher on the old host with SIGKILL (its
+     PID is `pid` in `~/.yeto/runs/<launch>/meta.json`); a SIGTERM,
+     `yeto stop-run` or `yeto down` makes it tear its island down instead. The island keeps
+     training, and the new host takes it over once the lease ran out. Or stop the run
+     (`yeto run down`) and start it again from the new host.
 3. **Each island launch is taken over once its lease ran out.** An island launch holds its
    records lock (`fleet/trainers/<k>/lock`, a 120 s lease it renews) while its supervisor
    lives. The trainer worker of the new host takes an island over only:
@@ -892,12 +911,20 @@ and the syncer use is refused by the syncer launch (exit 10). No host generates 
   client ledger of the host that ordered them, which another host can neither follow nor
   release.
 
+**One host, one identity.** A control host is told by its machine id (a digest of
+`/etc/machine-id`, never the id itself) when it has one, and by its host name otherwise.
+Two control hosts with the same host name and no machine id (or machines cloned with the
+same `/etc/machine-id`) are taken for one host: neither restores the other's state nor
+takes the other's islands over. Give each control host its own host name, or its own
+machine id (`systemd-machine-id-setup` after cloning).
+
 What is never taken over:
 
-- **A sky island** (an `aws:`, `gcp:`, `nebius:` ... cluster). Its cluster lives in the sky
-  state of the host that launched it, and no other host can read that state, see the
-  cluster, or tear it down. The new host leaves such an island alone and logs an error
-  naming the old host: release its machines in its cloud.
+- **A sky island** (an `aws:`, `gcp:`, `nebius:` ... cluster), never, not even once its
+  lease ran out. Its cluster lives in the sky state of the host that launched it, and no
+  other host can read that state, see the cluster, or tear it down. The new host leaves such
+  an island alone and logs an error naming the old host. Run `yeto run up` on that host
+  again, or release its machines in its cloud.
 - **A fleet without an on-site control plane.** Without `fleet.syncer_service`, nothing is
   mirrored and nothing is taken over, as before.
 

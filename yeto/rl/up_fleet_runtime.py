@@ -158,7 +158,7 @@ class FleetRuntime:
             _log(f"fleet: a new trainer launch: the earlier fleet-wide stop(s) no longer hold ({'; '.join(dropped)})")
         self.run.state["fleet_stops"] = stops.to_json()
         self.run.save()
-        self.run.mirror_state(force=True)
+        self.run.mirror_state_or_fence()
 
     def pool_restart_refusal(self, pool: str) -> str | None:
         """Why ``run up`` must not drive pool ``pool`` again: its island is stopped by its
@@ -214,7 +214,7 @@ class FleetRuntime:
         if hit:
             self.run.state["fleet_stops"] = self.stops().to_json()
             self.run.save()
-            self.run.mirror_state(force=True)  # an on-site control plane: the stop reaches the run store now
+            self.run.mirror_state_or_fence()  # an on-site control plane: the stop reaches the run store now
         return hit
 
     def island_states(self) -> Any:
@@ -235,6 +235,8 @@ class FleetRuntime:
         on already) writes none either: only its pools follow. A STOP written then would sit
         over a START that ``yeto island start`` put in its place, and the controller acts on
         no START while a STOP stands: the island would stay done."""
+        # checked against the run store now (a forced write): another control host drives the run, it stops nothing
+        self.run.mirror_state_or_fence()
         pools = self.pool_indices(k)
         names = [self.run.pools[i].name for i in pools]
         miles = [m.name for m in self.miles_samplers(k)]
@@ -276,7 +278,7 @@ class FleetRuntime:
             **({"operator": operator} if operator else {})}
         self.run.state["fleet_stops"] = self.stops().to_json()
         self.run.save()
-        self.run.mirror_state(force=True)
+        self.run.mirror_state_or_fence()
 
     def trip_island(self, k: int, name: str, *, value: float | None, limit: float | None, why: str,
                     legacy_event: str | None = None) -> bool:

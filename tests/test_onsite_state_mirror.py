@@ -351,8 +351,25 @@ def test_a_starting_writer_skips_numbers_claimed_by_a_writer_that_never_wrote(tm
                                     background=False, log=lambda m: None)
     assert m.submit({"t0": 1.0}) is True and m.fenced is None and mirror(objects)["seq"] == 2
     objects.create(up_state_mirror.marker_key(3), b'{"host": "other", "nonce": "y"}')  # a live writer's claim
-    assert m.submit({"t0": 2.0}, force=True) is True and "host other" in m.fenced
-    assert mirror(objects)["seq"] == 2  # not written over
+    assert m.submit({"t0": 2.0}, force=True) is True
+    assert m.fenced is None and mirror(objects)["seq"] == 2  # not written over; not fenced before it writes
+    doc = {**mirror(objects), "seq": 3, "writer": {"host": "other", "nonce": "y"}, "host": "other"}
+    objects.write(up_state_mirror.STATE_MIRROR, json.dumps(doc, sort_keys=True).encode())  # it writes its number
+    assert m.submit({"t0": 3.0}, force=True) is True and "host other" in m.fenced
+    assert mirror(objects)["seq"] == 3 and mirror(objects)["writer"]["host"] == "other"
+
+
+def test_a_claim_a_refused_start_gave_up_does_not_fence_the_writer_that_drives(tmp_path):
+    """A start refused after its claim deletes that claim (it is its own); the writer that
+    drives takes the number next. While the claim is there unwritten, the writer that drives
+    is not fenced by it (it tries again at its next save)."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    a = _mirror(objects, tmp_path, host="host-a")
+    assert a.submit({"t0": 1.0}) and a.seq == 1
+    objects.create(up_state_mirror.marker_key(2), b'{"host": "host-b", "nonce": "b"}')  # B's claim, in flight
+    assert a.submit({"t0": 2.0}, force=True) is True and a.fenced is None and a.seq == 1
+    objects.delete(up_state_mirror.marker_key(2))  # B was refused: its claim is gone
+    assert a.submit({"t0": 3.0}, force=True) is True and a.fenced is None and a.seq == 2
 
 
 def test_only_an_on_site_control_plane_s_trainer_worker_takes_islands_over(tmp_path):
@@ -398,7 +415,7 @@ def test_a_stop_a_breaker_and_the_end_reach_the_store_at_once(tmp_path, monkeypa
         if force:
             import traceback
 
-            forced.append(traceback.extract_stack(limit=2)[0].name)
+            forced.extend(f.name for f in traceback.extract_stack(limit=3)[:-1])  # its caller (or theirs)
         return real(force=force)
 
     run.mirror_state = spy
@@ -624,3 +641,65 @@ def test_a_restarted_syncer_service_carries_the_earlier_generations_seconds(tmp_
                                       since=1000.0, billed_s=500.0, clock=lambda: 1600.0)  # its last beat
     rc, seen, _syncer, objects, _logs = run_service(tmp_path, monkeypatch, 0, objects=objects)
     assert rc == 0 and seen["before"]["billed_s"] == 1100.0  # 500 s before, then 600 s of generation 1
+
+
+# -- REV-890c M1: a starting writer never writes over a newer state it did not read ------------------
+
+class _ARacesB(DirectoryObjectStore):
+    """Host B's view of the store: at B's first sequence claim, host A writes first (``race``)."""
+
+    def __init__(self, root, race):
+        super().__init__(root)
+        self.race, self.raced = race, False
+
+    def create(self, key, data):
+        if "up-state-seq" in str(key) and not self.raced:
+            self.raced = True
+            self.race()
+        return super().create(key, data)
+
+
+def test_a_starting_writer_that_skipped_a_number_never_writes_over_a_newer_state(tmp_path):
+    """M1 (counterexample): B starts from A's number N and read the mirror; A then claims
+    N+1 and writes a breaker trip there. B's claim of N+1 fails, it skips to N+2, its
+    conditional write fails, it reads A's N+1 again. Before, B compared with its own claim
+    minus one (N+1, not past it) and wrote over A's trip; now any number past N is another
+    writer's newer state: B refuses its start, A's trip stays, A is not fenced."""
+    root = tmp_path / "store"
+    a = _mirror(DirectoryObjectStore(root), tmp_path, host="host-a")
+    assert a.submit({"t0": 1.0}) and a.seq == 1
+
+    def a_trips():
+        assert a.submit({"t0": 1.0, "breaker": {"why": "budget"}}, force=True)
+
+    b = _mirror(_ARacesB(root, a_trips), tmp_path, host="host-b", seq=1)
+    why = b.start({"t0": 2.0})
+    assert why is not None and "another control host" in why and b.writes == 0
+    doc = mirror(DirectoryObjectStore(root))
+    assert doc["writer"]["host"] == "host-a" and doc["state"]["breaker"] == {"why": "budget"}
+    assert a.submit({"t0": 1.0, "breaker": {"why": "budget"}}, force=True) and a.fenced is None
+    assert a.seq == 3 and mirror(DirectoryObjectStore(root))["seq"] == 3  # B gave its claim back: A writes on
+
+
+def test_a_running_writer_that_loses_a_write_to_a_newer_number_is_fenced(tmp_path):
+    """M1, past its start: a writer whose conditional write lost to another writer's number
+    past its own is fenced (not a refusal), with that writer as the cause (L1: hand off)."""
+    root = tmp_path / "store"
+    b = _mirror(DirectoryObjectStore(root), tmp_path, host="host-b")
+    assert b.start({"t0": 1.0}) is None and b.seq == 1
+    a = _mirror(DirectoryObjectStore(root), tmp_path, host="host-a", seq=1)
+    assert a.start({"t0": 2.0}) is None and a.seq == 2  # host A starts after B: it drives
+    assert b.submit({"t0": 1.5}, force=True) is True
+    assert b.fenced and b.fenced_by["host"] == "host-a" and mirror(DirectoryObjectStore(root))["seq"] == 2
+
+
+def test_a_first_write_that_raises_is_a_refusal_and_writes_nothing_more(tmp_path):
+    """H1: the store fails the first write: start() says why; nothing is written afterwards."""
+    class Down(DirectoryObjectStore):
+        def create(self, key, data):
+            raise OSError("the run store dropped the connection")
+
+    m = _mirror(Down(tmp_path / "store"), tmp_path)
+    why = m.start({"t0": 1.0})
+    assert why is not None and "OSError" in why and m.writes == 0
+    assert m.submit({"t0": 2.0}, force=True) is False  # refused: nothing more

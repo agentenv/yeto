@@ -1915,15 +1915,28 @@ class Run:
     def raise_if_control_fenced(self) -> None:
         """:class:`ControlFenced` once :meth:`control_fenced`: the monitor, the breakers and
         the first-group wait stop (called from :meth:`breach`); run up exits
-        :data:`CONTROL_FENCED_EXIT` without draining, stopping or ordering anything."""
+        :data:`CONTROL_FENCED_EXIT` without draining, stopping or ordering anything.
+        ``handoff``: another writer drives the run (a newer mirror number, or another writer
+        of ``fleet/applied.json``), so this host's island launches hand their islands over;
+        not when this run up is only cut off from the run store (no successor is known)."""
         why = self.control_fenced()
         if why:
-            raise ControlFenced(why)
+            mirror = getattr(self, "_state_mirror", None)
+            stale_only = mirror is not None and mirror.fenced == why and mirror.fenced_by is None
+            raise ControlFenced(why, handoff=not stale_only)
+
+    def mirror_state_or_fence(self) -> None:
+        """A forced mirror write (a stop, a breaker trip), then :meth:`raise_if_control_fenced`:
+        a run up that finds another control host there stops, trips and tears down nothing
+        more (an on-site control plane only; otherwise only the write, a no-op)."""
+        self.mirror_state(force=True)
+        self.raise_if_control_fenced()
 
     def _control_fenced_event(self, why: str) -> None:
         self._append_event({"event": "control_fenced", "at": _now(), "run": self.run, "why": why})
 
-    def restore_state(self, doc: dict[str, Any] | None, *, host: str, local: dict[str, Any]) -> bool:
+    def restore_state(self, doc: dict[str, Any] | None, *, host: str, local: dict[str, Any],
+                      host_id: str | None = None) -> bool:
         """The state another control host mirrored to the run store (``doc``), as this run up's
         starting point, when this host has none, or when the mirror is newer than this host's
         state and was written by another host (its sequence number past the one this host last
@@ -1940,7 +1953,8 @@ class Run:
             return False
         has_local = self.state_path.exists() or bool(self.state)
         writer = doc.get("writer") if isinstance(doc.get("writer"), dict) else {}
-        newer = (writer.get("host") or doc.get("host")) != host \
+        theirs = {"host": writer.get("host") or doc.get("host"), "host_id": writer.get("host_id")}
+        newer = not up_state_mirror.same_host(theirs, {"host": host, "host_id": host_id}) \
             and up_state_mirror.seq_of(doc) > up_state_mirror.seq_of(local if local.get("run") == self.run else {})
         if has_local and not newer:
             return False
@@ -2004,21 +2018,24 @@ class Run:
         no sequence number and writes nothing to the run store before
         :meth:`start_state_mirror` (a run up refused here or by its preflight never fences the
         control host that drives the run). A mirror that does not read refuses the start.
-        ``host``: this host's name (default: its host name)."""
+        ``host``: this host's name (default: its host name, and then its machine id
+        :func:`~yeto.rl.up_state_mirror.host_identity` tells it, when it has one)."""
         if not self.onsite_control():
             return
         import socket  # noqa: PLC0415
 
+        host_id = up_state_mirror.host_identity() if host is None else None
         host = host or socket.gethostname()
+        self.control_host, self.control_host_id = host, host_id  # the trainer worker's too
         local = up_state_mirror.read_local(self.dir / up_state_mirror.LOCAL_FILE)
         try:
             objects = objects or self._objects()
             doc = up_state_mirror.read_mirror(objects)
-            self.restore_state(doc, host=host, local=local)
+            self.restore_state(doc, host=host, local=local, host_id=host_id)
         except Exception as error:  # noqa: BLE001 - refused: a guess could count the spend from zero
             raise RunUpRefused(f"on-site control plane: run up's state in the run store did not read "
                                f"({type(error).__name__}: {error}); nothing started") from None
-        self._mirror_read = {"objects": objects, "host": host, "seq": up_state_mirror.seq_of(doc),
+        self._mirror_read = {"objects": objects, "host": host, "host_id": host_id, "seq": up_state_mirror.seq_of(doc),
                              "steps": copy.deepcopy(self.state.get("steps") or {})}
 
     def start_state_mirror(self, objects: Any = None, *, host: str | None = None,
@@ -2029,14 +2046,17 @@ class Run:
         up's own steps kept; ``check()`` then runs again over that state, a string refuses the
         start), then mirror the state there from now on, one writer at a time
         (:class:`yeto.rl.up_state_mirror.StateMirror`; this run up takes the next sequence
-        number, so a control host that still runs is fenced)."""
+        number, so a control host that still runs is fenced). That first write is made now and
+        must be confirmed: one that does not land, or loses to another writer, refuses the
+        start (:class:`RunUpRefused`, exit 2: the unit tries again and reads the mirror
+        again); it fences no one, and nothing is ordered."""
         if not self.onsite_control():
             return
         read = getattr(self, "_mirror_read", None)
         if read is None or (objects is not None and objects is not read["objects"]):
             self.restore_state_mirror(objects, host=host)
             read = self._mirror_read
-        objects, host = read["objects"], host or read["host"]
+        objects, host, host_id = read["objects"], host or read["host"], read.get("host_id")
         local_path = self.dir / up_state_mirror.LOCAL_FILE
         local = up_state_mirror.read_local(local_path)
         try:
@@ -2046,7 +2066,7 @@ class Run:
                                f"({type(error).__name__}: {error}); nothing started") from None
         if up_state_mirror.seq_of(doc) > read["seq"]:  # another host wrote it during this run up's checks
             mine = {k: v for k, v in (self.state.get("steps") or {}).items() if read["steps"].get(k) != v}
-            if self.restore_state(doc, host=host, local=local):
+            if self.restore_state(doc, host=host, local=local, host_id=host_id):
                 self.state.setdefault("steps", {}).update(mine)
                 self.save()
                 why = check() if check is not None else None
@@ -2057,12 +2077,14 @@ class Run:
 
         # cut off from the store this long, another host may have taken the islands over
         stale_after_s = up_state_mirror.RECORDS_LOCK_TTL_S + fleet.takeover_margin_s(self.cfg.get("fleet") or {})
-        self._state_mirror = up_state_mirror.StateMirror(objects, run=self.run, host=host, seq=seq,
-                                                         local_path=local_path, log=_log,
-                                                         on_fenced=self._control_fenced_event,
-                                                         stale_after_s=stale_after_s)
+        mirror = up_state_mirror.StateMirror(objects, run=self.run, host=host, seq=seq, local_path=local_path,
+                                             log=_log, on_fenced=self._control_fenced_event,
+                                             stale_after_s=stale_after_s, host_id=host_id)
+        why = mirror.start(self.state)  # confirmed, or this run up drives nothing
+        if why is not None:
+            raise RunUpRefused(f"on-site control plane: {why}; nothing started")
+        self._state_mirror = mirror
         self.env[JOURNAL_FROM_STORE_ENV] = "1"  # the island launches reattach by their store records
-        self.mirror_state(force=True)
 
     def local_island_launches(self) -> list[str]:
         """The island launches of this fleet in this host's run registry (``yeto.runs``):
@@ -2192,6 +2214,8 @@ class Run:
             IslandStateStore(objects, log=_log), fleet_stop=stop, log=_log, syncer_since=syncer_since,
             fenced=lambda: self.mirror_fenced() or fleet_fenced(controller), local_launches=self.local_island_launches,
             on_given_up=self.stop_island_pools, takeover=self.onsite_control(),
+            **({"host": self.control_host} if getattr(self, "control_host", None) else {}),
+            host_id=getattr(self, "control_host_id", None),
             takeover_margin_s=fleet.takeover_margin_s(self.cfg.get("fleet") or {}), on_event=self._append_event)
         controller.add_worker("trainers", worker.step, interval=15.0)
         self.trainer_worker = worker
@@ -3217,7 +3241,7 @@ class Run:
             if event.get("stop_reason"):
                 self.state["breaker"]["stop_reason"] = event["stop_reason"]
             self.save()
-            self.mirror_state(force=True)  # an on-site control plane: the trip reaches the run store now
+            self.mirror_state_or_fence()  # an on-site control plane: the trip reaches the run store now
         return why
 
     def shard_problem(self, pool: int = 0) -> str | None:
@@ -4044,7 +4068,7 @@ class Run:
         if trip.get("stop_reason"):
             self.state[key]["stop_reason"] = trip["stop_reason"]
         self.save()
-        self.mirror_state(force=True)  # an on-site control plane: the stop reaches the run store now
+        self.mirror_state_or_fence()  # an on-site control plane: the stop reaches the run store now
         tr = (self.state.get("procs") or {}).get("trainer")
         deadline = time.monotonic() + grace_s
         try:
@@ -5022,7 +5046,12 @@ class RunUpConfigRefused(RunUpRefused):
 class ControlFenced(BaseException):
     """An on-site control plane: another control host drives the run now
     (:meth:`Run.raise_if_control_fenced`). A BaseException: no ``except Exception`` of a
-    breaker or a wait may swallow it."""
+    breaker or a wait may swallow it. ``handoff``: this host's island launches hand their
+    islands over (False: this run up is only cut off from the run store)."""
+
+    def __init__(self, why: str = "", *, handoff: bool = True) -> None:
+        super().__init__(why)
+        self.handoff = bool(handoff)
 
 
 def onsite_pool_refusal(run: Run, environ: dict[str, str] | None = None) -> str | None:
@@ -5243,7 +5272,12 @@ def main(args: Any) -> int:
         _log(f"CRITICAL: on-site control plane: {error}; run up ends without draining or stopping anything "
              f"(exit {CONTROL_FENCED_EXIT})")
         rc, fenced = CONTROL_FENCED_EXIT, True
-        run.hand_off_island_launches(str(error))
+        if getattr(error, "handoff", True):  # another writer drives the run: it takes the islands over
+            run.hand_off_island_launches(str(error))
+        else:
+            _log("on-site control plane: cut off from the run store, no other control host is known: this host's "
+                 "island launches keep supervising their islands (taken over once their leases run out, if another "
+                 "host takes the run over)")
     finally:
         if not fenced:
             run.flush_state_mirror()  # an on-site control plane: the last throttled state reaches the run store
