@@ -142,6 +142,7 @@ from .node_inventory import (
     parse_node_health,
     profile_of,
 )
+from .node_lease import SAMPLER_MARKER
 from .pool import status as island_status
 from .pool.provider import provider_caps
 from .pool.status import LeaseStatus
@@ -152,7 +153,7 @@ KIND = "ssh"
 SSH_UNREACHABLE = 255  # ssh's own failure (no connection, no session): the node was not reached
 LEASE_READ_CACHE_S = 15.0  # a node's lease holder read for a free-slot check is reused this long
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MARKER = "yeto-ssh-sampler"  # prefix of a start's marker (start_marker): run, shard, ticket
+MARKER = SAMPLER_MARKER  # prefix of a start's marker (start_marker): run, shard, ticket (node_lease's probe)
 MARK_ENV = "YETO_SSH_SAMPLER_MARK"  # the sampler process carries its start's marker in this variable
 RUNTIMES = ("container", "venv")
 ENGINES = ("podman", "docker")

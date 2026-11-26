@@ -108,6 +108,7 @@ from ..gpu_spec import DEVICE_FAMILY_ENV
 from . import ssh_node_storage, ssh_trainer_ledger, ssh_transport
 from .credentials import _secret_value
 from .node_inventory import InventoryError, Node
+from .node_lease import TRAINER_STATE_DIR
 from .topology import island_comm_env
 from .trainer_island import (
     JOBS_FILE,
@@ -154,7 +155,7 @@ SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAl
 # shell starts on /dev/null, so a profile (/etc/profile.d, ~/.bash_profile) that reads
 # stdin cannot eat the script; the script then runs without fd 3.
 READ_SCRIPT = "exec 3<&0 </dev/null; exec bash -lc 'eval \"$(cat <&3)\" 3<&-'"
-STATE_DIR = ".yeto/trainer-islands"  # under the remote $HOME
+STATE_DIR = TRAINER_STATE_DIR  # under the remote $HOME (node_lease's takeover probe reads it)
 CONTAINER_STATE_DIR = "/yeto-island-state"  # the incarnation's state dir inside a docker trainer
 PULL_TIMEOUT_S = 3600.0  # a first pull of a trainer image (~24 GB compressed for yeto-miles-k31)
 RDMA_FABRICS = ("ib", "roce")

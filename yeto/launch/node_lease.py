@@ -215,6 +215,10 @@ def declares_new_fields(nodes: Any) -> bool:
 
 # -- the node probe before a takeover ----------------------------------------------------
 
+# what the takeover probe looks for, owned here (ssh_sampler_pool / ssh_trainer_island import them:
+# node_lease imports neither)
+SAMPLER_MARKER = "yeto-ssh-sampler"  # prefix of an ssh pool start's marker (run, shard, ticket)
+TRAINER_STATE_DIR = ".yeto/trainer-islands"  # an ssh trainer island's state dirs, under the remote $HOME
 RUN_LABEL = "yeto.run"  # a sampler container of a leased pool carries ``--label yeto.run=<run>``
 RUN_LABEL_ENV = "YETO_RUN_LABEL"  # set on a leased pool's sampler: the node runtime labels its containers
 
@@ -246,13 +250,10 @@ def still_runs_script(run: str, *, sudo: bool = False) -> str:
       arguments; assembled at run time, so the probe never finds itself).
 
     Every finding refuses a takeover; the caller treats a missing ``done`` line the same."""
-    from .ssh_sampler_pool import MARKER  # noqa: PLC0415
-    from .ssh_trainer_island import STATE_DIR  # noqa: PLC0415
-
     if not re.fullmatch(r"[A-Za-z0-9_.:+-]+", str(run)):
         raise NodeLeaseError(f"run {run!r}: not a plain word")
     prefix = re.sub(r"[^A-Za-z0-9_.-]", "-", f"yeto-{run}-")
-    head, tail = MARKER[:5], MARKER[5:]
+    head, tail = SAMPLER_MARKER[:5], SAMPLER_MARKER[5:]
     found = f"echo \"{PROBE_MARK} found="
     names = "--format '{{.Names}}'"
     return (
@@ -288,7 +289,7 @@ def still_runs_script(run: str, *, sudo: bool = False) -> str:
         + "  esac\n"
         "done\n"
         "rm -f \"$err\"\n"
-        f"for f in \"$HOME/{STATE_DIR}/{run}\"/*/pgid; do [ -f \"$f\" ] || continue; d=${{f%/pgid}}\n"
+        f"for f in \"$HOME/{TRAINER_STATE_DIR}/{run}\"/*/pgid; do [ -f \"$f\" ] || continue; d=${{f%/pgid}}\n"
         "  [ -f \"$d/rc\" ] && continue; pid=$(cat \"$f\" 2>/dev/null)\n"
         f"  [ \"$pid\" -gt 1 ] 2>/dev/null && kill -0 -- -$pid 2>/dev/null && {found}process:${{d##*/}}\"\n"
         "done\n"
