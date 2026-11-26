@@ -30,10 +30,12 @@ when the backend has them and fall back to whole-object reads and writes.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import os
 import shutil
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -197,19 +199,33 @@ class DirectoryObjectStore:
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
 
-    def replace_if(self, key: str, data: bytes, expected: bytes) -> bool:
-        """Write ``data`` as ``key`` only while it still holds ``expected`` (its bytes): True when
-        written, False when it changed or is gone. Atomic against the other ``replace_if`` of
-        this directory (one lock file), not against a plain ``write``."""
-        path = self._path(key)
+    @contextlib.contextmanager
+    def _replace_lock(self) -> Iterator[None]:
+        """The lock of this directory's :meth:`replace_if` and :meth:`write_exclusive` (one file)."""
         self.root.mkdir(parents=True, exist_ok=True)
         with open(self.root / f".replace-if{TMP_SUFFIX}", "a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
+    def replace_if(self, key: str, data: bytes, expected: bytes) -> bool:
+        """Write ``data`` as ``key`` only while it still holds ``expected`` (its bytes): True when
+        written, False when it changed or is gone. Atomic against the other ``replace_if`` and
+        every :meth:`write_exclusive` of this directory (one lock file), not against a plain
+        ``write``."""
+        path = self._path(key)
+        with self._replace_lock():
             current = path.read_bytes() if path.is_file() else None
             if current != expected:
                 return False
             os.replace(self._staged(path, data), path)
             return True
+
+    def write_exclusive(self, key: str, data: bytes) -> None:
+        """:meth:`write` under :meth:`replace_if`'s lock: a ``replace_if`` of the same key either
+        sees this write's bytes or ends before it (the writer of an object others replace
+        conditionally, such as the syncer service's record)."""
+        with self._replace_lock():
+            self.write(key, data)
 
     def size(self, key: str) -> int | None:
         path = self._path(key)

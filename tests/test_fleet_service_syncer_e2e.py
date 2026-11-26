@@ -8,6 +8,7 @@ only; a port of 8880-8899."""
 from __future__ import annotations
 
 import json
+import pathlib
 import signal
 import socket
 import subprocess
@@ -81,14 +82,73 @@ def _steps(tape) -> list[int]:
     return out
 
 
-def _command_of(pid: int) -> str:
-    return subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+def _argv_of(pid: int) -> list[str]:
+    """The process's argv, whole: ``/proc/<pid>/cmdline`` (NUL-separated), else ``ps -ww``
+    (no column cut; split at whitespace, which the test's paths never hold)."""
+    import os
+
+    proc = f"/proc/{pid}/cmdline"
+    if os.path.exists(proc):
+        with open(proc, "rb") as handle:
+            return [a.decode() for a in handle.read().split(b"\0") if a]
+    out = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout
+    return out.split()
+
+
+def _is_binary(pid: int, binary) -> bool:
+    """``pid`` runs ``binary`` (its argv[0] is that file, by realpath)."""
+    import os
+
+    argv = _argv_of(pid)
+    return bool(argv) and os.path.realpath(argv[0]) == os.path.realpath(str(binary))
+
+
+def _dead(pid: int) -> bool:
+    """``pid`` is gone or a zombie (it writes nothing more)."""
+    out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return not out or out.startswith("Z")
+
+
+def _long_path_copy(binary, tmp_path):
+    """A copy of the syncer binary under a path longer than any ``ps`` column (CI's runner
+    paths are: a cut command line must not hide which process this is)."""
+    import os
+    import shutil
+
+    where = tmp_path / ("long-" + "d" * 60) / ("e" * 60) / ("f" * 60) / ("g" * 60)
+    where.mkdir(parents=True)
+    copy = where / pathlib.Path(str(binary)).name
+    shutil.copyfile(binary, copy)  # the bytes only: a system binary's file flags are not copied
+    os.chmod(copy, 0o755)
+    assert len(str(copy)) > 260
+    return copy
+
+
+def test_the_process_check_reads_the_whole_command_line(tmp_path):
+    """A process whose binary sits under a long path is still told by its argv[0] (no cut)."""
+    import os
+    import shutil
+
+    sleeper = _long_path_copy(shutil.which("sleep"), tmp_path)
+    proc = subprocess.Popen([str(sleeper), "30"])
+    try:
+        assert _is_binary(proc.pid, sleeper), _argv_of(proc.pid)
+        assert _argv_of(proc.pid)[0] == str(sleeper) and len(_argv_of(proc.pid)[0]) > 260
+        assert not _is_binary(proc.pid, shutil.which("sleep") + "-other")
+        assert not _is_binary(os.getpid(), sleeper)
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 @needs_cargo
+@pytest.mark.parametrize("long_path", [False, True], ids=["short-path", "long-path"])
 def test_a_killed_syncer_is_restarted_from_its_checkpoint_and_the_merge_goes_on(  # noqa: PLR0915
-        syncer_binary, tmp_path, monkeypatch):  # noqa: F811
+        syncer_binary, tmp_path, monkeypatch, long_path):  # noqa: F811
     from yeto import runs
+
+    if long_path:  # the binary under a path as long as a CI runner's, or longer
+        syncer_binary = _long_path_copy(syncer_binary, tmp_path)
 
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
     port, total = _port(), 14
@@ -122,16 +182,19 @@ def test_a_killed_syncer_is_restarted_from_its_checkpoint_and_the_merge_goes_on(
             time.sleep(0.05)
         # kill the syncer process itself: one PID, checked to be the syncer
         victim = syncer.proc.pid
-        assert "yeto-syncer" in _command_of(victim), _command_of(victim)
+        assert _is_binary(victim, syncer_binary), _argv_of(victim)
         import os
 
         os.kill(victim, signal.SIGKILL)
         killed_at = time.time()
+        while not _dead(victim):  # what it left is read before its restart can merge on
+            assert time.monotonic() < deadline + 30, "the syncer did not die"
+            time.sleep(0.01)
+        resumed_from = read_checkpoint_global_step(syncer.checkpoint)
+        before = _steps(syncer.tape)
         while syncer.proc.pid == victim or syncer.proc.poll() is not None:
             assert time.monotonic() < deadline + 30, "the service did not restart the syncer"
             time.sleep(0.05)
-        resumed_from = read_checkpoint_global_step(syncer.checkpoint)
-        before = _steps(syncer.tape)
         assert resumed_from >= 4 and before[:resumed_from] == list(range(1, resumed_from + 1))
         while not any(m.get("at", 0) > killed_at for m in [island_launches.read_syncer_record(objects)]):
             assert time.monotonic() < deadline + 60, "the record was not written again after the restart"

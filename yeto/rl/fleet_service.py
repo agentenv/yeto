@@ -505,22 +505,62 @@ class Onsite:
         return doc if isinstance(doc, dict) else {"reason": f"marker {self.ended_key} in the run store (unreadable)"}
 
     def write_ended(self, code: int, reason: str, log: Callable[[str], None] = print) -> dict[str, Any]:
+        """The ended marker, in the run store first (every host's unit reads it), then on this
+        host. Neither write raises: a failure is said, and the service's exit stays its own."""
         doc = {"schema": ENDED_SCHEMA, "run": self.run, "role": self.role, "exit_code": int(code),
                "reason": reason, "at": round(time.time(), 3), "node": socket.gethostname()}
         data = json.dumps(doc, sort_keys=True)
         path = self.ended_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(data + "\n")
-        os.replace(tmp, path)
+        stored = here = True
         try:
             self.objects.write(self.ended_key, data.encode())
-        except Exception as error:  # noqa: BLE001 - this host's marker still holds; said
+        except Exception as error:  # noqa: BLE001 - this host's marker then holds alone; said
+            stored = False
             log(f"[{self.role} service] WARNING: the ended marker is not in the run store ({type(error).__name__}: "
                 f"{error}); only this host's ({path}) keeps the run from starting again")
-        log(f"[{self.role} service] run {self.run} ended (exit {code}: {reason}): ended marker {path} and "
-            f"{self.ended_key} in the run store; the unit does not start it again until `clear-ended`")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(data + "\n")
+            os.replace(tmp, path)
+        except Exception as error:  # noqa: BLE001 - the run store's marker then holds alone; said
+            here = False
+            log(f"[{self.role} service] WARNING: this host's ended marker {path} is not written "
+                f"({type(error).__name__}: {error})" + ("; the run store's keeps the run from starting again"
+                                                         if stored else "; NOTHING keeps the run from starting again"))
+        where = " and ".join(([str(path)] if here else []) + ([f"{self.ended_key} in the run store"] if stored else []))
+        log(f"[{self.role} service] run {self.run} ended (exit {code}: {reason}): ended marker "
+            f"{where or 'not written'}; the unit does not start it again until `clear-ended`")
         return doc
+
+    def mark_fresh(self, log: Callable[[str], None] = print) -> int:
+        """``service-run --fresh``: the marker of :attr:`fresh_path`, only on the host whose service
+        ran this run's syncer by the run store's syncer record (``service_node``); anywhere else,
+        or without such a record, refused (exit 2), and no marker is written."""
+        from yeto.rl.island_launches import read_syncer_record  # noqa: PLC0415
+
+        node, name = socket.gethostname(), trainer_launch_name(self.cfg)
+        try:
+            last = read_syncer_record(self.objects)
+        except Exception as error:  # noqa: BLE001 - nothing is marked
+            log(f"[syncer service] --fresh refused: the run store's syncer record does not read "
+                f"({type(error).__name__}: {error}); nothing marked")
+            return 2
+        if last is None or last.get("run") != name:
+            log(f"[syncer service] --fresh refused: the run store has no syncer record of run {name!r}"
+                + ("" if last is None else f" (it is run {last.get('run')!r}'s)")
+                + ": the syncer starts from the record as it is, nothing to start fresh; nothing marked")
+            return 2
+        if last.get("service_node") != node:
+            log(f"[syncer service] --fresh refused: the run store's syncer record is the service's on node "
+                f"{last.get('service_node')!r}, not this one ({node!r}): run it there (`yeto fleet service fresh "
+                f"<that host> ...`); nothing marked")
+            return 2
+        self.fresh_path.parent.mkdir(parents=True, exist_ok=True)
+        self.fresh_path.write_text(json.dumps({"at": round(time.time(), 3), "epoch": last.get("syncer_epoch")}) + "\n")
+        log(f"[syncer service] run {self.run}: its next start begins the syncer at the next term (after epoch "
+            f"{last.get('syncer_epoch')}; the islands rejoin it), marker {self.fresh_path}; start the unit")
+        return 0
 
     def clear_ended(self, log: Callable[[str], None] = print) -> int:
         from yeto.launch.fleet_syncer import ONSITE_STOP  # noqa: PLC0415
@@ -553,11 +593,7 @@ def service_run(args: Any, *, objects: Any = None, log: Callable[[str], None] = 
             if args.role != "syncer":
                 log(f"[{args.role} service] --fresh: the syncer role only")
                 return CONFIG_EXIT
-            onsite.fresh_path.parent.mkdir(parents=True, exist_ok=True)
-            onsite.fresh_path.write_text(json.dumps({"at": round(time.time(), 3)}) + "\n")
-            log(f"[syncer service] run {onsite.run}: its next start begins a fresh syncer at the next term (the "
-                f"islands rejoin it) if its checkpoint is gone ({onsite.fresh_path}); start the unit")
-            return 0
+            return onsite.mark_fresh(log)
         ended = onsite.read_ended(log=log)
         if ended is not None:
             at = ended.get("at")
@@ -675,47 +711,106 @@ LOCK_LOST_EXIT = 2  # another service took the lock: not restarted (a restart wo
 SELF_FENCED_EXIT = 1  # this service could not renew its own lease: restarted (acquire refuses a lock held by another)
 
 
-def service_lock_ttl_s(stop_grace_s: float | None, beat_s: float | None = None) -> float:
-    """The service lock's lease: long enough that a service whose renewals fail fences itself
+def service_lock_ttl_s(stop_grace_s: float | None, beat_s: float | None = None, *, poll_s: float | None = None,
+                       call_s: float | None = None) -> float:
+    """The service lock's lease: long enough that a service whose renewals fail (each call
+    taking up to ``call_s``, :data:`~yeto.launch.fleet_syncer.HEARTBEAT_CALL_S`) fences itself
     (:meth:`Heartbeat.renew`) and still has its syncer stopped (its checkpoint written within
-    ``stop_grace_s``) before the lease ends, after at least two renewals that failed."""
+    ``stop_grace_s``) more than the lock's margin before the lease ends. The lease is
+    :attr:`Heartbeat.fence_s` plus two heartbeat rounds as slow as they can be before the
+    fence (``2 * (beat + 2 * call)``), the margin included, which is ``min(60, ttl / 10)``
+    (``StoreLock.margin_s``); at least :data:`~yeto.launch.fleet_syncer.SERVICE_LOCK_TTL_S`."""
     from yeto.launch import fleet_syncer  # noqa: PLC0415
 
     beat = fleet_syncer.SERVICE_BEAT_S if beat_s is None else float(beat_s)
-    return max(fleet_syncer.SERVICE_LOCK_TTL_S, float(stop_grace_s or 0.0) + fleet_syncer.POLL_S + 3 * beat + 60.0)
+    poll = fleet_syncer.POLL_S if poll_s is None else float(poll_s)
+    call = fleet_syncer.HEARTBEAT_CALL_S if call_s is None else float(call_s)
+    rest = float(stop_grace_s or 0.0) + poll + beat + 3 * call + 2 * (beat + 2 * call)
+    return max(fleet_syncer.SERVICE_LOCK_TTL_S, rest + min(60.0, rest / 9))
+
+
+def heartbeat_objects(uri: str | None, environ: dict[str, str]) -> Any:
+    """The heartbeat's own client of an ``s3://`` / ``r2://`` run store: connect timeout
+    :data:`~yeto.launch.fleet_syncer.HEARTBEAT_CONNECT_TIMEOUT_S`, read timeout
+    :data:`~yeto.launch.fleet_syncer.HEARTBEAT_READ_TIMEOUT_S`, at most
+    :data:`~yeto.launch.fleet_syncer.HEARTBEAT_MAX_ATTEMPTS` requests per call, shared with
+    nothing on the main path. None for another store (the service's client is used; the
+    heartbeat's own cut-off still bounds each call)."""
+    from yeto.cloud import s3_store  # noqa: PLC0415
+    from yeto.launch import fleet_syncer  # noqa: PLC0415
+
+    text = str(uri or "")
+    if not text.startswith(("s3://", "r2://")):
+        return None
+    env = {**environ, s3_store.CONNECT_TIMEOUT_ENV: f"{fleet_syncer.HEARTBEAT_CONNECT_TIMEOUT_S:g}",
+           s3_store.READ_TIMEOUT_ENV: f"{fleet_syncer.HEARTBEAT_READ_TIMEOUT_S:g}",
+           s3_store.MAX_ATTEMPTS_ENV: str(fleet_syncer.HEARTBEAT_MAX_ATTEMPTS)}
+    return s3_store.head_objects(text.replace("r2://", "s3://", 1), environ=env)
 
 
 class Heartbeat:
     """The service's heartbeat in the run store every :data:`SERVICE_BEAT_S` (a thread),
     which also renews the service lock. ``starting`` until :meth:`set` says otherwise;
     ``lost``: why the lock is no longer this service's (the beats stop), ``lost_code`` the
-    service's exit for it."""
+    service's exit for it. ``objects``: the heartbeat's own store client
+    (:func:`heartbeat_objects`); each call of the beat thread is cut off after ``call_s``."""
 
     def __init__(self, objects: Any, host: str, key: str | None, *, lock: Any = None, generation: int | None = None,
                  node: str | None = None, every_s: float | None = None, log: Callable[[str], None] = print,
-                 stop_grace_s: float | None = None) -> None:
-        from yeto.launch.fleet_syncer import POLL_S, SERVICE_BEAT_S, SERVICE_STARTING  # noqa: PLC0415
+                 stop_grace_s: float | None = None, poll_s: float | None = None, call_s: float | None = None) -> None:
+        from yeto.launch.fleet_syncer import HEARTBEAT_CALL_S, POLL_S, SERVICE_BEAT_S, SERVICE_STARTING  # noqa: PLC0415
 
         self.objects, self.host, self.key, self.lock, self.log = objects, host, key, lock, log
         self.generation, self.node = generation, node
         self.state = SERVICE_STARTING
         self.lost: str | None = None
         self.lost_code: int | None = None
-        # the lease this service must still hold when it fences itself: a beat until the next
-        # renewal, a poll until serve sees it, the syncer's stop, and the lock's margin
-        self.poll_s, self.stop_grace_s = POLL_S, float(stop_grace_s or 0.0)
+        self.poll_s = POLL_S if poll_s is None else float(poll_s)
+        self.call_s = HEARTBEAT_CALL_S if call_s is None else float(call_s)
+        self.stop_grace_s = float(stop_grace_s or 0.0)
         self.every_s = SERVICE_BEAT_S if every_s is None else float(every_s)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="syncer-service-beat", daemon=True)
+        self._pending: threading.Thread | None = None
 
-    def beat(self, state: str | None = None, reason: str | None = None) -> None:
+    def _bounded(self, what: str, call: Callable[[], Any]) -> Any:
+        """``call()`` in a thread of its own, waited for at most :attr:`call_s`: past that a
+        ``TimeoutError`` (the thread ends on its client's timeouts). A call of the beat thread
+        that still runs from before fails the next one at once (never two at a time)."""
+        if self._pending is not None and self._pending.is_alive():
+            raise TimeoutError(f"the {self._pending.name} call before this one still waits for the store")
+        out: dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                out["value"] = call()
+            except BaseException as error:  # noqa: BLE001 - handed to the caller
+                out["error"] = error
+
+        thread = threading.Thread(target=run, name=what, daemon=True)
+        self._pending = thread
+        thread.start()
+        thread.join(self.call_s)
+        if thread.is_alive():
+            raise TimeoutError(f"the store did not answer the {what} within {self.call_s:.0f}s")
+        if "error" in out:
+            raise out["error"]
+        return out.get("value")
+
+    def _write(self, state: str | None, reason: str | None) -> None:
         from yeto.launch.fleet_syncer import write_service_status  # noqa: PLC0415
 
+        write_service_status(self.objects, host=self.host, state=state or self.state, key=self.key,
+                             reason=reason, generation=self.generation, node=self.node)
+
+    def beat(self, state: str | None = None, reason: str | None = None, *, bounded: bool = False) -> None:
         if self.lost is not None:
             return
         try:
-            write_service_status(self.objects, host=self.host, state=state or self.state, key=self.key,
-                                 reason=reason, generation=self.generation, node=self.node)
+            if bounded:
+                self._bounded("heartbeat", lambda: self._write(state, reason))
+            else:
+                self._write(state, reason)
         except Exception as error:  # noqa: BLE001 - tried again at the next beat
             self.log(f"[syncer service] WARNING: heartbeat not written ({type(error).__name__}: {error})")
 
@@ -726,21 +821,26 @@ class Heartbeat:
 
     @property
     def fence_s(self) -> float:
-        """Lease left at or below which a service whose renewal failed fences itself."""
-        return float(self.lock.margin_s) + self.every_s + self.poll_s + self.stop_grace_s
+        """Lease left before a renewal at or below which a service whose renewal failed fences
+        itself: the lock's margin, a poll until serve sees it, the syncer's stop, and the beat
+        thread's worst case until it could tell otherwise (this renewal, the heartbeat after it,
+        a beat, the next renewal: ``every_s + 3 * call_s``)."""
+        return float(self.lock.margin_s) + self.every_s + self.poll_s + self.stop_grace_s + 3 * self.call_s
 
     def renew(self) -> None:
-        """Renew the service lock. Another holder's token (``LockLost``): lost, exit
-        :data:`LOCK_LOST_EXIT`. A renewal that fails (the store does not answer): tried again
-        at the next beat, unless the lease left is within :attr:`fence_s`; then the service
-        fences itself (exit :data:`SELF_FENCED_EXIT`, restarted) while its syncer can still be
-        stopped before the lease ends."""
+        """Renew the service lock (cut off after :attr:`call_s`). Another holder's token
+        (``LockLost``): lost, exit :data:`LOCK_LOST_EXIT`. A renewal that fails (the store
+        does not answer, or not in time): tried again at the next beat, unless the lease
+        left when the renewal began is within :attr:`fence_s`; then the service fences itself
+        (exit :data:`SELF_FENCED_EXIT`, restarted) while its syncer can still be stopped
+        before the lease ends."""
         from yeto.launch.pool.store_lock import LockLost  # noqa: PLC0415
 
         if self.lock is None or self.lost is not None:
             return
+        left = self.lock.lease_left()  # before the call: a call that hangs has spent its time already
         try:
-            self.lock.renew()
+            self._bounded("renewal", self.lock.renew)
             return
         except LockLost as error:
             self.lost, self.lost_code = f"the syncer service lock is no longer this service's ({error})", LOCK_LOST_EXIT
@@ -748,10 +848,9 @@ class Heartbeat:
             return
         except Exception as error:  # noqa: BLE001 - a store blip: renewed at the next beat
             self.log(f"[syncer service] WARNING: lock not renewed ({type(error).__name__}: {error})")
-        left = self.lock.lease_left()
         if left <= self.fence_s:  # stopped now, the syncer is down before another service may take the lock
-            self.lost = (f"the syncer service lock was not renewed and its lease ends in {left:.0f}s (the syncer's "
-                         f"stop needs up to {self.fence_s:.0f}s of it): fenced by itself")
+            self.lost = (f"the syncer service lock was not renewed and its lease had {left:.0f}s left before this "
+                         f"renewal (the syncer's stop needs up to {self.fence_s:.0f}s of it): fenced by itself")
             self.lost_code = SELF_FENCED_EXIT
             self.log(f"[syncer service] ERROR: {self.lost}: ending this syncer (exit {SELF_FENCED_EXIT}: restarted)")
 
@@ -765,7 +864,7 @@ class Heartbeat:
     def _loop(self) -> None:
         while not self._stop.wait(self.every_s):
             self.renew()
-            self.beat()
+            self.beat(bounded=True)
 
 
 def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
@@ -773,7 +872,8 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
                parse: Callable[[list[str]], Any] | None = None, node: str | None = None,
                stop_grace_s: float | None = SYNCER_STOP_GRACE_S, beat_s: float | None = None,
                workdir: str | None = None, log: Callable[[str], None] = print,
-               fresh_path: Path | None = None) -> int:
+               fresh_path: Path | None = None, heartbeat_store: Any = None, poll_s: float | None = None,
+               call_s: float | None = None) -> int:
     """The fleet's syncer on this host (``fleet.syncer_service``): the syncer launch's syncer,
     run as the head runs it (``LocalSyncer``: a process that dies is restarted from its
     checkpoint, and its record written again), under the service lock, plus the service's
@@ -790,8 +890,12 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
     The checkpoint must match the record: one here while the record is missing or another
     run's is refused (exit 2), and so is none here while the record says this host's service
     ran this run's syncer (its workdir was cleared: a syncer from step 0 under the islands'
-    term), unless ``fresh_path`` exists (``service-run --fresh``): then a fresh syncer starts
-    at the next term, which the islands rejoin."""
+    term), unless ``fresh_path`` exists (``service-run --fresh``): then the syncer starts at the
+    next term, which the islands rejoin. The marker is removed only once this service's record
+    at that term is in the run store (a start that fails before it is fresh again).
+
+    ``heartbeat_store``: the heartbeat's store client (default :func:`heartbeat_objects`, or
+    ``objects`` when given); ``poll_s`` / ``call_s``: the budget of :class:`Heartbeat`."""
     from yeto.config_errors import CONFIG_ERROR_EXIT, ISLAND_STOP_EXIT  # noqa: PLC0415
     from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415
     from yeto.launch import fleet_syncer  # noqa: PLC0415
@@ -821,12 +925,21 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         log(f"[syncer service] refused: {refused}")
         return CONFIG_ERROR_EXIT
     argv, host = syncer_launch_argv(run)
-    args = (parse or launch_args)(argv)
+    try:
+        args = (parse or launch_args)(argv)
+        if objects is None:
+            store_env = store_client_environ(args, env)
+            uri = getattr(args, "rl_checkpoint_store", None)
+            objects = store_objects(uri, store_env)
+            if objects is not None and heartbeat_store is None:
+                heartbeat_store = heartbeat_objects(uri, store_env)
+    except ValueError as error:  # the store's credentials, a launch flag: the env file or the config
+        log(f"[syncer service] refused: {error} (a configuration error: exit {CONFIG_EXIT}, not restarted)")
+        return CONFIG_EXIT
     if objects is None:
-        objects = store_objects(getattr(args, "rl_checkpoint_store", None), store_client_environ(args, env))
-    if objects is None:
-        log(f"[syncer service] refused: the run store {args.rl_checkpoint_store!r} has no object API here")
-        return 2
+        log(f"[syncer service] refused: the run store {args.rl_checkpoint_store!r} has no object API here (a "
+            f"configuration error: exit {CONFIG_EXIT}, not restarted)")
+        return CONFIG_EXIT
     node = node or socket.gethostname()
     # the syncer's checkpoint and tape (~/yeto-output/...) under this service's working directory: a
     # run of its own (each run has its own workdir), never another run's on this host
@@ -844,6 +957,11 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
     mine = (last is not None and last.get("run") == args.cluster_prefix and last.get("service") == host
             and last.get("service_node") == node)
     fresh = fresh_path is not None and Path(fresh_path).exists()
+    if fresh and not mine:  # a marker the record does not call for: never kept for a later start
+        log(f"[syncer service] the --fresh marker {fresh_path} is not for this record (it is not this host's "
+            "service's syncer of this run): removed, the syncer starts as the record says")
+        Path(fresh_path).unlink(missing_ok=True)
+        fresh = False
     if mine and not checkpoints and not fresh:
         paths = ", ".join(_checkpoints(args, home))
         log(f"[syncer service] refused: the run store's syncer record says this host's service ran run "
@@ -857,7 +975,8 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
     holder = f"{node}/{unit_name(run.run, 'syncer')}"
     try:
         lock = StoreLock.acquire(objects, fleet_syncer.SERVICE_LOCK, holder=holder,
-                                 ttl_s=service_lock_ttl_s(stop_grace_s, beat_s), reclaim=True)
+                                 ttl_s=service_lock_ttl_s(stop_grace_s, beat_s, poll_s=poll_s, call_s=call_s),
+                                 reclaim=True)
     except StoreLockError as error:
         log(f"[syncer service] refused: the run store cannot hold the service lock ({error})")
         return 2
@@ -867,8 +986,9 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
             f"lease {fleet_syncer.SERVICE_LOCK} runs out at {float(other.get('until') or 0):.0f}); one syncer at a "
             "time. Stop that unit first (or wait for its lease to run out if its host is gone)")
         return 2
-    beat = Heartbeat(objects, host, kid, lock=lock, generation=lock.token, node=node, every_s=beat_s, log=log,
-                     stop_grace_s=stop_grace_s)
+    lock.objects = heartbeat_store if heartbeat_store is not None else objects  # renewed by the heartbeat only
+    beat = Heartbeat(lock.objects, host, kid, lock=lock, generation=lock.token, node=node, every_s=beat_s, log=log,
+                     stop_grace_s=stop_grace_s, poll_s=poll_s, call_s=call_s)
     syncer, code, reason, final = None, 1, None, None
     try:
         stop = fleet_syncer.read_onsite_stop(objects)
@@ -880,13 +1000,12 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         num_learners = (sample_roles.syncer_learner_count(args, len(parse_gpu_spec(args.gpu)))
                         + (getattr(args, "external_learners", 0) or 0))
         here = last is not None and last.get("service") == host and last.get("service_node") == node
-        if fresh and mine and not checkpoints:  # service-run --fresh: a new term, the islands rejoin it
+        if fresh:  # service-run --fresh: a new term, the islands rejoin it (the marker goes once it is recorded)
             here = False
-            Path(fresh_path).unlink(missing_ok=True)
         if last is not None and not here and last.get("syncer_epoch") is not None:
             args.rl_syncer_epoch = int(last["syncer_epoch"]) + 1
             log(f"[syncer service] the fleet's last syncer record (epoch {last['syncer_epoch']}) is "
-                + ("this host's, but its checkpoint is gone (--fresh)" if mine else "not this host's service's")
+                + ("this host's, started fresh (--fresh)" if fresh else "not this host's service's")
                 + f": this syncer starts at epoch {args.rl_syncer_epoch}")
         fleet_syncer.resolve_epoch(args, sample_roles.FLEET_ROLE_SYNCER, adopted=False, reader=lambda: None,
                                    objects=objects, log=log)
@@ -912,6 +1031,8 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         def recorded(record: dict[str, Any]) -> None:
             if record.get("service_generation") == lock.token:
                 beat.set(fleet_syncer.SERVICE_RUNNING)
+                if fresh and record.get("syncer_epoch") == args.rl_syncer_epoch:  # the new term is in the store
+                    Path(fresh_path).unlink(missing_ok=True)
 
         def stopped() -> str | None:
             if beat.lost is not None:

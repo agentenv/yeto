@@ -249,10 +249,18 @@ def write_syncer_record(objects: Any, *, addr: str, syncer_epoch: int | None, le
                         max_learners: int | None, run: str, clock: Any = time.time,
                         extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """The fleet syncer's address and term in the run store (the island launches dial it).
-    ``extra``: fields an on-site syncer service adds (``service``, ``key_id``); none otherwise."""
+    ``extra``: fields an on-site syncer service adds (``service``, ``key_id``); none otherwise.
+    A store with ``write_exclusive`` (a directory) writes it under the lock of its
+    ``replace_if``, so the syncer launch's conditional rewrite of the record
+    (``fleet_syncer._rerecord``) never overwrites a record this write put there meanwhile."""
     record = syncer_record_doc(addr=addr, syncer_epoch=syncer_epoch, learners=learners, max_learners=max_learners,
                                run=run, clock=clock, extra=extra)
-    objects.write(SYNCER_RECORD, json.dumps(record, sort_keys=True).encode())
+    data = json.dumps(record, sort_keys=True).encode()
+    exclusive = getattr(objects, "write_exclusive", None)
+    if exclusive is not None:
+        exclusive(SYNCER_RECORD, data)
+    else:
+        objects.write(SYNCER_RECORD, data)
     return record
 
 

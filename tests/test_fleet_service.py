@@ -1171,9 +1171,10 @@ def test_the_watcher_never_overwrites_a_record_the_service_rewrote_meanwhile(tmp
 
 
 def test_a_lease_that_could_not_be_renewed_fences_the_service_in_time_and_restartably(tmp_path):
-    """A renewal that fails fences the service once the lease left no longer covers a beat, a
-    poll, the syncer's stop and the lock's margin (exit 1: restarted); another holder's token is
-    exit 2 (not restarted). The lease is long enough for two failed renewals first."""
+    """A renewal that fails fences the service once the lease left before it no longer covers the
+    beat thread's worst case (three cut-off calls and a beat), a poll, the syncer's stop and the
+    lock's margin (exit 1: restarted); another holder's token is exit 2 (not restarted). The
+    lease leaves two worst-case heartbeat rounds before the fence."""
     from yeto.launch.pool.store_lock import LockLost
 
     class Lock:
@@ -1183,26 +1184,115 @@ def test_a_lease_that_could_not_be_renewed_fences_the_service_in_time_and_restar
             self.left, self.error = left, error
 
         def renew(self):
+            self.left -= 5.0  # the call took its time: the lease left before it is what counts
             raise self.error
 
         def lease_left(self):
             return self.left
 
     objects = DirectoryObjectStore(tmp_path / "store")
-    grace = fs.SYNCER_STOP_GRACE_S
-    fence = 12.0 + fleet_syncer.SERVICE_BEAT_S + fleet_syncer.POLL_S + grace
+    grace, call = fs.SYNCER_STOP_GRACE_S, fleet_syncer.HEARTBEAT_CALL_S
+    assert call == 2 * (fleet_syncer.HEARTBEAT_MAX_ATTEMPTS * (fleet_syncer.HEARTBEAT_CONNECT_TIMEOUT_S
+                                                                + fleet_syncer.HEARTBEAT_READ_TIMEOUT_S) + 1.0)
+    fence = 12.0 + fleet_syncer.SERVICE_BEAT_S + fleet_syncer.POLL_S + grace + 3 * call
     for left, error, code in [(fence + 1, OSError("store blip"), None), (fence, OSError("store down"), fs.SELF_FENCED_EXIT),
                               (300.0, LockLost("fleet/syncer_service/lock", 1, 2), fs.LOCK_LOST_EXIT)]:
         beat_ = fs.Heartbeat(objects, "10.0.0.5", "kid", lock=Lock(left, error), generation=1, log=lambda m: None,
                              stop_grace_s=grace)
+        assert beat_.fence_s == fence
         beat_.renew()
         assert beat_.lost_code == code and (beat_.lost is not None) is (code is not None)
     assert fs.SELF_FENCED_EXIT not in fs.SYNCER_PREVENT and fs.LOCK_LOST_EXIT in fs.SYNCER_PREVENT
     ttl = fs.service_lock_ttl_s(grace)
     margin = min(60.0, ttl * 0.1)  # StoreLock.margin_s
-    fence_s = margin + fleet_syncer.SERVICE_BEAT_S + fleet_syncer.POLL_S + grace
-    assert ttl - fence_s >= 2 * fleet_syncer.SERVICE_BEAT_S  # two renewals may fail before it fences
-    assert fence_s - margin - fleet_syncer.SERVICE_BEAT_S - fleet_syncer.POLL_S >= grace  # its stop fits the lease
+    fence_s = margin + fleet_syncer.SERVICE_BEAT_S + fleet_syncer.POLL_S + grace + 3 * call
+    assert ttl - fence_s >= 2 * (fleet_syncer.SERVICE_BEAT_S + 2 * call) - 1e-9  # two slow rounds before the fence
+    assert ttl >= fleet_syncer.SERVICE_LOCK_TTL_S >= 4 * fleet_syncer.SERVICE_BEAT_S + 7 * call
+
+
+class HangingStore:
+    """A store whose calls, once ``down``, each block ``block_s`` and then fail (a store that
+    hangs: the heartbeat's cut-off ends the wait first when it is shorter)."""
+
+    def __init__(self, inner, block_s):
+        self.inner, self.block_s, self.down = inner, float(block_s), False
+
+    def _call(self, name, *a):
+        import time
+
+        if self.down:
+            time.sleep(self.block_s)
+            raise OSError(f"the store did not answer the {name}")
+        return getattr(self.inner, name)(*a)
+
+    def read(self, key):
+        return self._call("read", key)
+
+    def write(self, key, data):
+        return self._call("write", key, data)
+
+    def create(self, key, data):
+        return self._call("create", key, data)
+
+    def list(self, prefix):
+        return self._call("list", prefix)
+
+    def delete(self, key):
+        return self._call("delete", key)
+
+
+# the production budget scaled down (seconds x SCALE): a store that blocks N seconds per call
+SCALE = 0.01
+
+
+@pytest.mark.parametrize("block_s", [0, 45, 91, 181])
+def test_a_store_that_hangs_never_keeps_the_syncer_running_past_the_lease(tmp_path, monkeypatch, block_s):
+    """H1: each heartbeat store call blocks ``block_s`` (production seconds, scaled) and then
+    fails. The heartbeat's own cut-off and the fence budget stop the syncer, its stop taking the
+    whole grace, more than the lock's margin before the lease ends, every time."""
+    import time
+
+    from yeto.launch.pool.store_lock import StoreLock
+
+    monkeypatch.setattr(fleet_syncer, "SERVICE_LOCK_TTL_S", 0.0)  # the scaled lease, not the floor
+    beat_s, poll_s = fleet_syncer.SERVICE_BEAT_S * SCALE, fleet_syncer.POLL_S * SCALE
+    call_s, grace = fleet_syncer.HEARTBEAT_CALL_S * SCALE, fs.SYNCER_STOP_GRACE_S * SCALE
+    objects = DirectoryObjectStore(tmp_path / "store")
+    hanging = HangingStore(objects, block_s * SCALE)
+    times: dict = {}
+
+    class SlowStop(FakeSyncer):
+        def stop(self):
+            time.sleep(grace)  # the syncer's checkpoint takes the whole grace
+            times["stopped"] = time.time()
+            super().stop()
+
+    syncer = SlowStop()
+
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish):
+        record = island_launches.write_syncer_record(objects, addr=addr, syncer_epoch=args.rl_syncer_epoch,
+                                                     learners=n, max_learners=4, run="r", extra=record_extra)
+        on_record(record)
+        lock = StoreLock(objects, fleet_syncer.SERVICE_LOCK, record_extra["service_generation"], "x")
+        times["lease"] = lambda: float(json.loads(objects.read(lock.lease_key(lock.prefix, lock.token)))["until"])
+        hanging.down = True  # from now on the store hangs
+        deadline = time.monotonic() + 60
+        while not stopped():
+            assert time.monotonic() < deadline
+            time.sleep(poll_s)  # supervise's poll
+        return 9
+
+    path = onsite_config(tmp_path)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    logs: list[str] = []
+    rc = fs.run_syncer(str(path), objects=objects, heartbeat_store=hanging, make_syncer=lambda args, n: syncer,
+                       serve=serve, parse=_prepared, node="site-s", beat_s=beat_s, poll_s=poll_s, call_s=call_s,
+                       stop_grace_s=grace, workdir=str(tmp_path / "work"), log=logs.append)
+    assert rc == fs.SELF_FENCED_EXIT and syncer.events == ["start", "stop"], logs
+    ttl = fs.service_lock_ttl_s(grace, beat_s, poll_s=poll_s, call_s=call_s)
+    margin = min(60.0, ttl * 0.1)
+    assert times["stopped"] < times["lease"]() - margin / 2, (times, logs)  # stopped before the lease ends
+    assert any("fenced by itself" in m for m in logs)
 
 
 def test_a_self_fenced_service_exits_1_and_stops_its_syncer_before_its_lease_ends(tmp_path, monkeypatch):
@@ -1221,7 +1311,7 @@ def test_a_self_fenced_service_exits_1_and_stops_its_syncer_before_its_lease_end
     def cut():
         state["down"] = True  # the store stops answering the renewals
 
-    monkeypatch.setattr(fs, "service_lock_ttl_s", lambda grace, beat=None: 0.6)  # a short lease for the test
+    monkeypatch.setattr(fs, "service_lock_ttl_s", lambda grace, beat=None, **kw: 0.6)  # a short lease for the test
     rc, seen, syncer, objects, logs = run_service(tmp_path, monkeypatch, 0, objects=objects, until=cut, beat_s=0.05)
     assert rc == fs.SELF_FENCED_EXIT and "fenced by itself" in seen["stopped"]
     assert syncer.events == ["start", "stop"]
@@ -1319,7 +1409,7 @@ def test_an_old_finished_status_never_ends_the_head_wait_early(tmp_path, monkeyp
 def test_a_checkpoint_gone_while_the_record_says_it_is_here_is_refused_until_fresh(tmp_path, monkeypatch):
     """The run store's record says this host's service ran this run's syncer, but its checkpoint is
     gone (the workdir was cleared): refused (exit 2), naming the recovery. `fresh` lets the next
-    start begin a fresh syncer at the next term (consumed by it)."""
+    start begin the syncer at the next term; the marker goes once that term is recorded."""
     objects = DirectoryObjectStore(tmp_path / "store")
     island_launches.write_syncer_record(objects, addr="10.0.0.5:29400", syncer_epoch=4, learners=2, max_learners=4,
                                         run="r", extra={"service": "10.0.0.5", "service_node": "site-s"})
@@ -1327,9 +1417,10 @@ def test_a_checkpoint_gone_while_the_record_says_it_is_here_is_refused_until_fre
     assert rc == 2 and rc in fs.SYNCER_PREVENT and syncer.events == [] and seen == {}
     assert "its checkpoint is not here" in logs[-1] and "yeto fleet service fresh" in logs[-1]
     path = onsite_config(tmp_path)
+    monkeypatch.setattr(fs.socket, "gethostname", lambda: "site-s")
     assert fs.service_run(service_args(path, "syncer", fresh=True), objects=objects, log=logs.append) == 0
     fresh = tmp_path / "state" / "r" / "onsite-syncer.fresh"
-    assert fresh.exists() and "fresh syncer at the next term" in logs[-1]
+    assert fresh.exists() and "begins the syncer at the next term (after epoch 4" in logs[-1]
     real = fs.run_syncer
     monkeypatch.setattr(fs, "run_syncer", lambda config, **kw: real(
         config, objects=objects, make_syncer=lambda args, n: FakeSyncer(False), serve=fake_serve(objects, seen, 0),
@@ -1337,7 +1428,83 @@ def test_a_checkpoint_gone_while_the_record_says_it_is_here_is_refused_until_fre
         fresh_path=kw["fresh_path"]))
     assert fs.service_run(service_args(path, "syncer"), objects=objects, log=logs.append) == 0
     assert seen["epoch"] == 5 and not fresh.exists()  # a new term, the islands rejoin it; the marker used up
-    assert any("its checkpoint is gone (--fresh)" in m for m in logs)
+    assert island_launches.read_syncer_record(objects)["syncer_epoch"] == 5
+    assert any("started fresh (--fresh)" in m for m in logs)
+
+
+@pytest.mark.usefixtures("no_sigterm_handler")
+def test_a_fresh_start_that_fails_before_its_record_is_fresh_again(tmp_path, monkeypatch):
+    """M2: the --fresh marker stays until this service's record at the new term is in the run
+    store: a syncer that fails to start (or dies before its record) is fresh again on the restart,
+    at the same next term, and a checkpoint it wrote meanwhile does not undo that."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    island_launches.write_syncer_record(objects, addr="10.0.0.5:29400", syncer_epoch=4, learners=2, max_learners=4,
+                                        run="r", extra={"service": "10.0.0.5", "service_node": "site-s"})
+    path = onsite_config(tmp_path)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(fs.socket, "gethostname", lambda: "site-s")
+    logs: list[str] = []
+    assert fs.service_run(service_args(path, "syncer", fresh=True), objects=objects, log=logs.append) == 0
+    fresh = tmp_path / "state" / "r" / "onsite-syncer.fresh"
+    workdir = tmp_path / "work"
+
+    class Fails(FakeSyncer):
+        def start(self):
+            for c in fs._checkpoints(self.args, str(workdir / "home")):  # it got as far as a checkpoint
+                pathlib.Path(c).parent.mkdir(parents=True, exist_ok=True)
+                pathlib.Path(c).write_text("{}")
+            raise OSError("the syncer binary did not start")
+
+    def failing(args, n):
+        syncer = Fails()
+        syncer.args = args
+        return syncer
+
+    def run(make):
+        seen: dict = {}
+        rc = fs.run_syncer(str(path), objects=objects, make_syncer=make, serve=fake_serve(objects, seen, 0),
+                           parse=_prepared, node="site-s", workdir=str(workdir), log=logs.append,
+                           fresh_path=fresh)
+        return rc, seen
+
+    with pytest.raises(OSError, match="did not start"):
+        run(failing)
+    assert fresh.exists() and island_launches.read_syncer_record(objects)["syncer_epoch"] == 4
+    rc, seen = run(lambda args, n: FakeSyncer(False))  # the unit's restart
+    assert rc == 0 and seen["epoch"] == 5 and not fresh.exists()
+    assert island_launches.read_syncer_record(objects)["syncer_epoch"] == 5
+
+
+@pytest.mark.usefixtures("no_sigterm_handler")
+def test_fresh_on_a_host_that_is_not_the_record_s_node_is_refused(tmp_path, monkeypatch):
+    """L2: `fresh` only where the run store's record says this run's syncer ran (its
+    service_node); elsewhere, or with no record of this run, exit 2 naming the node, no marker."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    path = onsite_config(tmp_path)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    fresh = tmp_path / "state" / "r" / "onsite-syncer.fresh"
+    logs: list[str] = []
+    monkeypatch.setattr(fs.socket, "gethostname", lambda: "site-t")
+    assert fs.service_run(service_args(path, "syncer", fresh=True), objects=objects, log=logs.append) == 2
+    assert "no syncer record of run 'r'" in logs[-1] and not fresh.exists()
+    island_launches.write_syncer_record(objects, addr="10.0.0.5:29400", syncer_epoch=4, learners=2, max_learners=4,
+                                        run="other", extra={"service": "10.0.0.5", "service_node": "site-t"})
+    assert fs.service_run(service_args(path, "syncer", fresh=True), objects=objects, log=logs.append) == 2
+    assert "run 'other'" in logs[-1] and not fresh.exists()
+    island_launches.write_syncer_record(objects, addr="10.0.0.5:29400", syncer_epoch=4, learners=2, max_learners=4,
+                                        run="r", extra={"service": "10.0.0.5", "service_node": "site-s"})
+    assert fs.service_run(service_args(path, "syncer", fresh=True), objects=objects, log=logs.append) == 2
+    assert "on node 'site-s', not this one ('site-t')" in logs[-1] and not fresh.exists()
+    assert not fresh.parent.exists() or list(fresh.parent.iterdir()) == []
+    # a marker left on a host the record does not name is never used later (removed at the start)
+    fresh.parent.mkdir(parents=True, exist_ok=True)
+    fresh.write_text("{}")
+    seen: dict = {}
+    rc = fs.run_syncer(str(path), objects=objects, make_syncer=lambda args, n: FakeSyncer(False),
+                       serve=fake_serve(objects, seen, 0), parse=_prepared, node="site-t",
+                       workdir=str(tmp_path / "work"), log=logs.append, fresh_path=fresh)
+    assert rc == 0 and seen["epoch"] == 5 and not fresh.exists()  # another host's service: the next term anyway
+    assert any("is not for this record" in m for m in logs)
 
 
 def test_fresh_runs_on_the_syncer_host_as_the_unit_runs(tmp_path, monkeypatch, capsys):
@@ -1444,7 +1611,10 @@ def test_the_service_s_tape_upload_uses_its_store_client_and_run_up_s_environmen
     assert calls == [ls.env]
 
 
-def test_the_s3_store_s_replace_if_is_an_if_match_put(tmp_path):
+def etag_s3(mode: str = "applies"):
+    """A FaultS3 with ETags and PutObject ``If-Match``: ``applies`` (412 on a wrong ETag),
+    ``ignores`` (writes over any ETag, as some S3-compatible endpoints do) or an error code the
+    endpoint answers every ``If-Match`` with."""
     import hashlib
 
     from store_fault_fakes import FaultS3, client_error
@@ -1466,12 +1636,26 @@ def test_the_s3_store_s_replace_if_is_an_if_match_put(tmp_path):
             self._enter("put-if", Key)
             if self.refuse:
                 raise client_error("NotImplemented", "PutObject")
+            if mode not in ("applies", "ignores"):
+                raise client_error(mode, "PutObject")
             current = self.objects.get(Key)
-            if current is None or tag(current[0]) != IfMatch:
+            if mode == "applies" and (current is None or tag(current[0]) != IfMatch):
                 raise client_error("PreconditionFailed", "PutObject")
             self.objects[Key] = (bytes(Body), self.now)
 
-    fake = ETagS3()
+    return ETagS3()
+
+
+@pytest.fixture
+def replace_probe(monkeypatch):
+    from yeto.cloud import s3_store
+
+    monkeypatch.setattr(s3_store, "_REPLACE_IF_USABLE", {})  # probed afresh in each test
+
+
+@pytest.mark.usefixtures("replace_probe")
+def test_the_s3_store_s_replace_if_is_an_if_match_put(tmp_path):
+    fake = etag_s3()
     store = fake.store()
     store.write("k", b"a")
     assert store.replace_if("k", b"b", b"a") is True and store.read("k") == b"b"
@@ -1481,3 +1665,280 @@ def test_the_s3_store_s_replace_if_is_an_if_match_put(tmp_path):
     assert store.replace_if("gone", b"c", b"a") is False
     fake.refuse = True
     assert store.replace_if("k", b"c", b"other") is None and store.read("k") == b"other"  # the caller falls back
+    assert store.replace_if_usable() is False  # an unsupported answer: the fallback from now on
+
+
+@pytest.mark.usefixtures("replace_probe")
+@pytest.mark.parametrize("mode", ["applies", "ignores", "501", "NotImplemented", "InvalidArgument", "InvalidRequest"])
+def test_an_endpoint_that_ignores_if_match_is_found_by_a_probe_and_takes_the_fallback(tmp_path, mode):
+    """M3: the first replace_if probes the endpoint once (a probe object, a PutObject with a wrong
+    ETag): only a 412 makes the conditional write usable; a write that goes through or an
+    unsupported answer is the fallback (None). Cached per endpoint and bucket; the probe object is
+    deleted."""
+    from yeto.cloud import s3_store
+
+    fake = etag_s3(mode)
+    store = fake.store()
+    store.write("k", b"a")
+    usable = mode == "applies"
+    assert store.replace_if("k", b"b", b"a") is (True if usable else None)
+    assert store.read("k") == (b"b" if usable else b"a")  # an endpoint that ignores If-Match is never written
+    probes = [k for k in fake.objects if k.startswith(s3_store.REPLACE_IF_PROBE_PREFIX)]
+    assert probes == []  # deleted
+    assert fake.calls["put-if"] == 1 + (1 if usable else 0)  # the probe, then (usable) the write itself
+    other = fake.store()  # the same endpoint and bucket: never probed again in this process
+    assert other.replace_if("k", b"c", b"b" if usable else b"a") is (True if usable else None)
+    assert fake.calls["put-if"] == 1 + (2 if usable else 0)
+    assert s3_store._REPLACE_IF_USABLE == {(None, "bkt"): usable}
+    # the watcher's rewrite then reads again right before a plain write (its documented window)
+    status = {"generation": 7}
+    island_launches.write_syncer_record(store, addr="10.0.0.5:29400", syncer_epoch=3, learners=2, max_learners=4,
+                                        run="r", extra={"service": "10.0.0.5", "service_generation": 7})
+    args = types.SimpleNamespace(cluster_prefix="r")
+    assert fleet_syncer._rerecord(store, status, args) is not None
+    assert fake.calls["put-if"] == 1 + (3 if usable else 0)
+
+
+def test_a_store_error_during_the_probe_is_raised_and_not_cached(monkeypatch):
+    from store_fault_fakes import client_error
+
+    from yeto.cloud import s3_store
+
+    monkeypatch.setattr(s3_store, "_REPLACE_IF_USABLE", {})
+    fake = etag_s3()
+    store = fake.store()
+    fake.fail("put-if", s3_store.REPLACE_IF_PROBE_PREFIX, client_error("InternalError", "PutObject"))
+    with pytest.raises(Exception, match="InternalError"):
+        store.replace_if_usable()
+    assert s3_store._REPLACE_IF_USABLE == {} and not any(k.startswith(".yeto") for k in fake.objects)
+    assert store.replace_if_usable() is True
+
+
+def test_the_service_s_record_write_waits_for_a_conditional_rewrite_in_a_directory_store(tmp_path):
+    """M4: a directory store's replace_if holds a lock the service's record write takes too: a
+    record the service writes while the watcher's rewrite is between its read and its write waits
+    for it, and stands after it (never overwritten)."""
+    import threading
+
+    objects, clock = DirectoryObjectStore(tmp_path / "store"), Clock()
+    service_up(objects, clock, generation=7)
+    raw = objects.read(island_launches.SYNCER_RECORD)
+    real_staged = objects._staged
+    seen: dict = {}
+
+    def service_restarts():
+        island_launches.write_syncer_record(objects, addr="10.0.0.5:29400", syncer_epoch=3, learners=2,
+                                            max_learners=4, run="r",
+                                            extra={"service": "10.0.0.5", "service_generation": 8})
+
+    def staged(path, data):  # inside replace_if, after its read: the service records generation 8 now
+        if "thread" not in seen and path.name == "island_syncer.json":
+            seen["thread"] = threading.Thread(target=service_restarts)
+            seen["thread"].start()
+            seen["thread"].join(0.3)
+            seen["blocked"] = seen["thread"].is_alive()
+        return real_staged(path, data)
+
+    objects._staged = staged
+    rewritten = json.loads(raw)
+    rewritten["at"] += 1
+    assert objects.replace_if(island_launches.SYNCER_RECORD, json.dumps(rewritten).encode(), raw) is True
+    seen["thread"].join(5)
+    assert seen["blocked"] is True  # it waited for the conditional write
+    assert island_launches.read_syncer_record(objects)["service_generation"] == 8  # and stands after it
+
+
+@pytest.mark.parametrize("state", sorted(fleet_syncer.SERVICE_FINAL))
+def test_a_final_heartbeat_an_earlier_service_left_never_ends_the_wait(tmp_path, state):
+    """M1: a final heartbeat (finished / failed / stopped) already in the run store when the syncer
+    launch begins to wait is an earlier service's: it waits on for a newer generation, and then
+    ends with that service as ever. clear-ended leaves the heartbeat alone."""
+    objects, clock, logs = DirectoryObjectStore(tmp_path / "store"), Clock(), []
+    service_up(objects, clock, generation=7, state=state, reason="the earlier run")
+    onsite = fs.Onsite(up.load_config(str(onsite_config(tmp_path))), "syncer", objects=objects)
+    assert onsite.clear_ended(log=logs.append) == 0
+    assert fleet_syncer.read_service_status(objects)["state"] == state  # not removed by clear-ended
+
+    def sleep(s):
+        clock.sleep(s)
+        n = clock.sleeps
+        if n == 4:
+            service_up(objects, clock, generation=8, state=fleet_syncer.SERVICE_STARTING)
+        elif 5 <= n < 9:
+            beat(objects, clock, generation=8)
+        elif n >= 9:
+            beat(objects, clock, generation=8, state=state, reason="this run")
+
+    expected = {"finished": 0, "stopped": 9, "failed": 1}[state]
+    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects, sleep=sleep, clock=clock,
+                                      log=logs.append) == expected
+    assert clock.sleeps >= 9  # never at the earlier service's final heartbeat
+    assert island_launches.read_syncer_record(objects)["service_generation"] == 8
+    assert any("an earlier service's final one" in m for m in logs)
+
+
+def test_a_final_heartbeat_of_a_newer_generation_ends_the_wait(tmp_path):
+    objects, clock, logs = DirectoryObjectStore(tmp_path / "store"), Clock(), []
+    service_up(objects, clock, generation=7, state=fleet_syncer.SERVICE_FINISHED)
+
+    def sleep(s):
+        clock.sleep(s)
+        if clock.sleeps == 2:
+            beat(objects, clock, generation=8, state=fleet_syncer.SERVICE_FAILED, reason="no checkpoint")
+
+    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects, sleep=sleep, clock=clock,
+                                      log=logs.append) == 1
+    assert clock.sleeps == 2 and "no checkpoint" in logs[-1]
+
+
+@pytest.mark.parametrize("problem", ["credentials", "no object API"])
+def test_a_syncer_service_without_a_usable_store_is_a_configuration_error(tmp_path, monkeypatch, problem):
+    """M5: the run store's credentials missing (a ValueError of the store client) or a store with
+    no object API here: exit 10, never restarted."""
+    from yeto.launch import island_lifecycle
+
+    def store_objects(uri, environ=None):
+        if problem == "credentials":
+            raise ValueError("s3 store: YETO_RL_STORE_S3_ACCESS_KEY_ID is not set")
+        return None
+
+    monkeypatch.setattr(island_lifecycle, "store_objects", store_objects)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    logs: list[str] = []
+    syncer = FakeSyncer()
+    rc = fs.run_syncer(str(onsite_config(tmp_path)), make_syncer=lambda args, n: syncer, parse=_prepared,
+                       node="site-s", workdir=str(tmp_path / "work"), log=logs.append)
+    assert rc == fs.CONFIG_EXIT and rc in fs.SYNCER_PREVENT and syncer.events == []
+    assert ("is not set" if problem == "credentials" else "no object API") in logs[-1]
+
+
+@pytest.mark.usefixtures("no_sigterm_handler")
+def test_a_control_unit_without_the_island_hmac_key_is_a_configuration_error(tmp_path, monkeypatch):
+    """M5: run up of the control unit without YETO_ISLAND_HMAC_KEY (its preflight, or its start:
+    RunUpConfigRefused): exit 10, never restarted; another refusal before ordering stays 2."""
+    monkeypatch.delenv("YETO_ISLAND_HMAC_KEY")
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    path = onsite_config(tmp_path)
+    logs: list[str] = []
+    assert fs.run_control(str(path), log=logs.append) == fs.CONFIG_EXIT
+    assert "refused its configuration" in logs[-1] and fs.CONFIG_EXIT in fs.CONTROL_PREVENT
+    run = up.open_run(str(path))
+    with pytest.raises(up.RunUpConfigRefused, match="YETO_ISLAND_HMAC_KEY is not set"):
+        run.island_hmac_env()
+    assert not (run.dir / "island_hmac.key").exists()  # never generated
+    # the start's refusal (a preflight skipped): the same exit
+    monkeypatch.setattr(up.Run, "preflight", lambda self, dry_run=False: True)
+    monkeypatch.setattr(up.Run, "cluster_preflight", lambda self, **kw: True)
+    monkeypatch.setattr(up.Run, "write_fleet_plan", lambda self: True)
+    monkeypatch.setattr(up.Run, "sandbox_prepare", lambda self: True)
+    monkeypatch.setattr(up.Run, "pool", lambda self: self.island_hmac_env())
+    assert fs.run_control(str(path), log=logs.append) == fs.CONFIG_EXIT
+    monkeypatch.setattr(up.Run, "pool", lambda self: (_ for _ in ()).throw(up.RunUpRefused("a pool refused")))
+    assert fs.run_control(str(path), log=logs.append) == 2  # another refusal: restarted
+
+
+@pytest.mark.usefixtures("no_sigterm_handler")
+@pytest.mark.parametrize("fails", ["here", "store"])
+def test_an_ended_marker_that_does_not_write_keeps_the_service_s_exit(tmp_path, monkeypatch, fails):
+    """L1: the ended marker goes to the run store first, then here; a write that fails is logged
+    and the service exits with its own code (never 70)."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    path = onsite_config(tmp_path)
+    if fails == "here":
+        (tmp_path / "state").write_text("not a directory")  # this host's marker cannot be written
+    else:
+        def write(key, data):
+            raise OSError("the store does not answer")
+
+        monkeypatch.setattr(objects, "write", write)
+    monkeypatch.setattr(fs, "run_syncer", lambda *a, **kw: 9)
+    logs: list[str] = []
+    assert fs.service_run(service_args(path, "syncer"), objects=objects, log=logs.append) == 9
+    stored = objects.read("fleet/onsite/syncer.ended") if fails == "here" else None
+    assert (stored is not None) is (fails == "here")
+    assert (tmp_path / "state" / "r" / "onsite-syncer.ended").exists() is (fails == "store")
+    assert any("WARNING" in m and "ended marker" in m for m in logs)
+
+
+def test_the_lease_numbers_in_the_guide_are_the_code_s():
+    """L3: docs/OWN_CLUSTERS.md states the syncer service's lease, fence threshold, heartbeat
+    client and exits as the code computes them."""
+    import re
+
+    from yeto.cloud import s3_store
+
+    text = (pathlib.Path(__file__).resolve().parents[1] / "docs" / "OWN_CLUSTERS.md").read_text()
+    grace = fs.SYNCER_STOP_GRACE_S
+    ttl = fs.service_lock_ttl_s(grace)
+    margin = min(60.0, ttl * 0.1)
+    fence = margin + fleet_syncer.SERVICE_BEAT_S + fleet_syncer.POLL_S + grace + 3 * fleet_syncer.HEARTBEAT_CALL_S
+    assert fs.Heartbeat(None, "h", None, lock=types.SimpleNamespace(margin_s=margin), stop_grace_s=grace).fence_s == fence
+
+    def numbers(pattern):
+        found = re.findall(pattern, text)
+        assert found, pattern
+        return {float(n) for n in found}
+
+    assert numbers(r"`fleet/syncer_service/lock`, (\d+) s") == {round(ttl)}
+    assert numbers(r"at most (\d+) s left before") == {round(fence)}
+    assert numbers(r"the lock's margin \((\d+) s\)") == {round(margin)}
+    assert numbers(r"a poll of the service \((\d+) s\)") == {fleet_syncer.POLL_S}
+    assert numbers(r"renewed with every heartbeat\s+\((\d+) s\)") == {fleet_syncer.SERVICE_BEAT_S}
+    assert numbers(r"up to (\d+) s\) and three heartbeat calls") == {grace}
+    assert numbers(r"each of its calls is cut off after (\d+) s") == {fleet_syncer.HEARTBEAT_CALL_S}
+    assert numbers(r"connect (\d+) s") == {fleet_syncer.HEARTBEAT_CONNECT_TIMEOUT_S}
+    assert numbers(r"read (\d+) s, \d+ requests") == {fleet_syncer.HEARTBEAT_READ_TIMEOUT_S}
+    assert numbers(r"(\d+) requests per\s+call") == {fleet_syncer.HEARTBEAT_MAX_ATTEMPTS}
+    assert numbers(r"stops its syncer and exits (\d+)") == {fs.SELF_FENCED_EXIT}
+    assert numbers(r"fences itself \(exit (\d+)\)") == {fs.SELF_FENCED_EXIT}
+    # the heartbeat client is the S3 client with those timeouts
+    env = {}
+    store = fs.heartbeat_objects("s3://bkt/run", {**env, s3_store.KEY_ID_ENV: "k", s3_store.SECRET_ENV: "s"})
+    cfg = store.client.meta.config
+    assert (cfg.connect_timeout, cfg.read_timeout) == (fleet_syncer.HEARTBEAT_CONNECT_TIMEOUT_S,
+                                                       fleet_syncer.HEARTBEAT_READ_TIMEOUT_S)
+    assert cfg.retries["total_max_attempts"] == fleet_syncer.HEARTBEAT_MAX_ATTEMPTS
+    assert fs.heartbeat_objects("store-dir", {}) is None
+
+
+@pytest.mark.parametrize("first", [None, fleet_syncer.SERVICE_STARTING])
+def test_a_final_heartbeat_written_while_the_launch_waits_ends_the_wait_at_once(tmp_path, first):
+    """M1: no heartbeat (or a non-final one) when the wait began: a final one of the same
+    generation written meanwhile is this service's and ends the wait at once."""
+    objects, clock, logs = DirectoryObjectStore(tmp_path / "store"), Clock(), []
+    if first is not None:
+        beat(objects, clock, generation=7, state=first)
+
+    def sleep(s):
+        clock.sleep(s)
+        if clock.sleeps == 2:
+            beat(objects, clock, generation=7, state=fleet_syncer.SERVICE_FAILED, reason="its checkpoint is bad")
+
+    assert fleet_syncer.watch_service(watch_args(tmp_path), objects=objects, sleep=sleep, clock=clock,
+                                      log=logs.append) == 1
+    assert clock.sleeps == 2 and "its checkpoint is bad" in logs[-1]
+
+
+def test_a_heartbeat_call_still_running_fails_the_next_one_at_once():
+    """H1: the beat thread never has two store calls at a time: a call cut off after call_s
+    that still runs makes the next one fail at once, without calling the store."""
+    import threading
+    import time
+
+    beat_ = fs.Heartbeat(None, "h", None, call_s=0.05, log=lambda m: None)
+    release, calls = threading.Event(), []
+
+    def hangs():
+        calls.append(1)
+        release.wait(5)
+
+    with pytest.raises(TimeoutError, match="did not answer the renewal within"):
+        beat_._bounded("renewal", hangs)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="still waits for the store"):
+        beat_._bounded("heartbeat", lambda: calls.append(2))
+    assert calls == [1] and time.monotonic() - started < 0.04  # not called, not waited for
+    release.set()
+    beat_._pending.join(5)
+    assert beat_._bounded("heartbeat", lambda: calls.append(3) or "ok") == "ok" and calls == [1, 3]
