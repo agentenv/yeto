@@ -1147,7 +1147,8 @@ Name the syncer's host in the run config:
 ```
 
 `fleet.syncer_service` is the host name or address the islands dial, without a port (the
-syncer listens on its own ports, 29400 and up). With it:
+syncer listens on its own ports, 29400 and up). An IPv6 address goes in brackets
+(`"[fd00::5]"`); a bare one, or brackets that do not pair, are refused. With it:
 
 - the **syncer service** (`yeto fleet service-run --role syncer`, what the unit runs) runs the
   fleet's syncer on that host. A syncer process that dies is started again at once and resumes
@@ -1304,8 +1305,14 @@ the syncer in progress. Its log lines go through a bounded queue and never block
 journal pipe holds no fence up; lines past the queue are dropped and counted). A heartbeat
 thread that fails fences the service too. The main thread checks the lease itself before it
 starts or restarts the syncer and before it writes the syncer record: at or below the margin,
-a poll and the syncer's stop (57 + 15 + 170 = 242 s left), it fences the service and stops the
-syncer (a heartbeat thread that is gone or stuck). A restart checks the fence and the lease
+a poll, the syncer's stop and one store call (57 + 15 + 170 + 34 = 276 s left), it fences the
+service and stops the syncer (a heartbeat thread that is gone or stuck). It asks this while it
+waits for a new syncer to listen too. The lease left is the shorter of two clocks: the wall
+clock's (the lease end the last renewal wrote) and 570 s less the monotonic time since that
+renewal began. A wall clock that jumps back never makes the lease look longer (another host
+reads the lease end in wall-clock time); one that jumps forward only fences earlier. The
+lease is still a wall-clock time in the store: the hosts' clocks must agree well within it.
+A restart checks the fence and the lease
 before and after it stops the old process and after it starts the new one, and stops one it
 started after the fence, so the service never starts a syncer again. From the syncer's start
 on, the main thread's store calls (its records, its reads of the fleet's STOP) go through the
@@ -1383,11 +1390,13 @@ removes the fleet's STOP from the run store. Then start the unit (`systemctl sta
   resumes from the checkpoint. The service's own end can take longer than `TimeoutStopSec`
   when the store hangs. In the worst case it adds up as follows:
   - the syncer's stop: up to 175 s (170 s, plus 5 s for SIGKILL);
-  - the last tape upload: up to 31 s per syncer shard;
-  - the heartbeat's calls: up to 170 s (the beat thread and the call in flight, 34 s each, then
-    68 s for a late call and 34 s for the final heartbeat).
+  - the heartbeat's end: 136 s (the beat thread and the call in flight, then the final
+    heartbeat and the release, 34 s each) to 170 s (with a call still in flight: 68 s more
+    for it, then 34 s for the final heartbeat);
+  - the beat thread's queued log lines: up to 34 s more;
+  - the last tape upload: up to 31 s per syncer shard.
 
-  That is about 345 s without a tape upload and about 376 s with one shard, well past
+  Counted one after the other, that is about 311 to 379 s before any tape upload, well past
   `TimeoutStopSec=180`. systemd then SIGKILLs the service. The syncer is already stopped by then
   (its stop fits inside the 180 s), but the final heartbeat is not written and the lease is not
   released: it runs out 570 s after the last renewal. A restart on the same host takes it back

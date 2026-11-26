@@ -1090,6 +1090,29 @@ def _record_generation(raw: bytes | None) -> int | None:
         return None
 
 
+class ServiceLease:
+    """The service lock's own lease by two clocks, the shorter: the wall clock's view (the
+    lease end the last renewal wrote, :meth:`StoreLock.lease_left`) and ``ttl_s`` less the
+    monotonic time since that renewal began. A wall clock that jumps back never makes the
+    lease look longer than it runs (the store's lease end, which another host reads, is in
+    wall-clock time); one that jumps forward only makes it look shorter (an earlier fence).
+    Everything else is the lock's."""
+
+    def __init__(self, lock: Any, *, began: float, monotonic: Callable[[], float] = time.monotonic) -> None:
+        self.lock, self._monotonic, self._renewed = lock, monotonic, float(began)
+
+    def renew(self) -> None:
+        began = self._monotonic()  # before the call: the lease end it writes is at least this late
+        self.lock.renew()
+        self._renewed = began
+
+    def lease_left(self) -> float:
+        return min(float(self.lock.lease_left()), float(self.lock.ttl_s) - (self._monotonic() - self._renewed))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.lock, name)
+
+
 class Heartbeat:
     """The service's heartbeat in the run store every :data:`SERVICE_BEAT_S` (a thread),
     which also renews the service lock. ``starting`` until :meth:`set` says otherwise;
@@ -1113,6 +1136,7 @@ class Heartbeat:
         self.state = SERVICE_STARTING
         self.lost: str | None = None
         self.lost_code: int | None = None
+        self._lost_lock = threading.Lock()  # the first fence's reason and exit stand (the main thread's or the beat's)
         self.poll_s = POLL_S if poll_s is None else float(poll_s)
         self.call_s = HEARTBEAT_CALL_S if call_s is None else float(call_s)
         self.stop_grace_s = float(stop_grace_s or 0.0)
@@ -1159,6 +1183,14 @@ class Heartbeat:
         a beat, the next renewal: ``every_s + 3 * call_s``)."""
         return float(self.lock.margin_s) + self.every_s + self.poll_s + self.stop_grace_s + 3 * self.call_s
 
+    def _set_lost(self, why: str, code: int) -> bool:
+        """Mark the service fenced, once: False when it already is (that fence's exit stands)."""
+        with self._lost_lock:
+            if self.lost is not None:
+                return False
+            self.lost, self.lost_code = why, code
+            return True
+
     def _say(self, message: str) -> None:
         try:
             self.log(message)
@@ -1190,17 +1222,18 @@ class Heartbeat:
             self._bounded("renewal", self.lock.renew)
             return
         except LockLost as error:
-            self.lost, self.lost_code = f"the syncer service lock is no longer this service's ({error})", LOCK_LOST_EXIT
-            self._fenced()
-            self._say(f"[syncer service] ERROR: {self.lost}: ending this syncer")
+            if self._set_lost(f"the syncer service lock is no longer this service's ({error})", LOCK_LOST_EXIT):
+                self._fenced()
+                self._say(f"[syncer service] ERROR: {self.lost}: ending this syncer")
             return
         except Exception as error:  # noqa: BLE001 - a store blip: renewed at the next beat
             failed = error
         if left <= self.fence_s:  # stopped now (before any log line), the syncer is down before another service
             # may take the lock
-            self.lost = (f"the syncer service lock was not renewed and its lease had {left:.0f}s left before this "
-                         f"renewal (the syncer's stop needs up to {self.fence_s:.0f}s of it): fenced by itself")
-            self.lost_code = SELF_FENCED_EXIT
+            why = (f"the syncer service lock was not renewed and its lease had {left:.0f}s left before this "
+                   f"renewal (the syncer's stop needs up to {self.fence_s:.0f}s of it): fenced by itself")
+            if not self._set_lost(why, SELF_FENCED_EXIT):
+                return
             self._fenced()
             self._say(f"[syncer service] WARNING: lock not renewed ({type(failed).__name__}: {failed})")
             self._say(f"[syncer service] ERROR: {self.lost}: ending this syncer (exit {SELF_FENCED_EXIT}: restarted)")
@@ -1249,9 +1282,8 @@ class Heartbeat:
     def fence_here(self, why: str) -> None:
         """Fence the service now (exit :data:`SELF_FENCED_EXIT`) and stop the syncer: the beat
         thread failed, or the main thread found the lease short."""
-        if self.lost is not None:
+        if not self._set_lost(why, SELF_FENCED_EXIT):
             return
-        self.lost, self.lost_code = why, SELF_FENCED_EXIT
         self._fenced()
         self._say(f"[syncer service] ERROR: {why}: ending this syncer (exit {SELF_FENCED_EXIT}: restarted)")
 
@@ -1272,7 +1304,8 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
                stop_grace_s: float | None = SYNCER_STOP_GRACE_S, beat_s: float | None = None,
                workdir: str | None = None, log: Callable[[str], None] = print,
                fresh_path: Path | None = None, heartbeat_store: Any = None, poll_s: float | None = None,
-               call_s: float | None = None) -> int:
+               call_s: float | None = None, clock: Callable[[], float] = time.time,
+               monotonic: Callable[[], float] = time.monotonic) -> int:
     """The fleet's syncer on this host (``fleet.syncer_service``): the syncer launch's syncer,
     run as the head runs it (``LocalSyncer``: a process that dies is restarted from its
     checkpoint, and its record written again), under the service lock, plus the service's
@@ -1294,7 +1327,9 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
     at that term is in the run store (a start that fails before it is fresh again).
 
     ``heartbeat_store``: the heartbeat's store client (default :func:`heartbeat_objects`, or
-    ``objects`` when given); ``poll_s`` / ``call_s``: the budget of :class:`Heartbeat`."""
+    ``objects`` when given); ``poll_s`` / ``call_s``: the budget of :class:`Heartbeat`;
+    ``clock`` / ``monotonic``: the lock's wall clock and the lease's monotonic one
+    (:class:`ServiceLease`)."""
     from yeto.config_errors import CONFIG_ERROR_EXIT, ISLAND_STOP_EXIT  # noqa: PLC0415
     from yeto.gpu_spec import parse_gpu_spec  # noqa: PLC0415
     from yeto.launch import fleet_syncer  # noqa: PLC0415
@@ -1374,11 +1409,17 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
             "fleet service-run --role syncer --config <run.json> --fresh`), then start the unit. Or put the "
             "checkpoint back")
         return 2
+    built = None
+    if make_syncer is None and not binary:  # before the lock and its heartbeat: a build never spends the lease
+        from yeto.launch.syncer import build_syncer_binary  # noqa: PLC0415
+
+        built = str(build_syncer_binary())
     holder = f"{node}/{unit_name(run.run, 'syncer')}"
+    began = monotonic()
     try:
         lock = StoreLock.acquire(objects, fleet_syncer.SERVICE_LOCK, holder=holder,
                                  ttl_s=service_lock_ttl_s(stop_grace_s, beat_s, poll_s=poll_s, call_s=call_s),
-                                 reclaim=True)
+                                 reclaim=True, clock=clock)
     except StoreLockError as error:
         log(f"[syncer service] refused: the run store cannot hold the service lock ({error})")
         return 2
@@ -1389,6 +1430,7 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
             "time. Stop that unit first (or wait for its lease to run out if its host is gone)")
         return 2
     lock.objects = heartbeat_store if heartbeat_store is not None else objects  # renewed by the heartbeat only
+    lock = ServiceLease(lock, began=began, monotonic=monotonic)  # a wall clock that jumps back never lengthens it
     fenced, running = threading.Event(), {"syncer": None}
     beat_log = QueuedLog(log)  # the beat thread's lines: never blocking it (a full journal pipe holds no fence up)
 
@@ -1409,8 +1451,9 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
     # client through a channel of its own, so no store call holds it past call_s after a fence
     def lease_floor_s() -> float:
         """The lease the main thread needs left to start, restart or record a syncer: the
-        lock's margin, a poll until serve sees a fence, and the syncer's stop (the grace)."""
-        return float(lock.margin_s) + beat.poll_s + beat.stop_grace_s
+        lock's margin, a poll until serve sees a fence, the syncer's stop (the grace), and a
+        store call of its own in flight (cut off after ``call_s``)."""
+        return float(lock.margin_s) + beat.poll_s + beat.stop_grace_s + beat.call_s
 
     def lost_now() -> str | None:
         """Why the main thread may no longer start, restart or record the syncer: the lock is
@@ -1423,8 +1466,9 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         left = lock.lease_left()
         if left > lease_floor_s():
             return None
-        beat.fence_here(f"the service lock's lease has {left:.0f}s left (the margin, a poll and the syncer's stop "
-                        f"need {lease_floor_s():.0f}s) and the heartbeat did not fence: fenced by the main thread")
+        beat.fence_here(f"the service lock's lease has {left:.0f}s left (the margin, a poll, the syncer's stop and a "
+                        f"store call need {lease_floor_s():.0f}s) and the heartbeat did not fence: fenced by the main "
+                        "thread")
         return beat.lost or "the service is fenced"
 
     main_store = BoundedStore(lock.objects, CallChannel(beat.call_s), token=lock.token, lost=lost_now)
@@ -1451,9 +1495,8 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         addr = syncer_shard_addrs(host, args)
         if make_syncer is None:
             from yeto.launch.local_syncer import LocalSyncer  # noqa: PLC0415
-            from yeto.launch.syncer import build_syncer_binary  # noqa: PLC0415
 
-            path = binary or str(build_syncer_binary())
+            path = binary or built
             syncer = LocalSyncer(args, num_learners, binary=path, log_file=str(Path(workdir) / "yeto-syncer.log"),
                                  env=env, stop_grace_s=stop_grace_s, home=home)
         else:

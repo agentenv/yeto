@@ -75,9 +75,24 @@ def test_a_syncer_service_hands_the_syncer_launch_to_it_and_nothing_else_changes
     assert syncer_price(cfg) == 0.0  # the operator's own machine: no cloud bill
 
 
+@pytest.mark.parametrize("host", ["[fd00::5]", "[::1]", "[::ffff:10.0.0.5]"])
+def test_an_ipv6_syncer_service_in_brackets_is_taken(tmp_path, host):
+    doc = onsite_doc(tmp_path)
+    doc["fleet"]["syncer_service"] = host
+    path = tmp_path / "v6.json"
+    path.write_text(json.dumps(doc))
+    assert fleet.plan_of(up.load_config(str(path))).syncer_service == host
+
+
 @pytest.mark.parametrize("change, match", [
     ({"launch": "synced_group", "max_islands": None}, "applies to fleet.launch per_island"),
     ({"syncer_service": "10.0.0.5:29400"}, "without a port"),
+    ({"syncer_service": "fd00::5"}, "IPv6 address in brackets"),
+    ({"syncer_service": "::1"}, "IPv6 address in brackets"),
+    ({"syncer_service": "[::1"}, "IPv6 address in brackets"),
+    ({"syncer_service": "::1]"}, "IPv6 address in brackets"),
+    ({"syncer_service": "[::1]:29400"}, "without a port"),
+    ({"syncer_service": "[10.0.0.5]"}, "IPv6 address in brackets"),
     ({"syncer_service": "host name"}, "without a port"),
     ({"syncer_service": 5}, "without a port"),
 ])
@@ -1442,6 +1457,7 @@ def test_a_stuck_heartbeat_leaves_the_main_thread_the_lease_to_stop_the_syncer(t
             self.terminate()
 
     syncer = SlowStop()
+    main = HangingStore(directory, 181 * SCALE)  # the main thread's store calls (its STOP reads), once down
 
     def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish,
               **kw):
@@ -1449,7 +1465,8 @@ def test_a_stuck_heartbeat_leaves_the_main_thread_the_lease_to_stop_the_syncer(t
                                                       learners=n, max_learners=4, run="r", extra=record_extra))
         lock = StoreLock(directory, fleet_syncer.SERVICE_LOCK, record_extra["service_generation"], "x")
         times["lease"] = float(json.loads(directory.read(lock.lease_key(lock.prefix, lock.token)))["until"])
-        if what == "poll":
+        if what == "poll":  # each STOP read hangs until it is cut off: the floor's store call
+            main.down = True
             while not stopped():
                 time.sleep(poll_s)
             return 9
@@ -1469,15 +1486,268 @@ def test_a_stuck_heartbeat_leaves_the_main_thread_the_lease_to_stop_the_syncer(t
 
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
     logs: list[str] = []
-    rc = fs.run_syncer(str(onsite_config(tmp_path)), objects=directory, make_syncer=lambda args, n: syncer,
-                       serve=serve, parse=_prepared, node="site-s", beat_s=beat_s, poll_s=poll_s, call_s=call_s,
-                       stop_grace_s=grace, workdir=str(tmp_path / "work"), log=logs.append)
+    rc = fs.run_syncer(str(onsite_config(tmp_path)), objects=directory, heartbeat_store=main,
+                       make_syncer=lambda args, n: syncer, serve=serve, parse=_prepared, node="site-s", beat_s=beat_s,
+                       poll_s=poll_s, call_s=call_s, stop_grace_s=grace, workdir=str(tmp_path / "work"),
+                       log=logs.append)
     assert rc == fs.SELF_FENCED_EXIT, logs
     assert syncer.events.count("start") == 1  # never started again
-    assert times["down"] < times["lease"], (times, logs)  # down before the lease ends
+    assert times["down"] < times["lease"] - min(60.0, ttl * 0.1) / 2, (times, logs)  # down within the margin
     assert any("fenced by the main thread" in m for m in logs if "ended: exit" in m)
     if what == "record":
         assert json.loads(directory.read(fs._syncer_record_key()))["service_generation"] == 1
+
+
+class JumpClock:
+    """A wall clock that runs with ``time.time`` but jumps by ``jump`` once ``jumped``."""
+
+    def __init__(self):
+        self.offset, self.jump, self.jumped = 0.0, 0.0, False
+
+    def __call__(self):
+        import time
+
+        return time.time() + (self.jump if self.jumped else 0.0)
+
+
+def test_the_service_lease_is_the_shorter_of_the_wall_and_the_monotonic_clock(tmp_path):
+    """M-1: a wall clock that jumps back never lengthens the lease left; one that jumps
+    forward only shortens it. The monotonic time counts from the start of the renewal."""
+    from yeto.launch.pool.store_lock import StoreLock
+
+    wall, mono = [1000.0], [50.0]
+    lock = StoreLock.acquire(DirectoryObjectStore(tmp_path / "store"), "x/lock", holder="h", ttl_s=100,
+                             clock=lambda: wall[0])
+    lease = fs.ServiceLease(lock, began=mono[0], monotonic=lambda: mono[0])
+    assert lease.lease_left() == 100
+    wall[0] += 10
+    mono[0] += 10
+    assert lease.lease_left() == 90
+    wall[0] -= 300  # back: the wall clock says 390 s are left, the monotonic one 90
+    assert lease.lease_left() == 90
+    wall[0] += 300 + 400  # forward: the wall clock says none left
+    assert lease.lease_left() < 0
+    wall[0] -= 400
+    calls = []
+    real_renew = lock.renew
+
+    def renew():
+        calls.append(mono[0])
+        mono[0] += 5  # the renewal takes 5 s: the lease counts from its start
+        real_renew()
+
+    lock.renew = renew
+    lease.renew()
+    assert lease.lease_left() == 95 and lease.token == lock.token  # the rest is the lock's
+
+
+@pytest.mark.parametrize("jump", ["back", "forward"])
+def test_a_wall_clock_jump_never_keeps_the_syncer_past_the_lease_another_host_sees(tmp_path, monkeypatch, jump):
+    """M-1: the heartbeat's store hangs, and this host's wall clock jumps by 300 s (scaled).
+    Another host's service (its clock right) claims the lock as soon as the lease end the
+    last renewal wrote has passed. Back: this service's syncer is down before that claim.
+    Forward: the fence only comes earlier."""
+    import threading
+    import time
+
+    from yeto.launch.pool.store_lock import StoreLock
+
+    monkeypatch.setattr(fleet_syncer, "SERVICE_LOCK_TTL_S", 0.0)
+    beat_s, poll_s = fleet_syncer.SERVICE_BEAT_S * SCALE, fleet_syncer.POLL_S * SCALE
+    call_s, grace = fleet_syncer.HEARTBEAT_CALL_S * SCALE, fs.SYNCER_STOP_GRACE_S * SCALE
+    directory = DirectoryObjectStore(tmp_path / "store")
+    hanging = HangingStore(directory, 181 * SCALE)
+    wall = JumpClock()
+    wall.jump = (-300 if jump == "back" else 300) * SCALE
+    times: dict = {}
+
+    class SlowStop(FakeSyncer):
+        def stop(self):
+            time.sleep(grace)
+            times.setdefault("down", time.time())
+            super().stop()
+
+    syncer = SlowStop()
+
+    def claim():  # the other host: it takes the lock once the written lease end has passed (its own clock)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            other = StoreLock.acquire(directory, fleet_syncer.SERVICE_LOCK, holder="site-b/yeto-r-syncer.service")
+            if other is not None:
+                times["claimed"] = time.time()
+                return
+            time.sleep(0.01)
+
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish,
+              **kw):
+        on_record(island_launches.write_syncer_record(kw["objects"], addr=addr, syncer_epoch=args.rl_syncer_epoch,
+                                                      learners=n, max_learners=4, run="r", extra=record_extra))
+        lock = StoreLock(directory, fleet_syncer.SERVICE_LOCK, record_extra["service_generation"], "x")
+        times["lease"] = float(json.loads(directory.read(lock.lease_key(lock.prefix, lock.token)))["until"])
+        hanging.down = True
+        wall.jumped = True
+        threading.Thread(target=claim, daemon=True).start()
+        deadline = time.monotonic() + 60
+        while not stopped():
+            assert time.monotonic() < deadline
+            time.sleep(poll_s)
+        return 9
+
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    logs: list[str] = []
+    rc = fs.run_syncer(str(onsite_config(tmp_path)), objects=directory, heartbeat_store=hanging,
+                       make_syncer=lambda args, n: syncer, serve=serve, parse=_prepared, node="site-s", beat_s=beat_s,
+                       poll_s=poll_s, call_s=call_s, stop_grace_s=grace, workdir=str(tmp_path / "work"),
+                       log=logs.append, clock=wall)
+    deadline = time.monotonic() + 20
+    while "claimed" not in times and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert rc == fs.SELF_FENCED_EXIT, logs
+    assert times["down"] < times["claimed"], times  # no two syncers at once
+    assert times["down"] < times["lease"], times  # down before the lease end the store holds
+    if jump == "forward":  # earlier: the wall clock's view is 300 s (scaled) short, so the first failed renewal fences
+        assert times["down"] < times["lease"] - 300 * SCALE + 0.5, times
+
+
+@pytest.mark.parametrize("why", ["stuck heartbeat", "fleet STOP"])
+def test_a_syncer_that_never_listens_is_stopped_before_the_lease_ends(tmp_path, monkeypatch, why):
+    """M-2: the new syncer never listens, and the real serve's wait for it (up to 1200 s,
+    longer than the lease) asks the service too. With the heartbeat stuck, the main thread
+    fences and stops the syncer before the lease ends; with the fleet's STOP written
+    meanwhile, the wait ends with exit 9. Nothing is recorded either way."""
+    import time
+
+    from yeto.launch.pool.store_lock import StoreLock
+
+    monkeypatch.setattr(fleet_syncer, "SERVICE_LOCK_TTL_S", 0.0)
+    beat_s, poll_s = fleet_syncer.SERVICE_BEAT_S * SCALE, fleet_syncer.POLL_S * SCALE
+    call_s, grace = fleet_syncer.HEARTBEAT_CALL_S * SCALE, fs.SYNCER_STOP_GRACE_S * SCALE
+    if why == "stuck heartbeat":
+        monkeypatch.setattr(fs.Heartbeat, "_loop", lambda self: self._stop.wait())  # stuck: no renewal, no fence
+    monkeypatch.setattr(fleet_syncer, "syncer_listening", lambda *a, **kw: False)  # it never listens
+    directory = DirectoryObjectStore(tmp_path / "store")
+    times: dict = {}
+
+    class NeverListens(FakeSyncer):
+        def probe(self):
+            return None  # up, just not listening
+
+        def exited_ok(self):
+            return False
+
+        def stop(self):
+            time.sleep(grace)
+            times.setdefault("down", time.time())
+            super().stop()
+
+    syncer = NeverListens()
+
+    def serve(*args, **kwargs):
+        lock = StoreLock(directory, fleet_syncer.SERVICE_LOCK, kwargs["record_extra"]["service_generation"], "x")
+        times["lease"] = float(json.loads(directory.read(lock.lease_key(lock.prefix, lock.token)))["until"])
+        if why == "fleet STOP":
+            fleet_syncer.write_onsite_stop(directory, why="stop-run r", by="test")
+        return fleet_syncer.serve(*args, sleep=lambda s: time.sleep(poll_s), **kwargs)
+
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    logs: list[str] = []
+    rc = fs.run_syncer(str(onsite_config(tmp_path)), objects=directory, make_syncer=lambda args, n: syncer,
+                       serve=serve, parse=_prepared, node="site-s", beat_s=beat_s, poll_s=poll_s, call_s=call_s,
+                       stop_grace_s=grace, workdir=str(tmp_path / "work"), log=logs.append)
+    from yeto.launch.fleet import RUN_STOPPED_EXIT
+
+    assert rc == (fs.SELF_FENCED_EXIT if why == "stuck heartbeat" else RUN_STOPPED_EXIT), logs
+    assert times["down"] < times["lease"], times
+    assert syncer.events.count("start") == 1 and island_launches.read_syncer_record(directory) is None
+
+
+@pytest.mark.parametrize("left_over_floor, fences", [(14.0, False), (-14.0, True)])
+def test_the_main_thread_s_floor_is_the_margin_a_poll_the_stop_and_a_call(tmp_path, monkeypatch, left_over_floor,
+                                                                          fences):
+    """L: with the production budget (clocks moved, not waited), the main thread fences once
+    the lease left is at or below margin + poll + grace + one store call (276 s), and not
+    above it."""
+    import time
+
+    monkeypatch.setattr(fs.Heartbeat, "_loop", lambda self: self._stop.wait())  # stuck: the main thread decides
+    grace, call_s = fs.SYNCER_STOP_GRACE_S, fleet_syncer.HEARTBEAT_CALL_S
+    ttl = fs.service_lock_ttl_s(grace, fleet_syncer.SERVICE_BEAT_S, poll_s=fleet_syncer.POLL_S, call_s=call_s)
+    floor = min(60.0, ttl * 0.1) + fleet_syncer.POLL_S + grace + call_s
+    assert round(floor) == 276
+    moved = [0.0]
+    seen: dict = {}
+    directory = DirectoryObjectStore(tmp_path / "store")
+
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish,
+              **kw):
+        moved[0] = ttl - (floor + left_over_floor)  # the lease left is now floor + left_over_floor
+        seen["stopped"] = stopped()
+        return 9
+
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    fs.run_syncer(str(onsite_config(tmp_path)), objects=directory, make_syncer=lambda args, n: FakeSyncer(),
+                  serve=serve, parse=_prepared, node="site-s", workdir=str(tmp_path / "work"), log=lambda m: None,
+                  clock=lambda: time.time() + moved[0], monotonic=lambda: time.monotonic() + moved[0])
+    assert (seen["stopped"] is not None and "fenced by the main thread" in seen["stopped"]) is fences, seen
+
+
+@pytest.mark.parametrize("first", ["main", "beat"])
+def test_the_first_fence_s_exit_stands(tmp_path, first):
+    """L: the main thread's fence (exit 1) and the beat thread's lost lock (exit 2) never
+    overwrite each other: the first one's reason and exit stand, and the syncer is stopped once."""
+    from yeto.launch.pool.store_lock import LockLost
+
+    stops = []
+
+    class Racing(FailingLock):
+        def renew(self):  # the main thread's fence lands while the beat thread's renewal is in flight
+            if first == "main":
+                beat_.fence_here("the lease is short")
+            super().renew()
+
+    beat_ = fs.Heartbeat(DirectoryObjectStore(tmp_path / "store"), "h", "kid",
+                         lock=Racing(300.0, LockLost("fleet/syncer_service/lock", 1, 2)), generation=1,
+                         log=lambda m: None, on_fence=lambda: stops.append(1))
+    if first == "main":
+        beat_.renew()
+        assert beat_.lost_code == fs.SELF_FENCED_EXIT and beat_.lost == "the lease is short"
+    else:
+        beat_.renew()
+        beat_.fence_here("the lease is short")
+        assert beat_.lost_code == fs.LOCK_LOST_EXIT and "no longer this service's" in beat_.lost
+    assert stops == [1]
+
+
+def test_a_service_started_with_its_lease_short_never_starts_the_syncer(tmp_path, monkeypatch):
+    """L (X13): the lease is already at or below the main thread's floor when the service
+    starts: the syncer is never started."""
+    monkeypatch.setattr(fs, "service_lock_ttl_s", lambda grace, beat=None, **kw: 0.6)  # below the floor
+    rc, seen, syncer, objects, logs = run_service(tmp_path, monkeypatch, 0)
+    assert rc == fs.SELF_FENCED_EXIT, logs
+    assert "start" not in syncer.events
+
+
+def test_the_syncer_binary_is_built_before_the_lock_is_taken(tmp_path, monkeypatch):
+    """L: the syncer is built before the service takes the lock and starts its heartbeat (a
+    long build never spends the lease); a build that fails ends the service as before (an
+    exception: the unit's crash exit), with no lock taken and no heartbeat."""
+    from yeto.launch import syncer as syncer_mod
+    from yeto.launch.pool.store_lock import StoreLock
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    seen = {}
+
+    def build():
+        seen["held"] = StoreLock.holder_of(objects, fleet_syncer.SERVICE_LOCK)
+        raise RuntimeError("cargo build failed")
+
+    monkeypatch.setattr(syncer_mod, "build_syncer_binary", build)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    with pytest.raises(RuntimeError, match="cargo build failed"):
+        fs.run_syncer(str(onsite_config(tmp_path)), objects=objects, parse=_prepared, node="site-s",
+                      workdir=str(tmp_path / "work"), log=lambda m: None)
+    assert seen["held"] is None and StoreLock.holder_of(objects, fleet_syncer.SERVICE_LOCK) is None
+    assert objects.read(fleet_syncer.SERVICE_RECORD) is None
 
 
 class GateStore:
@@ -1615,7 +1885,7 @@ def test_a_self_fenced_service_exits_1_and_stops_its_syncer_before_its_lease_end
     monkeypatch.setattr(fs, "service_lock_ttl_s", lambda grace, beat=None, **kw: 0.6)  # a short lease for the test
     # the main thread's floor (margin, a poll, the stop's grace) scaled with the lease: the beat thread fences
     rc, seen, syncer, objects, logs = run_service(tmp_path, monkeypatch, 0, objects=objects, until=cut, beat_s=0.05,
-                                                  stop_grace_s=0.05, poll_s=0.02)
+                                                  stop_grace_s=0.05, poll_s=0.02, call_s=0.05)
     assert rc == fs.SELF_FENCED_EXIT and "fenced by itself" in seen["stopped"]
     assert syncer.events[:2] == ["start", "stop"] and set(syncer.events[1:]) == {"stop"}
 
@@ -2611,6 +2881,7 @@ def test_the_beat_thread_stops_the_syncer_itself_when_the_lock_is_lost(tmp_path,
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
     rc = fs.run_syncer(str(onsite_config(tmp_path)), objects=objects, make_syncer=lambda args, n: syncer,
                        serve=serve, parse=_prepared, node="site-s", beat_s=0.05, stop_grace_s=0.05, poll_s=0.02,
+                       call_s=0.05,
                        workdir=str(tmp_path / "work"),
                        log=lambda m: None)
     assert rc == (fs.LOCK_LOST_EXIT if cause == "taken" else fs.SELF_FENCED_EXIT)
@@ -2930,6 +3201,7 @@ def test_a_fence_during_a_restart_never_waits_for_it_and_no_syncer_outlives_it(t
     if during == "start":
         assert times["fence_terminate"] <= times["started_after_fence"]  # the fence never waited for the restart
         assert syncer.events.count("start") == 2  # none started after that
+        assert times["down"] <= times["restart_returned"]  # the one it started was stopped before restart() ended
     else:
         assert times["fence_terminate"] <= times["terminated_after_fence"]
         assert syncer.events.count("start") == 1  # the restart's start never came after the fence
@@ -2976,7 +3248,7 @@ def test_a_heartbeat_thread_that_dies_still_ends_the_syncer(tmp_path, monkeypatc
 
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
     rc = fs.run_syncer(str(onsite_config(tmp_path)), objects=objects, make_syncer=lambda args, n: syncer, serve=serve,
-                       parse=_prepared, node="site-s", beat_s=0.05, stop_grace_s=0.05, poll_s=0.02,
+                       parse=_prepared, node="site-s", beat_s=0.05, stop_grace_s=0.05, poll_s=0.02, call_s=0.05,
                        workdir=str(tmp_path / "work"), log=log)
     assert rc == fs.SELF_FENCED_EXIT and stopped_at["main"]
     assert any(("heartbeat thread failed" if failure != "silent" else "fenced by the main thread") in m
@@ -3086,6 +3358,7 @@ def test_the_fence_stops_the_syncer_s_process_group_not_the_whole_syncer(tmp_pat
     monkeypatch.setattr(store_lock.StoreLock, "acquire", acquire)
     rc = fs.run_syncer(str(onsite_config(tmp_path)), objects=objects, make_syncer=lambda args, n: Both(),
                        serve=serve, parse=_prepared, node="site-s", beat_s=0.05, stop_grace_s=0.05, poll_s=0.02,
+                       call_s=0.05,
                        workdir=str(tmp_path / "work"),
                        log=lambda m: None)
     assert rc == fs.SELF_FENCED_EXIT

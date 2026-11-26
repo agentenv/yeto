@@ -130,8 +130,9 @@ DISPENSE_MODES = ("fleet", "island")
 FLEET_KEYS = frozenset({"trainer_argv", "dispense", "step_s", "sandbox_usd_per_h", "fixed_roster", "min_islands",
                         "island_lease_s", "launch", "max_islands", "waiting_absent_after_s", "syncer_service"})
 # fleet.syncer_service: the host of an on-site syncer run as a service (``yeto fleet service``):
-# a host name or IPv4 / IPv6 address the islands dial, no port (the syncer's ports are its own)
-SYNCER_SERVICE_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*|\[?[0-9A-Fa-f:]+\]?")
+# a host name or IPv4 address, or an IPv6 address in brackets ([addr]), the islands dial, no
+# port (the syncer's ports are its own; "host:port" is built from it)
+SYNCER_SERVICE_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*\]")
 DEFAULT_MIN_ISLANDS = 1
 # fleet.waiting_absent_after_s: an island waiting for a spare node (a resident ssh: island
 # that lost a node, yeto.launch.island_spares) counts as running for fleet.min_islands this
@@ -567,7 +568,7 @@ def syncer_service(section: dict[str, Any]) -> str | None:
                    "to the on-site service)")
     if not isinstance(host, str) or not SYNCER_SERVICE_HOST.fullmatch(host):
         raise _err(f"fleet.syncer_service must be the syncer host's name or address the islands dial, without a "
-                   f"port (got {host!r})")
+                   f"port; an IPv6 address in brackets, [addr] (got {host!r})")
     return host
 
 

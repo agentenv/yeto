@@ -377,11 +377,19 @@ def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str]
     An on-site syncer service: ``record_extra``, the fields it adds to each record it
     writes; ``on_record(record)``, called after each record; ``stopped``, the fleet's STOP
     in the run store (:func:`supervise`); ``early_finish``, a head syncer that finished its
-    run before it was seen listening (resumed at its last step) ends the wait: 0."""
+    run before it was seen listening (resumed at its last step) ends the wait: 0. ``stopped``
+    is asked during that wait too: a reason there (the service fenced, the fleet's STOP)
+    ends it at once, :data:`RUN_STOPPED_EXIT`, with nothing recorded."""
     from .. import runs
+    from .fleet import RUN_STOPPED_EXIT
 
+    ended_wait: list[str] = []
     if head_mode:
         def dead() -> str | None:
+            why = stopped() if stopped is not None else None
+            if why:  # never waited out past the service's lease, nor past the fleet's STOP
+                ended_wait.append(why)
+                return Final(f"stopped: {why}")
             reason = local_syncer.probe()
             if reason is None and early_finish and local_syncer.exited_ok():  # never an old status.json
                 return Final(_FINISHED_EARLY)
@@ -394,6 +402,10 @@ def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str]
     never = wait_listening(lambda: syncer_listening(args, head_mode=head_mode, syncer_cluster=syncer_cluster,
                                                     syncer_job=syncer_job, ops=ops),
                            dead, where=syncer_addr, sleep=sleep)
+    if ended_wait:
+        print(f"[launcher] fleet syncer: stopped before it listened ({ended_wait[0]}); nothing recorded",
+              file=sys.stderr, flush=True)
+        return RUN_STOPPED_EXIT
     if never is not None and early_finish and head_mode and never.startswith(_FINISHED_EARLY):
         print("[launcher] fleet syncer: its run is finished (before it was seen listening)", flush=True)
         return 0
