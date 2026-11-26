@@ -287,8 +287,13 @@ def test_a_task_source_sandbox_prepare_stages_is_no_dry_run_problem(tmp_path, mo
     """A new run's first `run up --dry-run` comes before `yeto sandbox prepare` stages
     ~/.yeto/sandbox/<run>/stage/<host>; a missing directory elsewhere is still a problem."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("YETO_SANDBOX_DIR", raising=False)  # the default root, under HOME
     staged = tmp_path / "home" / ".yeto" / "sandbox" / "run-new" / "stage" / "sbx-3"
     s = su.parse(_spec(tmp_path, tasks={"source": str(staged), "ids": ["a"]}))
+    assert not [p for p in su.local_problems(s) if "tasks" in p]
+    monkeypatch.setenv("YETO_SANDBOX_DIR", str(tmp_path / "moved"))  # $YETO_SANDBOX_DIR moves it
+    moved = tmp_path / "moved" / "run-new" / "stage" / "sbx-3"
+    s = su.parse(_spec(tmp_path, tasks={"source": str(moved), "ids": ["a"]}))
     assert not [p for p in su.local_problems(s) if "tasks" in p]
     s = su.parse(_spec(tmp_path, tasks={"source": str(tmp_path / "nowhere"), "ids": ["a"]}))
     assert any("is not a directory" in p for p in su.local_problems(s))

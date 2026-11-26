@@ -829,7 +829,8 @@ class LocalLaunchOps:
     procs: dict[str, subprocess.Popen] = field(default_factory=dict)
 
     def _log_path(self, prefix: str) -> Path:
-        base = Path(self.log_dir) if self.log_dir is not None else Path("~/.yeto/islands").expanduser()
+        base = (Path(self.log_dir) if self.log_dir is not None  # $YETO_ISLANDS_LOG_DIR moves the default
+                else Path(os.environ.get("YETO_ISLANDS_LOG_DIR") or "~/.yeto/islands").expanduser())
         base.mkdir(parents=True, exist_ok=True)
         return base / f"launch-{prefix}.log"
 
