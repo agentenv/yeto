@@ -50,6 +50,10 @@ from .node_inventory import FABRIC_UNAVAILABLE, FABRIC_UNGROUPED, InventoryError
 HINT = ("the node inventory declares no fabric_group: a multi-node island may land on nodes that do not "
         "reach each other over IB / RoCE; `yeto cluster probe` groups them (docs/OWN_CLUSTERS.md)")
 UNAVAILABLE = "fabric unavailable"
+NO_RDMA = "no RDMA fabric"
+NO_RDMA_NEXT = ("if the node has IB / RoCE HCAs, set its fabric to ib or roce in the inventory and probe "
+                "again; otherwise nothing to do (yeto preflight checks the node itself)")
+NO_RDMA_FAILED_NEXT = "fix the node (yeto preflight on it names the fix) and probe again"
 _log = logging.getLogger(__name__)
 
 
@@ -225,14 +229,21 @@ class ProbeResult:
     pair_problems: dict[str, str] = field(default_factory=dict)
     bad_edges: list[tuple[str, str, str]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # node -> its declared fabric, for the nodes that declare no RDMA fabric (``tcp``; ``hccs`` is
+    # Ascend's in-node interconnect, no RDMA fabric between nodes either): no group by their own
+    # inventory, single-node islands only; not a probe failure by itself
+    no_rdma: dict[str, str] = field(default_factory=dict)
+    # such a node -> its failed node checks (image pull, container, ssh, ...): those are failures
+    no_rdma_failed: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def clean(self) -> bool:
-        return not self.unavailable and not self.bad_edges
+        return not self.unavailable and not self.bad_edges and not self.no_rdma_failed
 
     def assignment(self) -> dict[str, str]:
-        """Node name -> group name (``unavailable``: no RDMA to the others)."""
-        out = {n: FABRIC_UNAVAILABLE for n in self.unavailable}
+        """Node name -> group name (``unavailable``: no RDMA to the others, a node that
+        declares no RDMA fabric included)."""
+        out = {n: FABRIC_UNAVAILABLE for n in [*self.unavailable, *self.no_rdma]}
         for g, members in self.groups.items():
             out.update({n: g for n in members})
         return dict(sorted(out.items()))
@@ -242,10 +253,17 @@ class ProbeResult:
         out += [f"missing edge {a}<->{b}: {why}" for a, b, why in self.bad_edges]
         for n, why in self.unavailable.items():
             out.append(f"{UNAVAILABLE}: {n}: {'; '.join(why) or 'no RDMA edge to another node'}")
+        for n, fabric in self.no_rdma.items():
+            head = (f"{NO_RDMA}: {n}: fabric {fabric} in the inventory: no group, single-node islands only "
+                    f"(fabric_group {FABRIC_UNAVAILABLE})")
+            failed = self.no_rdma_failed.get(n)
+            out.append(f"{head}; node checks FAILED: {'; '.join(failed)}; next: {NO_RDMA_FAILED_NEXT}" if failed
+                       else f"{head}; next: {NO_RDMA_NEXT}")
         return out
 
     def record(self) -> dict[str, Any]:
-        return {"groups": self.groups, "unavailable": self.unavailable,
+        return {"groups": self.groups, "unavailable": self.unavailable, "no_rdma": self.no_rdma,
+                "no_rdma_failed": self.no_rdma_failed,
                 "edges": [list(e) for e in self.edges], "pair_problems": self.pair_problems,
                 "bad_edges": [list(e) for e in self.bad_edges], "warnings": self.warnings}
 
@@ -255,6 +273,9 @@ _NODE_REASONS = ("ssh", "host_probe", "image_pull", "container", "address", "ib_
                  "dev_infiniband", "dev_infiniband_container", "memlock_container", "tools")
 # a FAIL of any of these: the node's HCAs cannot carry the island (no edge at all)
 _HCA_CHECKS = ("ib_ports", "ib_hca", "gid", "dev_infiniband")
+# the node checks that fail a node declaring no RDMA fabric: what keeps the node from running the
+# image (its IB / RoCE checks do not apply; ssh only when the node is unreachable, not a clock skew)
+_NO_RDMA_REASONS = tuple(r for r in _NODE_REASONS if r not in (*_HCA_CHECKS, "dev_infiniband_container", "ssh"))
 
 
 def _over_ib(check: Any) -> bool:
@@ -545,7 +566,18 @@ def group_nodes(names: Sequence[str], checks: Sequence[Any], *, states: Sequence
                 previous: Mapping[str, str | None] | None = None, reserved: Iterable[str] = (),
                 nccl_pairs: str = "all") -> ProbeResult:
     """The fabric groups of ``names`` from a preflight's ``checks`` (and its node
-    ``states``: the declared rails, the fabric keys)."""
+    ``states``: the declared rails, the fabric keys). A node whose state declares no
+    RDMA fabric (``tcp``) is in ``no_rdma``, not ``unavailable``: the probe does not
+    group it, and that is no failure of the probe."""
+    from .ssh_trainer_island import RDMA_FABRICS  # noqa: PLC0415 - the island imports this module
+
+    declared = {s.node.name: getattr(s.node, "fabric", None) for s in states}
+    no_rdma = {n: str(declared[n]) for n in names if declared.get(n) not in (None, *RDMA_FABRICS)}
+    unreachable = {s.node.name for s in states if getattr(s, "reachable", True) is False}
+    no_rdma_failed = {n: list(dict.fromkeys(
+        f"{c.name}: {c.detail}" for c in checks if c.scope == n and c.status == "FAIL"
+        and (c.name in _NO_RDMA_REASONS or (c.name == "ssh" and n in unreachable))))[:4] for n in no_rdma}
+    names = [n for n in names if n not in no_rdma]
     blocked = node_blocks(names, checks, states)
     edges, problems, warns = evaluate_pairs(names, checks, nccl_pairs=nccl_pairs, blocked=blocked)
     edge = {frozenset(e) for e in edges}
@@ -560,7 +592,8 @@ def group_nodes(names: Sequence[str], checks: Sequence[Any], *, states: Sequence
     keys = {s.node.name: fabric_keys(s) for s in states}
     ids = assign_ids(multi, keys=keys, previous=previous, reserved=reserved)
     result = ProbeResult(groups=dict(sorted(zip(ids, multi))), edges=edges, pair_problems=problems,
-                         bad_edges=bad, warnings=warns)
+                         bad_edges=bad, warnings=warns, no_rdma=dict(sorted(no_rdma.items())),
+                         no_rdma_failed={n: why for n, why in sorted(no_rdma_failed.items()) if why})
     for part in parts:
         if len(part) > 1:
             continue

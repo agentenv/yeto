@@ -344,6 +344,72 @@ def test_three_connected_nodes_form_a_group_and_a_socket_node_is_fabric_unavaila
     assert sum("torch.distributed.run" in s for _, s in ops.scripts) == 2 * 6  # every pair ran its own NCCL
 
 
+def _tcp_inventory(tmp_path, fabrics):
+    path = tmp_path / "nodes.yaml"
+    path.write_text(yaml.safe_dump({"nodes": [_entry(i, fabric=f) for i, f in enumerate(fabrics)]}))
+    return path
+
+
+def test_a_tcp_node_is_no_group_and_no_probe_failure_with_a_next_step(tmp_path, capsys):
+    """Rehearsal: tcp nodes were first said to "get no group", then reported "fabric
+    unavailable" (with the ib_write_bw noise of their pairs) and the probe exited 1."""
+    path = _tcp_inventory(tmp_path, ["ib", "ib", "tcp"])
+    assert cluster_cli.main(_args(path, "--write"), ops=_ops_for(path), log=lambda m: None) == 0
+    cap = capsys.readouterr()
+    assert "nodes ['b300-2'] declare no RDMA fabric (ib / roce): they get no group" in cap.err
+    (tcp,) = [x for x in cap.out.splitlines() if "b300-2" in x]
+    assert tcp.startswith(f"{fg.NO_RDMA}: b300-2: fabric tcp in the inventory: no group, single-node islands only")
+    assert f"next: {fg.NO_RDMA_NEXT}" in tcp and fg.UNAVAILABLE not in cap.out
+    groups = {n.name: n.fabric_group for n in load_inventory(path)}
+    assert groups["b300-0"] == groups["b300-1"] != FABRIC_UNAVAILABLE and groups["b300-2"] == FABRIC_UNAVAILABLE
+
+
+def test_a_probe_of_tcp_nodes_only_says_so_for_every_node_and_exits_0(tmp_path, capsys):
+    path = _tcp_inventory(tmp_path, ["tcp", "tcp"])
+    assert cluster_cli.main(_args(path, "--json"), ops=_ops_for(path), log=lambda m: None) == 0
+    record = json.loads(capsys.readouterr().out)
+    assert record["groups"] == {} and record["unavailable"] == {} and record["bad_edges"] == []
+    assert record["no_rdma"] == {"b300-0": "tcp", "b300-1": "tcp"}
+
+
+def test_a_tcp_node_that_fails_its_node_checks_fails_the_probe_with_the_reason(tmp_path, capsys):
+    """REV-904b M2: a tcp node whose image pull is refused is a probe failure (main: rc 1 with
+    the image_pull reason), not "nothing to do"."""
+    path = _tcp_inventory(tmp_path, ["ib", "ib", "tcp"])
+    ops = _ops_for(path, behaviors={"b300-2": Behavior(pull=(1, "pull access denied for x"))})
+    assert cluster_cli.main(_args(path), ops=ops, log=lambda m: None) == 1
+    (tcp,) = [x for x in capsys.readouterr().out.splitlines() if "b300-2" in x]
+    assert tcp.startswith(f"{fg.NO_RDMA}: b300-2: fabric tcp") and "node checks FAILED: image_pull:" in tcp
+    assert "pull access denied" in tcp and f"next: {fg.NO_RDMA_FAILED_NEXT}" in tcp and "nothing to do" not in tcp
+    path = _tcp_inventory(tmp_path, ["tcp", "tcp"])
+    ops = _ops_for(path, behaviors={"b300-1": Behavior(pull=(1, "pull access denied for x"))})
+    assert cluster_cli.main(_args(path, "--json"), ops=ops, log=lambda m: None) == 1
+    record = json.loads(capsys.readouterr().out)
+    assert list(record["no_rdma_failed"]) == ["b300-1"] and record["no_rdma"] == {"b300-0": "tcp", "b300-1": "tcp"}
+    path = _tcp_inventory(tmp_path, ["ib", "ib", "tcp"])
+    ops = _ops_for(path, behaviors={"b300-2": Behavior(ssh_rc=255)})
+    assert cluster_cli.main(_args(path, "--force"), ops=ops, log=lambda m: None) == 1  # past the idle check
+    (tcp,) = [x for x in capsys.readouterr().out.splitlines() if "b300-2" in x]
+    assert "node checks FAILED: ssh:" in tcp  # unreachable: a failure (a clock skew alone is not)
+
+
+def test_declared_roce_nodes_are_grouped_and_never_no_rdma():
+    names = ["r-0", "r-1"]
+    states = [SimpleNamespace(node=SimpleNamespace(name=n, fabric="roce", env={}, cards_per_node=8), ports=None)
+              for n in names]
+    result = fg.group_nodes(names, _pair_checks(names), states=states)
+    assert result.no_rdma == {} and list(result.groups.values()) == [names] and result.clean
+    tcp = [SimpleNamespace(node=SimpleNamespace(name=n, fabric="tcp", env={}, cards_per_node=8), ports=None)
+           for n in names]
+    assert fg.group_nodes(names, _pair_checks(names), states=tcp).no_rdma == {"r-0": "tcp", "r-1": "tcp"}
+
+
+def test_a_declared_ib_node_that_runs_over_sockets_stays_fabric_unavailable():
+    nodes, ops = _cluster(2, socket={"b300-1"})
+    result = _probe(nodes, ops)
+    assert result.no_rdma == {} and list(result.unavailable) == ["b300-0", "b300-1"] and not result.clean
+
+
 def test_a_triangle_with_a_missing_edge_is_no_group_of_three():
     names = ["b300-0", "b300-1", "b300-2"]
     result = fg.group_nodes(names, _pair_checks(names, socket={("b300-0", "b300-2")}))

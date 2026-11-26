@@ -21,8 +21,10 @@ container, per node: ``ssh_trainer_island``) is recorded the same way:
   script on every node, then ends the run's node leases there (inventory
   ``lease_store``: the row records the lease store and holder);
 * the cost is the inventory's declared ``price_per_card_hour`` times the cards
-  (:func:`usd_per_hour`); a node without a price leaves the row unpriced (the
-  customer's own machines).
+  (:func:`usd_per_hour`). The row also counts the nodes with and without a price
+  (``priced_nodes`` / ``unpriced_nodes``): when no node declares one, the nodes are
+  the operator's own machines and cost $0; when only some do, the row is unpriced
+  (``yeto.cost.billing``: a forgotten price is never read as $0).
 """
 
 from __future__ import annotations
@@ -51,7 +53,9 @@ def created_attrs(*, run_id: str, island: str, incarnation: int, nodes: Sequence
     return {"run_id": str(run_id), "island": str(island), "incarnation": int(incarnation),
             "nodes": [{"name": n.name, "host": n.host, "proxy_jump": n.proxy_jump} for n in nodes],
             "docker": bool(docker), "kill_grace_s": int(kill_grace_s),
-            "gpus": sum(n.cards_per_node for n in nodes), "usd_per_hour": usd_per_hour(nodes)}
+            "gpus": sum(n.cards_per_node for n in nodes), "usd_per_hour": usd_per_hour(nodes),
+            "priced_nodes": sum(1 for n in nodes if n.price_per_card_hour is not None),
+            "unpriced_nodes": sum(1 for n in nodes if n.price_per_card_hour is None)}
 
 
 def record(op: str, *, run_id: str, island: str, incarnation: int, attrs: dict[str, Any] | None = None) -> None:

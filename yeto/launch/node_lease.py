@@ -249,16 +249,24 @@ def still_runs_script(run: str, *, sudo: bool = False) -> str:
     * ``sampler:<pid>``: a venv sampler (the start marker ``yeto-ssh-sampler:<run>:`` in its
       arguments; assembled at run time, so the probe never finds itself).
 
-    Every finding refuses a takeover; the caller treats a missing ``done`` line the same."""
+    Each finding is printed once, however many views and listings see it (docker's one
+    daemon answers the user's and the ``sudo -n`` view alike; a labelled ``yeto-<run>-``
+    container matches the label and the name). Every finding refuses a takeover; the
+    caller treats a missing ``done`` line the same."""
     if not re.fullmatch(r"[A-Za-z0-9_.:+-]+", str(run)):
         raise NodeLeaseError(f"run {run!r}: not a plain word")
     prefix = re.sub(r"[^A-Za-z0-9_.-]", "-", f"yeto-{run}-")
     head, tail = SAMPLER_MARKER[:5], SAMPLER_MARKER[5:]
-    found = f"echo \"{PROBE_MARK} found="
+    say = "say \""
     names = "--format '{{.Names}}'"
     return (
         f"m={head}; m=\"${{m}}{tail}:{run}:\"\n"
         "err=$(mktemp 2>/dev/null || echo \"/tmp/yeto-lease-probe.$$\")\n"
+        "seen=' '\n"
+        "say() {  # a finding, once: a container seen by two views or two listings is one line\n"
+        "  case \"$seen\" in *\" $1 \"*) return;; esac\n"
+        f"  seen=\"$seen$1 \"; echo \"{PROBE_MARK} found=$1\"\n"
+        "}\n"
         "listed() {  # after a failed ps: a daemon that is not running lists nothing; any other failure: unknown\n"
         "  grep -qi 'permission denied' \"$err\" 2>/dev/null && return 1\n"
         "  grep -q 'Cannot connect to the Docker daemon' \"$err\" 2>/dev/null || return 1\n"
@@ -272,26 +280,26 @@ def still_runs_script(run: str, *, sudo: bool = False) -> str:
         "  ok=1\n"
         "}\n"
         "report() {\n"
-        f"  for n in $mine; do {found}container:$n\"; done\n"
+        f"  for n in $mine; do {say}container:$n\"; done\n"
         "  for n in $all; do\n"
-        f"    case \"$n\" in {prefix}*) {found}container:$n\";;\n"
+        f"    case \"$n\" in {prefix}*) {say}container:$n\";;\n"
         "      yeto-sampler-*) case \" $(echo $labelled) \" in *\" $n \"*) ;; "
-        f"*) {found}unconfirmed:container:$n\";; esac;;\n"
+        f"*) {say}unconfirmed:container:$n\";; esac;;\n"
         "    esac\n  done\n}\n"
         "sudo_ok=0; command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null && sudo_ok=1\n"
         "for e in docker podman; do command -v $e >/dev/null 2>&1 || continue\n"
         "  view $e; plain=$ok; [ $ok = 1 ] && report\n"
         "  root=0; if [ $sudo_ok = 1 ]; then view sudo -n $e; root=$ok; [ $ok = 1 ] && report; fi\n"
         "  case $e in\n"
-        f"    docker) [ $plain = 1 ] || [ $root = 1 ] || {found}unconfirmed:docker\";;\n"
-        f"    *) [ $plain = 1 ] || {found}unconfirmed:$e\"\n"
-        + (f"       [ $root = 1 ] || {found}unconfirmed:sudo-$e\";;\n" if sudo else "       ;;\n")
+        f"    docker) [ $plain = 1 ] || [ $root = 1 ] || {say}unconfirmed:docker\";;\n"
+        f"    *) [ $plain = 1 ] || {say}unconfirmed:$e\"\n"
+        + (f"       [ $root = 1 ] || {say}unconfirmed:sudo-$e\";;\n" if sudo else "       ;;\n")
         + "  esac\n"
         "done\n"
         "rm -f \"$err\"\n"
         f"for f in \"$HOME/{TRAINER_STATE_DIR}/{run}\"/*/pgid; do [ -f \"$f\" ] || continue; d=${{f%/pgid}}\n"
         "  [ -f \"$d/rc\" ] && continue; pid=$(cat \"$f\" 2>/dev/null)\n"
-        f"  [ \"$pid\" -gt 1 ] 2>/dev/null && kill -0 -- -$pid 2>/dev/null && {found}process:${{d##*/}}\"\n"
+        f"  [ \"$pid\" -gt 1 ] 2>/dev/null && kill -0 -- -$pid 2>/dev/null && {say}process:${{d##*/}}\"\n"
         "done\n"
         f"ps -eo pid=,args= 2>/dev/null | M=\"$m\" awk -v me=$$ '$1 != me && index($0, ENVIRON[\"M\"]) "
         f"{{print \"{PROBE_MARK} found=sampler:\" $1}}'\n"
