@@ -299,13 +299,22 @@ refuses the whole probe (exit 3), listing the node and what keeps it:
 | another run's lease holds the node (an inventory with `lease_store`) | nothing |
 | a GPU compute process (`nvidia-smi --query-compute-apps`) | `--force-busy-gpu` (with a WARN) |
 | a `yeto-` container | `--force` |
-| idleness not confirmed: the node did not answer, or its GPU processes or containers could not be listed | `--force` |
+| idleness not confirmed: the node did not answer, its GPU processes or containers could not be listed, or its lease could not be read | `--force` (with a WARN) |
 
 Containers are listed with the node's container engine (the node profile's
 `container`: docker or podman), as the user and, when `sudo -n` works, through
 it. For docker either view listing is enough; for podman the user's own view
-must list. A docker daemon that is not running has no containers. Probe the idle
-nodes with `--nodes`. The TCP port check of the preflight runs as well; a port
+must list. A docker daemon that is not running ("Cannot connect to the Docker
+daemon", not "permission denied") has no containers, unless a `containerd-shim`
+process still runs on the node: live-restore keeps containers running without the
+daemon, and a rootless daemon whose socket `DOCKER_HOST` does not point to looks
+down too, so the listing is not confirmed. This rule is docker's only. Probe the
+idle nodes with `--nodes`.
+
+With `lease_store`, the leases are read again after the benchmarks and before
+anything is written. A node another run leased during the probe refuses the
+result (exit 3, nothing written), whatever the flags. A lease that cannot be read
+then needs `--force`, as before the probe. The TCP port check of the preflight runs as well; a port
 already in use is a WARN, as in `yeto preflight`.
 
 The probe runs the cross-node steps of `yeto preflight` (it reuses them, it has
@@ -352,8 +361,8 @@ Exit codes:
 |---|---|
 | 0 | every probed node is in a group and no edge is missing |
 | 1 | a node is fabric unavailable, an edge is missing, or the deadline cut the probe short |
-| 2 | a usage or inventory error |
-| 3 | a node is busy |
+| 2 | a usage or inventory error, including a bad profile key (`container`, `paths`) |
+| 3 | a node is busy, or another run leased a probed node during the probe |
 
 | Flag | Default | Description |
 |---|---|---|
