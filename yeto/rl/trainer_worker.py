@@ -898,8 +898,10 @@ class TrainerWorker:
           waited for, so a host that takes over and dies is taken over in turn after that;
         * when this host claims that lock (``StoreLock.acquire``): its token is higher than
           the lost launch's, whose next renewal fails (``LockLost``); a lease that came back
-          meanwhile, or another host's claim, makes it fail (None). The claim is released at
-          once: the launch started here claims the next token.
+          meanwhile, or another host's claim, makes it fail (None). Under the claim the launch
+          record is read again: one another host took over meanwhile (and released its claim)
+          is left alone (None). The claim is released at once: the launch started here claims
+          the next token.
           ``fleet/trainers/<k>/takeover/<token>.json`` records it (information only).
 
         The record then names this host (``taken_over``); None: not taken over (yet)."""
@@ -935,6 +937,13 @@ class TrainerWorker:
                                   "again (its lease came back, or another host claimed it): not taken over")
             return None
         try:
+            current = self.load(k)
+            if not _same_launch(current, record):
+                # another host took it over (and released its claim) between this worker's read
+                # and its claim: its record names that host now, whose launch is not lost
+                self._foreign_once(k, f"its launch {record.get('prefix_now')} was taken over by host "
+                                      f"{(current or {}).get('host')} meanwhile: not taken over here")
+                return None
             # read under the claim: the lost launch writes its island record no more
             ended = self._ended_there(k, record)
             claim = {"host": self.host, "from": host, "token": claimed.token, "at": round(now, 3),
@@ -1035,6 +1044,15 @@ class TrainerWorker:
 # ssh (the incarnation in the island's store record; the launch reattaches when every node runs
 # it) and Modal (the function call id). A sky cluster lives in the starting host's sky state.
 TAKEOVER_SOURCES = frozenset({"ssh", "modal"})
+
+
+def _same_launch(current: dict[str, Any] | None, record: dict[str, Any]) -> bool:
+    """``current`` (the launch record read under a takeover's claim) is still the launch
+    ``record`` names: the same host, start, incarnation, prefix and takeover."""
+    if not isinstance(current, dict):
+        return False
+    return all(current.get(f) == record.get(f) for f in ("host", "started_at", "incarnation", "prefix_now",
+                                                          "taken_over"))
 
 
 def island_name(record: dict[str, Any]) -> str | None:

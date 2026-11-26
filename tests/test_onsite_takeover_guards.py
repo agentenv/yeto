@@ -574,3 +574,21 @@ def test_a_launcher_asked_to_hand_over_ends_hands_off_and_releases_its_records_l
     assert [r for r in record if r[0] in ("cancel", "stop_app", "down", "terminate")] == []
     objects = DirectoryObjectStore(tmp_path / "store")
     assert StoreLock.holder_of(objects, launcher.ISLAND_RECORDS_LOCK) is None  # released at its end
+
+
+def test_a_launch_another_host_took_over_after_this_host_read_it_is_left_alone(tmp_path):
+    """Host C read island 0's launch record (host A's, lost); host B took it over and released
+    its claim before C claimed the lock: C reads the record again under its claim, finds host
+    B's launch there and takes nothing over (one launch per island)."""
+    objects, store, _a, locks = started_on_a(tmp_path)
+    for lock in locks.values():
+        lock.release()
+    logs: list[str] = []
+    c, c_launches = worker_on(objects, store, "host-c", LATER, logs)
+    seen = c.load(0)  # host C's read, before host B's takeover
+    b, b_launches = worker_on(objects, store, "host-b", LATER)
+    b.step()
+    assert [p for p, _ in b_launches.starts] == ["run-i0", "run-i1"]
+    assert c._take_over(0, seen) is None  # noqa: SLF001
+    assert c_launches.starts == [] and c.load(0)["host"] == "host-b"
+    assert any("was taken over by host host-b meanwhile" in m for m in logs)

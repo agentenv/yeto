@@ -809,9 +809,10 @@ start the control unit on another host. `yeto run up` there takes the run over:
      itself does not stop: it trains and merges with the syncer directly all along;
    - by claiming the lock itself. The new token fences the old launch: its next renewal
      fails. A lease that came back meanwhile, or another host's claim, makes the takeover
-     fail, and the worker logs an error and changes nothing. The claim is released at once,
-     and the launch started next claims the token after it. A note is written to
-     `fleet/trainers/<k>/takeover/<token>.json`.
+     fail, and the worker logs an error and changes nothing. Under its claim it reads the
+     launch record again: a launch another host took over meanwhile is left alone. The claim
+     is released at once, and the launch started next claims the token after it. A note is
+     written to `fleet/trainers/<k>/takeover/<token>.json`.
 
    The time the old host's launch ran is billed up to the takeover; the launch started on
    the new host bills from there.
