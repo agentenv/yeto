@@ -195,7 +195,10 @@ def test_a_killed_syncer_is_restarted_from_its_checkpoint_and_the_merge_goes_on(
         while syncer.proc.pid == victim or syncer.proc.poll() is not None:
             assert time.monotonic() < deadline + 30, "the service did not restart the syncer"
             time.sleep(0.05)
-        assert resumed_from >= 4 and before[:resumed_from] == list(range(1, resumed_from + 1))
+        # the syncer writes a step's checkpoint before its tape line (the line carries the checkpoint's
+        # time): a SIGKILL between the two leaves the checkpoint one step past the tape
+        assert before == list(range(1, len(before) + 1)) and resumed_from in (len(before), len(before) + 1)
+        assert resumed_from >= 4
         while not any(m.get("at", 0) > killed_at for m in [island_launches.read_syncer_record(objects)]):
             assert time.monotonic() < deadline + 60, "the record was not written again after the restart"
             time.sleep(0.1)

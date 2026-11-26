@@ -471,6 +471,12 @@ class Onsite:
         term although this host's checkpoint is gone (:func:`run_syncer`; consumed by it)."""
         return self.ended_path.with_name("onsite-syncer.fresh")
 
+    def store_problem(self) -> str | None:
+        """:func:`store_credential_problem` of this run's store (none with a store given)."""
+        if self._objects is not None:
+            return None
+        return store_credential_problem(self.cfg.get("store"), self.env)
+
     def read_ended(self, *, sleep: Callable[[float], None] | None = None, log: Callable[[str], None] = print
                    ) -> dict[str, Any] | None:
         """The ended marker: this host's, else the run store's. A store that does not answer
@@ -491,6 +497,9 @@ class Onsite:
                 raw = self.objects.read(self.ended_key)
                 break
             except Exception as error:  # noqa: BLE001 - asked again until it answers
+                if _credential_error(error):  # no store will answer this host: not a store that is down
+                    raise ServiceError(f"the run store refuses this host's credentials ({type(error).__name__}: "
+                                       f"{error})") from error
                 tries += 1
                 log(f"[{self.role} service] the run store does not answer ({type(error).__name__}: {error}); its ended "
                     f"marker is read again in {delay:.0f}s (try {tries}), nothing is started meanwhile")
@@ -579,6 +588,19 @@ class Onsite:
         return 0
 
 
+_CREDENTIAL_ERRORS = ("NoCredentialsError", "PartialCredentialsError", "ProfileNotFound")
+
+
+def _credential_error(error: BaseException) -> bool:
+    """A store client error that says this host has no usable credential (botocore's names, or
+    the store's own refusal of a profile that is not configured here): a configuration error."""
+    if type(error).__name__ in _CREDENTIAL_ERRORS:
+        return True
+    from yeto.rl.engine.object_store import ObjectStoreError  # noqa: PLC0415
+
+    return isinstance(error, ObjectStoreError) and ("no store credentials" in str(error) or "AWS profile" in str(error))
+
+
 def service_run(args: Any, *, objects: Any = None, log: Callable[[str], None] = print) -> int:
     signal.signal(signal.SIGTERM, _exit_on_sigterm)  # the exit path runs (the syncer's stop)
     try:
@@ -594,7 +616,14 @@ def service_run(args: Any, *, objects: Any = None, log: Callable[[str], None] = 
                 log(f"[{args.role} service] --fresh: the syncer role only")
                 return CONFIG_EXIT
             return onsite.mark_fresh(log)
-        ended = onsite.read_ended(log=log)
+        try:
+            problem = onsite.store_problem()
+            if problem:
+                raise ServiceError(problem)
+            ended = onsite.read_ended(log=log)
+        except ServiceError as error:
+            log(f"[{args.role} service] refused: {error} (a configuration error: exit {CONFIG_EXIT}, not restarted)")
+            return CONFIG_EXIT
         if ended is not None:
             at = ended.get("at")
             when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(at))) if isinstance(at, (int, float)) else "?"
@@ -664,9 +693,10 @@ def run_control(config: str, *, log: Callable[[str], None] = print) -> int:
 
 # -- the syncer service -----------------------------------------------------------------------
 
-def launch_args(argv: list[str]) -> Any:
+def launch_args(argv: list[str], environ: dict[str, str] | None = None) -> Any:
     """``yeto launch <argv>`` parsed and prepared as the launch does (the syncer's profile and
-    command are built from these)."""
+    command are built from these). ``environ``: the environment its store clients read (run
+    up's; ``args._store_environ``), never written to this process's."""
     from yeto import cli  # noqa: PLC0415
     from yeto.launch.data_mix import materialize_data_mix  # noqa: PLC0415
     from yeto.launcher import prepare_launch_args  # noqa: PLC0415
@@ -679,6 +709,8 @@ def launch_args(argv: list[str]) -> Any:
         launch_argv, resolved = breakers_file.apply(args.breakers, argv)
         args = parser.parse_args(["launch", *launch_argv])
         args._breakers_resolved = resolved
+    if environ is not None:
+        args._store_environ = dict(environ)
     materialize_data_mix(args)
     prepare_launch_args(args)
     return args
@@ -729,6 +761,35 @@ def service_lock_ttl_s(stop_grace_s: float | None, beat_s: float | None = None, 
     return max(fleet_syncer.SERVICE_LOCK_TTL_S, rest + min(60.0, rest / 9))
 
 
+def store_credential_problem(uri: str | None, environ: Any) -> str | None:
+    """Why a client of the run store ``uri`` has no credential here, read from ``environ`` and
+    the local AWS files only (no request): an ``s3://`` / ``r2://`` store without the store's
+    key pair, or with an AWS profile that is not configured here; an ``oss://``
+    store without its endpoint or credentials. None when it has one (or for a directory)."""
+    from yeto.cloud import s3_store  # noqa: PLC0415
+
+    text = str(uri or "")
+    if text.startswith("oss://"):
+        from yeto.cloud import oss_store  # noqa: PLC0415
+
+        try:
+            oss_store.island_envs(text, environ)
+        except ValueError as error:
+            return str(error)
+        return None
+    if not text.startswith(("s3://", "r2://")):
+        return None
+    if s3_store.store_credentials(environ) is not None:
+        return None
+    profile = s3_store.store_profile(environ)
+    if not profile:
+        return s3_store.missing_credentials_message()
+    if s3_store.profile_config(environ).get("_missing"):
+        return (f"s3 store: AWS profile {profile!r} is not configured on this host (~/.aws/config, "
+                "~/.aws/credentials)")
+    return None  # a profile configured here: a key it lacks shows at the first call (no request made here)
+
+
 def heartbeat_objects(uri: str | None, environ: dict[str, str]) -> Any:
     """The heartbeat's own client of an ``s3://`` / ``r2://`` run store: connect timeout
     :data:`~yeto.launch.fleet_syncer.HEARTBEAT_CONNECT_TIMEOUT_S`, read timeout
@@ -744,8 +805,81 @@ def heartbeat_objects(uri: str | None, environ: dict[str, str]) -> Any:
         return None
     env = {**environ, s3_store.CONNECT_TIMEOUT_ENV: f"{fleet_syncer.HEARTBEAT_CONNECT_TIMEOUT_S:g}",
            s3_store.READ_TIMEOUT_ENV: f"{fleet_syncer.HEARTBEAT_READ_TIMEOUT_S:g}",
-           s3_store.MAX_ATTEMPTS_ENV: str(fleet_syncer.HEARTBEAT_MAX_ATTEMPTS)}
+           s3_store.MAX_ATTEMPTS_ENV: str(fleet_syncer.HEARTBEAT_MAX_ATTEMPTS),
+           s3_store.RETRY_MODE_ENV: "standard"}  # never AWS_RETRY_MODE's: its backoff is the budget's
     return s3_store.head_objects(text.replace("r2://", "s3://", 1), environ=env)
+
+
+class CallChannel:
+    """Store calls one at a time, each waited for at most ``call_s`` (a thread per call): past
+    that a ``TimeoutError``, and the thread ends on its client's own timeouts. A call made while
+    the one before still runs fails at once (never two at a time, never queued)."""
+
+    def __init__(self, call_s: float) -> None:
+        self.call_s = float(call_s)
+        self.pending: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def busy(self) -> bool:
+        pending = self.pending
+        return pending is not None and pending.is_alive()
+
+    def call(self, what: str, call: Callable[[], Any], *, wait_s: float = 0.0) -> Any:
+        """``call()`` through the channel. ``wait_s``: how long a call still in flight is waited
+        for first (0: it fails this one at once)."""
+        out: dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                out["value"] = call()
+            except BaseException as error:  # noqa: BLE001 - handed to the caller
+                out["error"] = error
+
+        deadline = time.monotonic() + float(wait_s)
+        while True:
+            with self._lock:
+                pending = self.pending
+                if not self.busy():
+                    thread = threading.Thread(target=run, name=what, daemon=True)
+                    self.pending = thread
+                    thread.start()
+                    break
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError(f"the {pending.name} call before this one still waits for the store")
+            pending.join(left)
+        thread.join(self.call_s)
+        if thread.is_alive():
+            raise TimeoutError(f"the store did not answer the {what} within {self.call_s:.0f}s")
+        if "error" in out:
+            raise out["error"]
+        return out.get("value")
+
+    def drain(self, wait_s: float) -> bool:
+        """Wait up to ``wait_s`` for the call in flight; True when none is left."""
+        pending = self.pending
+        if pending is not None:
+            pending.join(wait_s)
+        return not self.busy()
+
+
+class BoundedStore:
+    """An object store whose every call goes through a :class:`CallChannel` (the syncer
+    service's main path after it started: its record writes and its STOP reads never hold the
+    service past the channel's ``call_s``)."""
+
+    def __init__(self, objects: Any, channel: CallChannel) -> None:
+        self._objects, self._channel = objects, channel
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._objects, name)
+        if not callable(attr):
+            return attr
+
+        def bounded(*args: Any, **kwargs: Any) -> Any:
+            return self._channel.call(f"store {name}", lambda: attr(*args, **kwargs))
+
+        return bounded
 
 
 class Heartbeat:
@@ -753,11 +887,15 @@ class Heartbeat:
     which also renews the service lock. ``starting`` until :meth:`set` says otherwise;
     ``lost``: why the lock is no longer this service's (the beats stop), ``lost_code`` the
     service's exit for it. ``objects``: the heartbeat's own store client
-    (:func:`heartbeat_objects`); each call of the beat thread is cut off after ``call_s``."""
+    (:func:`heartbeat_objects`); every heartbeat write and lock call goes through one
+    :class:`CallChannel` (``call_s``). ``on_fence``: called in the beat thread once the lock
+    is lost or the service fenced itself (it stops the syncer there, whatever the main thread
+    is waiting for)."""
 
     def __init__(self, objects: Any, host: str, key: str | None, *, lock: Any = None, generation: int | None = None,
                  node: str | None = None, every_s: float | None = None, log: Callable[[str], None] = print,
-                 stop_grace_s: float | None = None, poll_s: float | None = None, call_s: float | None = None) -> None:
+                 stop_grace_s: float | None = None, poll_s: float | None = None, call_s: float | None = None,
+                 on_fence: Callable[[], None] | None = None) -> None:
         from yeto.launch.fleet_syncer import HEARTBEAT_CALL_S, POLL_S, SERVICE_BEAT_S, SERVICE_STARTING  # noqa: PLC0415
 
         self.objects, self.host, self.key, self.lock, self.log = objects, host, key, lock, log
@@ -769,33 +907,17 @@ class Heartbeat:
         self.call_s = HEARTBEAT_CALL_S if call_s is None else float(call_s)
         self.stop_grace_s = float(stop_grace_s or 0.0)
         self.every_s = SERVICE_BEAT_S if every_s is None else float(every_s)
+        self.channel = CallChannel(self.call_s)
+        self.on_fence = on_fence
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="syncer-service-beat", daemon=True)
-        self._pending: threading.Thread | None = None
+
+    @property
+    def _pending(self) -> threading.Thread | None:
+        return self.channel.pending
 
     def _bounded(self, what: str, call: Callable[[], Any]) -> Any:
-        """``call()`` in a thread of its own, waited for at most :attr:`call_s`: past that a
-        ``TimeoutError`` (the thread ends on its client's timeouts). A call of the beat thread
-        that still runs from before fails the next one at once (never two at a time)."""
-        if self._pending is not None and self._pending.is_alive():
-            raise TimeoutError(f"the {self._pending.name} call before this one still waits for the store")
-        out: dict[str, Any] = {}
-
-        def run() -> None:
-            try:
-                out["value"] = call()
-            except BaseException as error:  # noqa: BLE001 - handed to the caller
-                out["error"] = error
-
-        thread = threading.Thread(target=run, name=what, daemon=True)
-        self._pending = thread
-        thread.start()
-        thread.join(self.call_s)
-        if thread.is_alive():
-            raise TimeoutError(f"the store did not answer the {what} within {self.call_s:.0f}s")
-        if "error" in out:
-            raise out["error"]
-        return out.get("value")
+        return self.channel.call(what, call)
 
     def _write(self, state: str | None, reason: str | None) -> None:
         from yeto.launch.fleet_syncer import write_service_status  # noqa: PLC0415
@@ -803,21 +925,20 @@ class Heartbeat:
         write_service_status(self.objects, host=self.host, state=state or self.state, key=self.key,
                              reason=reason, generation=self.generation, node=self.node)
 
-    def beat(self, state: str | None = None, reason: str | None = None, *, bounded: bool = False) -> None:
+    def beat(self, state: str | None = None, reason: str | None = None, *, wait: bool = False) -> None:
+        """One heartbeat through the channel. ``wait``: a call in flight (the beat thread's) is
+        waited for first, up to :attr:`call_s` (a state change is never dropped for it)."""
         if self.lost is not None:
             return
         try:
-            if bounded:
-                self._bounded("heartbeat", lambda: self._write(state, reason))
-            else:
-                self._write(state, reason)
+            self.channel.call("heartbeat", lambda: self._write(state, reason), wait_s=self.call_s if wait else 0.0)
         except Exception as error:  # noqa: BLE001 - tried again at the next beat
             self.log(f"[syncer service] WARNING: heartbeat not written ({type(error).__name__}: {error})")
 
     def set(self, state: str) -> None:
         if state != self.state:
             self.state = state
-            self.beat()
+            self.beat(wait=True)
 
     @property
     def fence_s(self) -> float:
@@ -827,13 +948,22 @@ class Heartbeat:
         a beat, the next renewal: ``every_s + 3 * call_s``)."""
         return float(self.lock.margin_s) + self.every_s + self.poll_s + self.stop_grace_s + 3 * self.call_s
 
+    def _fenced(self) -> None:
+        if self.on_fence is None:
+            return
+        try:
+            self.on_fence()
+        except Exception as error:  # noqa: BLE001 - the main thread stops it again at its end
+            self.log(f"[syncer service] ERROR: the syncer was not stopped at the fence "
+                     f"({type(error).__name__}: {error})")
+
     def renew(self) -> None:
         """Renew the service lock (cut off after :attr:`call_s`). Another holder's token
         (``LockLost``): lost, exit :data:`LOCK_LOST_EXIT`. A renewal that fails (the store
         does not answer, or not in time): tried again at the next beat, unless the lease
         left when the renewal began is within :attr:`fence_s`; then the service fences itself
-        (exit :data:`SELF_FENCED_EXIT`, restarted) while its syncer can still be stopped
-        before the lease ends."""
+        (exit :data:`SELF_FENCED_EXIT`, restarted). Either way ``on_fence`` stops the syncer
+        at once, here, before the lease ends."""
         from yeto.launch.pool.store_lock import LockLost  # noqa: PLC0415
 
         if self.lock is None or self.lost is not None:
@@ -845,6 +975,7 @@ class Heartbeat:
         except LockLost as error:
             self.lost, self.lost_code = f"the syncer service lock is no longer this service's ({error})", LOCK_LOST_EXIT
             self.log(f"[syncer service] ERROR: {self.lost}: ending this syncer")
+            self._fenced()
             return
         except Exception as error:  # noqa: BLE001 - a store blip: renewed at the next beat
             self.log(f"[syncer service] WARNING: lock not renewed ({type(error).__name__}: {error})")
@@ -853,6 +984,7 @@ class Heartbeat:
                          f"renewal (the syncer's stop needs up to {self.fence_s:.0f}s of it): fenced by itself")
             self.lost_code = SELF_FENCED_EXIT
             self.log(f"[syncer service] ERROR: {self.lost}: ending this syncer (exit {SELF_FENCED_EXIT}: restarted)")
+            self._fenced()
 
     def start(self) -> None:
         self.beat()
@@ -861,10 +993,43 @@ class Heartbeat:
     def stop(self) -> None:
         self._stop.set()
 
+    def finish(self, final: str | None, reason: str | None, *, release: bool) -> None:
+        """The end of the service (after :meth:`stop`): the beat thread and the call in flight
+        are waited for, each up to :attr:`call_s`. With none left, the final heartbeat (if any)
+        and then the lock's release (if ``release``), each through the channel. With a call
+        still in flight (a late heartbeat or renewal could land after them), the lock is not
+        released (its lease runs out), and the final heartbeat is written after that call, if
+        it ends within ``2 * call_s`` more (a thread the interpreter waits for)."""
+        if self._thread.is_alive():
+            self._thread.join(self.call_s)
+        if self.channel.drain(self.call_s):
+            if final is not None and self.lost is None:
+                self.beat(final, reason, wait=True)
+            if release and self.lock is not None:
+                try:
+                    self._bounded("release", self.lock.release)
+                except Exception as error:  # noqa: BLE001 - the lease then runs out on its own
+                    self.log(f"[syncer service] WARNING: lock not released ({type(error).__name__}: {error}); its "
+                              "lease runs out on its own")
+            return
+        self.log(f"[syncer service] WARNING: a store call of the heartbeat still runs after {2 * self.call_s:.0f}s: "
+                 "the lock is not released (its lease runs out on its own)"
+                 + ("; the final heartbeat is written after that call" if final is not None else ""))
+        if final is None or self.lost is not None:
+            return
+
+        def after() -> None:
+            if self.channel.drain(2 * self.call_s):
+                self.beat(final, reason, wait=True)
+
+        threading.Thread(target=after, name="syncer-service-final", daemon=False).start()
+
     def _loop(self) -> None:
         while not self._stop.wait(self.every_s):
             self.renew()
-            self.beat(bounded=True)
+            if self._stop.is_set():
+                return
+            self.beat()
 
 
 def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
@@ -926,10 +1091,13 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         return CONFIG_ERROR_EXIT
     argv, host = syncer_launch_argv(run)
     try:
-        args = (parse or launch_args)(argv)
+        args = parse(argv) if parse is not None else launch_args(argv, env)
         if objects is None:
             store_env = store_client_environ(args, env)
             uri = getattr(args, "rl_checkpoint_store", None)
+            problem = store_credential_problem(uri, store_env)
+            if problem:
+                raise ValueError(problem)
             objects = store_objects(uri, store_env)
             if objects is not None and heartbeat_store is None:
                 heartbeat_store = heartbeat_objects(uri, store_env)
@@ -987,8 +1155,22 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
             "time. Stop that unit first (or wait for its lease to run out if its host is gone)")
         return 2
     lock.objects = heartbeat_store if heartbeat_store is not None else objects  # renewed by the heartbeat only
+    guard, running = threading.Lock(), {"syncer": None, "fenced": False}
+
+    def fence() -> None:  # the beat thread, at once: never waits for the main thread
+        with guard:
+            running["fenced"] = True
+            fenced_syncer = running["syncer"]
+        if fenced_syncer is not None:
+            log("[syncer service] the lock is no longer this service's: stopping the syncer now (SIGTERM, SIGKILL "
+                "after the grace)")
+            (getattr(fenced_syncer, "terminate", None) or fenced_syncer.stop)()
+
     beat = Heartbeat(lock.objects, host, kid, lock=lock, generation=lock.token, node=node, every_s=beat_s, log=log,
-                     stop_grace_s=stop_grace_s, poll_s=poll_s, call_s=call_s)
+                     stop_grace_s=stop_grace_s, poll_s=poll_s, call_s=call_s, on_fence=fence)
+    # the main path from the start of the syncer on (its records, the STOP reads): the heartbeat's
+    # client through a channel of its own, so no store call holds it past call_s after a fence
+    main_store = BoundedStore(lock.objects, CallChannel(beat.call_s))
     syncer, code, reason, final = None, 1, None, None
     try:
         stop = fleet_syncer.read_onsite_stop(objects)
@@ -1019,6 +1201,17 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
                                  env=env, stop_grace_s=stop_grace_s, home=home)
         else:
             syncer = make_syncer(args, num_learners)
+        restart = getattr(syncer, "restart", None)
+        if restart is not None:
+            def guarded_restart() -> None:  # never a syncer again once the service is fenced
+                with guard:
+                    if running["fenced"]:
+                        raise RuntimeError("the syncer service is fenced: its syncer is not started again")
+                    restart()
+
+            syncer.restart = guarded_restart
+        with guard:
+            running["syncer"] = syncer
         beat.start()  # starting: no island dials it until its record is written
         syncer.start()
         for hook in ("start_log_forwarder", "start_store_upload"):
@@ -1038,15 +1231,15 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
             if beat.lost is not None:
                 return beat.lost
             try:
-                doc = fleet_syncer.read_onsite_stop(objects)
-            except Exception:  # noqa: BLE001 - read again at the next poll
+                doc = fleet_syncer.read_onsite_stop(main_store)
+            except Exception:  # noqa: BLE001 - read again at the next poll (cut off after call_s)
                 return None
             return None if doc is None else f"the fleet's STOP in the run store ({doc.get('why')}, by {doc.get('by')})"
 
         code = (serve or fleet_syncer.serve)(
             args, addr, num_learners, clusters=[], head_mode=True, local_syncer=syncer,
             record_extra={"service": host, "service_node": node, "service_generation": lock.token, "key_id": kid},
-            on_record=recorded, stopped=stopped, early_finish=True)
+            on_record=recorded, stopped=stopped, early_finish=True, objects=main_store)
         if beat.lost is not None:
             code, reason = beat.lost_code or LOCK_LOST_EXIT, beat.lost
         elif code == RUN_STOPPED_EXIT:
@@ -1060,11 +1253,10 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
                 code, final = ISLAND_STOP_EXIT, fleet_syncer.SERVICE_FAILED
     finally:
         beat.stop()
-        if final is not None:
-            beat.beat(final, reason)
         if syncer is not None:
             syncer.stop()
-        if beat.lost_code != LOCK_LOST_EXIT:  # another holder's lease is not ours to end
-            lock.release()  # the next service (a restart, another host) need not wait for the lease
+        # the final heartbeat, then the release (the next service need not wait for the lease), after
+        # the calls in flight; another holder's lease is not ours to end
+        beat.finish(final, reason, release=beat.lost_code != LOCK_LOST_EXIT)
     log(f"[syncer service] ended: exit {code}" + (f" ({reason})" if reason else ""))
     return code
