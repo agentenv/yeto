@@ -49,5 +49,5 @@ nodes:
     fabric: tcp                       # a sampler node needs no RDMA
     runtime: docker
     mounts:
-      /data/models: /data/models      # Qwen3-4B weights and the prompts, put there once
+      /data/models: /data/models      # Qwen3-4B weights, put there once (the pool uploads the prompts)
     roles: [sampler]

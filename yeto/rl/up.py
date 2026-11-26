@@ -1344,7 +1344,7 @@ class Run:
             _log(f"preflight: {problem}")
             self.mark("preflight", ok=False)
             return False
-        problem = self.rules_problem()
+        problem = self.rules_problem() or self.own_nodes_problem()
         if problem is not None:
             _log(f"preflight: {problem}")
             self.mark("preflight", ok=False)
@@ -1504,6 +1504,37 @@ class Run:
         if ok and commands:
             self.cluster_preflight_passed = True
         return ok
+
+    def own_nodes_problem(self) -> str | None:
+        """Two ``kind: ssh`` pools of the run short of nodes of one lease store, or an ssh
+        pool on a node of the run's ``ssh:`` trainer islands (:mod:`yeto.launch.own_node_checks`):
+        the run is refused before anything starts (its dry run too); a warning or a note
+        is a preflight line. None otherwise."""
+        from yeto.launch import own_node_checks  # noqa: PLC0415
+        from yeto.launch.preflight.gate import argv_value  # noqa: PLC0415
+
+        pools = []
+        for ref in self.pools:
+            try:
+                cfg = ref.load()
+            except (OSError, ValueError):
+                continue  # an unreadable pool config: its pool dry run says so
+            if isinstance(cfg, dict) and str((cfg.get("provider") or {}).get("kind") or "") == "ssh":
+                pools.append((ref.name, cfg))
+        if not pools:
+            return None
+        argv = [str(a) for a in self.cfg["trainer"]["argv"]]
+        plan = self.fleet_plan()
+        entries = own_node_checks.island_entries(argv_value(argv, "--gpu"),
+                                                 [island.gpu for island in (plan.islands if plan is not None else ())])
+        sides = own_node_checks.trainer_sides(entries, argv_value(argv, "--rl-node-inventory"))
+        errors = []
+        for found in own_node_checks.findings(pools, sides):
+            if found.level == own_node_checks.ERROR:
+                errors.append(found.text)
+            else:
+                _log(f"preflight: {'WARNING' if found.level == own_node_checks.WARN else 'note'}: {found.text}")
+        return "; ".join(errors) + "; nothing is started" if errors else None
 
     def own_node_targets(self) -> list[tuple[Any, tuple[Any, ...]]]:
         """``(node, endpoints)`` of every own (SSH inventory) node of the run: the nodes of

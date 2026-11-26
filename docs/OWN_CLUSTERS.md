@@ -194,8 +194,23 @@ yeto run up --config run.own-sampler-pool.json --dry-run
 - **Image.** `provider.container.image` names the sampler image (or `auto`:
   each node's image from the engine image catalog for what the spec asks);
   the dry run refuses a node the image does not serve.
-- **Weights.** Put the model and the prompts on every node once (the
-  template's sampler nodes mount `/data/models`); the pool does not pull them.
+- **Weights.** Put the model on every node once (the template's sampler
+  nodes mount `/data/models`); the pool does not pull it.
+- **Prompts.** With `prompts_file` the pool copies the file to the host path
+  behind the spec's `prompts.path` (under the pool's `workdir` or a mount) at
+  every start and checks its size and sha256 there. Without it, put the file
+  there before the run; the dry run warns when the sampler cannot read the
+  path.
+- **Nodes.** A node named in `provider.nodes` needs the `sampler` role (or no
+  roles), the spec's tensor parallel size must fit its cards
+  (`provider.devices` when set, each an index of the node's cards). `yeto run
+  up` refuses a pool on a node of the run's `ssh:` trainer islands or their
+  spares, unless both lease the node in one `lease_store` and the islands
+  still find the nodes they need (then a warning). Two pools of one run on
+  the nodes of one `lease_store` skip each other's nodes; they are refused
+  when both name one node in `provider.nodes` or their targets exceed the
+  nodes they can take (split a node's cards between pools with
+  `provider.devices` on an inventory without `lease_store`).
 - **Spend.** The pool bills nothing (`price_usd_h` 0 unless you state one), so
   a spend cap (`budget.usd`) counts the other parts only: in the template, the
   Modal trainer.

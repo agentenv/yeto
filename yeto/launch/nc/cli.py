@@ -870,10 +870,20 @@ def prompts_file_report(cfg: dict[str, Any], spec: dict[str, Any]) -> tuple[list
         except OSError as error:
             return [], [f"prompts_file {local}: {error.strerror or error}"], []
         rows = sum(1 for line in data.splitlines() if line.strip())
-        return [f"prompts_file: {local} ({rows} rows, {len(data)} bytes, sha256 "
-                f"{hashlib.sha256(data).hexdigest()[:12]}) -> {remote} on every node, checked there at each start"], [], []
+        lines = [f"prompts_file: {local} ({rows} rows, {len(data)} bytes, sha256 "
+                 f"{hashlib.sha256(data).hexdigest()[:12]}) -> {remote} on every node, checked there at each start"]
+        if _own_ssh_pool(cfg):  # own nodes: the host path behind prompts.path (a mount, the workdir)
+            from yeto.launch.ssh_sampler_pool import prompts_report  # noqa: PLC0415
+
+            more, problems, notes = prompts_report(cfg, str(remote))
+            return lines + more, problems, notes
+        return lines, [], []
     if not remote:
         return [], [], []
+    if _own_ssh_pool(cfg):  # own nodes: the file the node has, where the sampler reads it
+        from yeto.launch.ssh_sampler_pool import prompts_report  # noqa: PLC0415
+
+        return prompts_report(cfg, str(remote))
     provider = cfg.get("provider") if isinstance(cfg.get("provider"), dict) else {}
     if provider.get("transport") == "sdk":
         return [], [f"the sampler spec reads prompts.path {remote}, and these sandboxes are reached through the "
@@ -883,6 +893,11 @@ def prompts_file_report(cfg: dict[str, Any], spec: dict[str, Any]) -> tuple[list
                         "node_hooks: each sampler start fails unless the file is already on the node; set "
                         "prompts_file (copied and checked by size and sha256 at every start)"]
     return [], [], []
+
+
+def _own_ssh_pool(cfg: dict[str, Any]) -> bool:
+    provider = cfg.get("provider") if isinstance(cfg.get("provider"), dict) else {}
+    return provider.get("kind") == "ssh"
 
 
 def pool_has_dispenser(cfg: dict[str, Any]) -> bool:
