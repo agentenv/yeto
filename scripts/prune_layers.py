@@ -20,10 +20,12 @@ the whole checkpoint. ``DEST`` receives:
   ``layer_types`` list by position), ``num_nextn_predict_layers`` = 0 and no
   MTP / draft tensors (``--keep-layer-tables`` leaves the tables as they are,
   as some published cut-down checkpoints do). A hybrid (Mamba) config's
-  per-layer pattern (Nemotron-H: ``hybrid_override_pattern``, or the
-  ``layers_block_type`` list) is the layer structure itself and is always cut
-  to N entries; a cut of a model with attention layers must keep at least one
-  (``*``), else the script stops and names the smallest ``--layers`` that does;
+  per-layer pattern (Nemotron-H: ``hybrid_override_pattern``, the
+  ``layers_block_type`` list, or both, which must agree) is the layer structure
+  itself and is always cut to N entries; a cut of a model with attention layers
+  must keep at least one (``*``, ``attention``, ``full_attention``), else the
+  script stops and names the smallest ``--layers`` that does; a character or
+  kind the script does not know stops it too;
 * every other file of the checkpoint (tokenizer, processors, modeling code,
   generation config) copied as it is.
 
@@ -64,7 +66,10 @@ ZERO_BASED_LAYER_LISTS = ("moe_layers", "dense_layers", "sliding_window_layers",
 # hybrid (Mamba) configs: one entry per layer, the layer structure itself (Nemotron-H)
 HYBRID_PATTERN = "hybrid_override_pattern"  # a string, one character per layer
 HYBRID_BLOCKS = "layers_block_type"  # the newer configs' list of layer kinds
-HYBRID_KINDS = {"M": "mamba", "*": "attention", "-": "mlp", "E": "moe"}
+HYBRID_KINDS = {"M": "mamba", "*": "attention", "-": "mlp", "E": "moe"}  # the pattern's characters
+# the list's kinds (transformers 5 saves full_attention / linear_attention); other kinds are refused
+HYBRID_BLOCK_KINDS = frozenset({"mamba", "attention", "full_attention", "linear_attention", "mlp", "moe"})
+ATTENTION_KINDS = frozenset({"*", "attention", "full_attention"})  # softmax attention, in either form
 HEADER_LEN = 8
 
 
@@ -184,38 +189,56 @@ def prune_config(config: dict[str, Any], layers: int, *, keep_tables: bool = Fal
     return out
 
 
-def hybrid_layers(text: dict[str, Any]) -> tuple[str, list[str]] | None:
-    """``(key, per-layer kinds)`` of a hybrid (Mamba) config: Nemotron-H's
+def hybrid_tables(text: dict[str, Any]) -> list[tuple[str, list[str]]]:
+    """``[(key, per-layer kinds)]`` of a hybrid (Mamba) config: Nemotron-H's
     ``hybrid_override_pattern`` string (one character per layer, :data:`HYBRID_KINDS`)
-    or the ``layers_block_type`` list of the newer Nemotron-H configs; None for any
-    other config."""
+    and / or the ``layers_block_type`` list of the newer Nemotron-H configs
+    (:data:`HYBRID_BLOCK_KINDS`); empty for any other config. A character or kind this
+    script does not know raises (a cut of a structure it cannot read would be a guess).
+    Both present: they must name the same layers."""
+    found: list[tuple[str, list[str]]] = []
     pattern = text.get(HYBRID_PATTERN)
     if isinstance(pattern, str) and pattern:
-        return HYBRID_PATTERN, [HYBRID_KINDS.get(c, c) for c in pattern]
+        unknown = sorted({c for c in pattern if c not in HYBRID_KINDS})
+        if unknown:
+            raise PruneError(f"{HYBRID_PATTERN} has characters {unknown} this script does not know "
+                             f"(known: {sorted(HYBRID_KINDS)}): not cutting a structure it cannot read")
+        found.append((HYBRID_PATTERN, [HYBRID_KINDS[c] for c in pattern]))
     blocks = text.get(HYBRID_BLOCKS)
-    if isinstance(blocks, list) and blocks and all(isinstance(b, str) for b in blocks):
-        return HYBRID_BLOCKS, [str(b) for b in blocks]
-    return None
+    if isinstance(blocks, list) and blocks:
+        unknown = sorted({str(b) for b in blocks if not isinstance(b, str) or b not in HYBRID_BLOCK_KINDS})
+        if unknown:
+            raise PruneError(f"{HYBRID_BLOCKS} has kinds {unknown} this script does not know "
+                             f"(known: {sorted(HYBRID_BLOCK_KINDS)}): not cutting a structure it cannot read")
+        found.append((HYBRID_BLOCKS, [str(b) for b in blocks]))
+    if len(found) == 2:
+        same = [_attention_as_one(k) for k in found[0][1]] == [_attention_as_one(k) for k in found[1][1]]
+        if not same:
+            raise PruneError(f"{HYBRID_PATTERN} and {HYBRID_BLOCKS} name different layers: not cutting either")
+    return found
+
+
+def _attention_as_one(kind: str) -> str:
+    return "attention" if kind in ATTENTION_KINDS else kind
 
 
 def cut_hybrid_pattern(text: dict[str, Any], layers: int) -> None:
-    """Cut a hybrid config's per-layer pattern to its first ``layers`` entries, in place.
-    The pattern is the layer structure itself (Megatron builds a hybrid model's layers
-    from it, one per entry), so it is cut also under ``--keep-layer-tables``. A model
-    with attention layers keeps at least one: a cut without one raises, naming the
-    first attention layer and the smallest ``--layers`` that keeps it."""
-    found = hybrid_layers(text)
-    if found is None:
-        return
-    key, kinds = found
-    if len(kinds) < layers:
-        raise PruneError(f"{key} has {len(kinds)} entries, fewer than the {layers} layers to keep")
-    first = next((i for i, kind in enumerate(kinds) if kind == "attention"), None)
-    if first is not None and first >= layers:
-        raise PruneError(f"the first {layers} layers of {key} have no attention layer (the first is layer {first}, "
-                         f"0-based): a hybrid cut needs one; keep at least --layers {first + 1}")
-    value = text[key]
-    text[key] = value[:layers]
+    """Cut a hybrid config's per-layer pattern (each form present) to its first ``layers``
+    entries, in place. The pattern is the layer structure itself (Megatron builds a hybrid
+    model's layers from it, one per entry), so it is cut also under
+    ``--keep-layer-tables``. A model with attention layers (:data:`ATTENTION_KINDS`) keeps
+    at least one: a cut without one raises, naming the first attention layer and the
+    smallest ``--layers`` that keeps it."""
+    tables = hybrid_tables(text)
+    for key, kinds in tables:
+        if len(kinds) < layers:
+            raise PruneError(f"{key} has {len(kinds)} entries, fewer than the {layers} layers to keep")
+        first = next((i for i, kind in enumerate(kinds) if kind in ATTENTION_KINDS), None)
+        if first is not None and first >= layers:
+            raise PruneError(f"the first {layers} layers of {key} have no attention layer (the first is layer "
+                             f"{first}, 0-based): a hybrid cut needs one; keep at least --layers {first + 1}")
+    for key, _kinds in tables:
+        text[key] = text[key][:layers]
 
 
 def kept_layer_kinds(config: dict[str, Any], layers: int) -> dict[int, str]:
@@ -223,9 +246,9 @@ def kept_layer_kinds(config: dict[str, Any], layers: int) -> dict[int, str]:
     config, ``mamba`` / ``attention`` / ``mlp`` / ``moe`` per kept layer of a hybrid
     (Nemotron-H) config (empty for other families)."""
     text = config.get("text_config") if isinstance(config.get("text_config"), dict) else config
-    hybrid = hybrid_layers(text)
-    if hybrid is not None:
-        return dict(enumerate(hybrid[1][:layers]))
+    hybrid = hybrid_tables(text)
+    if hybrid:
+        return dict(enumerate(hybrid[0][1][:layers]))
     linear = text.get("linear_attn_config") if isinstance(text.get("linear_attn_config"), dict) else {}
     full = {int(i) for i in linear.get("full_attn_layers", [])}
     dense_k = int(text.get("first_k_dense_replace", 0) or 0)

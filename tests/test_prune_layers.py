@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import struct
 import subprocess
 import sys
@@ -297,3 +298,73 @@ def test_a_nemotron_h_checkpoint_is_cut_end_to_end(pl, tmp_path):
     report = json.loads((tmp_path / "dest" / "PRUNE.json").read_text())
     assert report["layer_kinds"]["12"] == "attention" and len(report["layer_kinds"]) == 16
     assert result["layer_kinds"][13] == "mlp"
+
+
+NEMOTRON_MOE = REPO / "tests" / "data" / "prune_layers" / "nemotron_3_nano_30b_a3b.json"  # 'E' MoE layers
+
+
+def test_a_layers_block_type_list_of_transformers_5_is_read_as_attention(pl):
+    """transformers 5 saves the list with full_attention / linear_attention: full_attention
+    counts as the attention a cut must keep, linear_attention does not."""
+    blocks = ["mamba", "moe", "linear_attention", "moe", "mamba", "full_attention", "mamba", "moe"]
+    cfg = {"num_hidden_layers": 8, "layers_block_type": blocks}
+    assert pl.prune_config(cfg, 6)["layers_block_type"] == blocks[:6]
+    with pytest.raises(pl.PruneError, match="first is layer 5.*--layers 6"):
+        pl.prune_config(cfg, 5)  # a linear_attention layer is no attention layer
+
+
+def test_both_hybrid_forms_are_cut_and_must_agree(pl):
+    blocks = ["mamba", "mlp", "mamba", "full_attention", "mamba", "mlp"]
+    cfg = {"num_hidden_layers": 6, "hybrid_override_pattern": "M-M*M-", "layers_block_type": blocks}
+    out = pl.prune_config(cfg, 4)
+    assert out["hybrid_override_pattern"] == "M-M*" and out["layers_block_type"] == blocks[:4]
+    with pytest.raises(pl.PruneError, match="first is layer 3"):
+        pl.prune_config(cfg, 3)
+    other = dict(cfg, layers_block_type=["mamba", "moe", "mamba", "attention", "mamba", "mlp"])
+    with pytest.raises(pl.PruneError, match="name different layers"):
+        pl.prune_config(other, 4)
+
+
+@pytest.mark.parametrize("pattern, symbol", [("M-D*M-", "D"), ("M-|*M-", "|"), ("M-/*M-", "/"), ("m-M*M-", "m")])
+def test_an_unknown_pattern_character_is_refused(pl, pattern, symbol):
+    with pytest.raises(pl.PruneError, match=re.escape(f"characters ['{symbol}'] this script does not know")):
+        pl.prune_config({"num_hidden_layers": 6, "hybrid_override_pattern": pattern}, 4)
+    with pytest.raises(pl.PruneError, match=r"kinds \['sparse_attention'\] this script does not know"):
+        pl.prune_config({"num_hidden_layers": 2, "layers_block_type": ["mamba", "sparse_attention"]}, 2)
+
+
+def test_a_nemotron_h_moe_checkpoint_keeps_every_expert_of_its_kept_layers(pl, tmp_path):
+    """Nemotron 3 Nano 30B-A3B: 'E' layers are MoE layers; the cut keeps all their routed
+    and shared experts and drops every tensor of the layers after it."""
+    cfg = json.loads(NEMOTRON_MOE.read_text())
+    pattern = cfg["hybrid_override_pattern"]
+    experts = 4  # a few routed experts stand for the checkpoint's n_routed_experts
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "config.json").write_text(NEMOTRON_MOE.read_text())
+    tensors = {"backbone.embeddings.weight": _tensor("emb", 200), "backbone.norm_f.weight": _tensor("nf", 201),
+               "lm_head.weight": _tensor("head", 202)}
+    for i, kind in enumerate(pattern):
+        tensors[f"backbone.layers.{i}.norm.weight"] = _tensor("n", i)
+        if kind == "E":
+            tensors[f"backbone.layers.{i}.mixer.gate.weight"] = _tensor("g", i)
+            tensors[f"backbone.layers.{i}.mixer.shared_experts.up_proj.weight"] = _tensor("s", i)
+            for e in range(experts):
+                tensors[f"backbone.layers.{i}.mixer.experts.{e}.up_proj.weight"] = _tensor("u", i * 10 + e)
+                tensors[f"backbone.layers.{i}.mixer.experts.{e}.down_proj.weight"] = _tensor("d", i * 10 + e)
+        else:
+            tensors[f"backbone.layers.{i}.mixer.{'in_proj' if kind == 'M' else 'q_proj'}.weight"] = _tensor("w", i)
+    _safetensors(src / "model.safetensors", tensors)
+    layers = pattern.index("*") + 2  # through the first attention layer and the MoE layer after it
+    result = pl.prune(pl.LocalSource(src), tmp_path / "dest", layers, log=lambda *_: None)
+    out = json.loads((tmp_path / "dest" / "config.json").read_text())
+    assert out["hybrid_override_pattern"] == pattern[:layers] and out["num_hidden_layers"] == layers
+    assert out["n_routed_experts"] == cfg["n_routed_experts"]  # the expert count is the model's, not cut
+    kept = set(json.loads((tmp_path / "dest" / "model.safetensors.index.json").read_text())["weight_map"])
+    moe = [i for i, kind in enumerate(pattern[:layers]) if kind == "E"]
+    assert moe and all(f"backbone.layers.{i}.mixer.experts.{e}.{w}.weight" in kept
+                       for i in moe for e in range(experts) for w in ("up_proj", "down_proj"))
+    assert all(f"backbone.layers.{i}.mixer.shared_experts.up_proj.weight" in kept for i in moe)
+    assert not any(pl.layer_of(n) is not None and pl.layer_of(n) >= layers for n in kept)
+    assert result["layer_kinds"][moe[0]] == "moe" and result["layer_kinds"][layers - 2] == "attention"
+    assert len(kept) == len([n for n in tensors if pl.layer_of(n) is None or pl.layer_of(n) < layers])
