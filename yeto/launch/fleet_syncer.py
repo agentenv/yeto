@@ -381,7 +381,7 @@ def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str]
     if head_mode:
         def dead() -> str | None:
             reason = local_syncer.probe()
-            if reason is None and early_finish and local_syncer.finished():
+            if reason is None and early_finish and local_syncer.exited_ok():  # never an old status.json
                 return Final(_FINISHED_EARLY)
             return None if reason is None else Final(f"the syncer process ended ({getattr(reason, 'reason', reason)})")
     else:
@@ -641,7 +641,12 @@ def watch_service(args: Any, *, objects: Any = None, sleep: Callable[[float], No
             if (state == SERVICE_RUNNING and beats.moved and rec is not None and rec.get("service") == host
                     and status.get("generation") is not None
                     and rec.get("service_generation") == status.get("generation")):
-                break
+                # read again right before it is written for this run up: a service that restarted
+                # meanwhile (a new generation) wrote its own record, which is never overwritten
+                again = read_syncer_record(objects)
+                if again is not None and again.get("service_generation") == status.get("generation"):
+                    rec = again
+                    break
         if os.path.exists(stop_flag):
             log(f"[launcher] fleet syncer: STOP flag {stop_flag} before the syncer service on {host} was up")
             return stop_fleet()

@@ -199,6 +199,7 @@ def test_the_whole_service_process_stopped_and_started_again_goes_on_at_the_same
 
     def service(**kw):
         return fs.run_syncer(config, objects=objects, parse=_prepared, node="site-s", log=logs.append,
+                             workdir=str(tmp_path / "work"),
                              make_syncer=lambda args, n: ServiceSyncer(syncer_binary, tmp_path, port, total), **kw)
 
     def keep_learning():
