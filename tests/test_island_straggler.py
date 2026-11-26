@@ -137,29 +137,58 @@ def _at(record, t):
     return dict(record, time_unix=t)
 
 
-def test_records_from_before_the_watch_started_are_not_counted():
-    """A relaunched or moved island's new launch reads the syncer's history: the merges its
-    earlier launch missed, and its earlier join, are stamped before the watch started."""
-    tracker = st.StragglerTracker(cycles=1, since=10_000.0)
-    tracker.feed(_at(_join(1), 9_000.0))
-    for step in range(1, 9):
-        tracker.feed(_at(_step(step, [0], fragments=1, absent=[1]), 9_000.0 + step))
-    assert tracker.check(RUN2) == []  # nothing of it counts: island 1 has not joined since
-    tracker.feed(_at(_join(1), 10_001.0))
-    assert tracker.check(RUN2) == []
-    tracker.feed(_at(_step(9, [0], fragments=1), 10_002.0))
-    (signal,) = tracker.check(RUN2)
+def test_records_from_before_the_watch_started_are_not_counted(tmp_path):
+    """A syncer incarnation the first listing missed is read from its start: its records
+    stamped more than CLOCK_SKEW_S before the watch started are an earlier launch's history
+    (island 1 missing every merge, and its join) and are not counted."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    clock = [0.0]
+    source = st.StoreTape(objects, interval_s=30, clock=lambda: clock[0], since=10_000.0)
+    watch = st.StragglerWatch(source, cycles=1, log=lambda m: None)
+    assert watch.poll(RUN2) == []  # the tail: nothing there yet
+    inc = "hosta-20261126T130000Z"  # listed late: read from its start
+    _chunk(objects, inc, 0, _at(_join(0), 9_000.0), _at(_join(1), 9_000.0),
+           *(_at(_step(n, [0], fragments=1, absent=[1]), 9_000.0 + n) for n in range(1, 9)))
+    for _ in range(st.STORE_DISCOVER_POLLS):
+        clock[0] += 31.0
+        assert watch.poll(RUN2) == []  # nothing of it counts: island 1 has not joined since
+    assert inc in source.fresh
+    _chunk(objects, inc, 1, _at(_join(1), 10_001.0), _at(_step(9, [0], fragments=1), 10_002.0))
+    clock[0] += 31.0
+    (signal,) = watch.poll(RUN2)
     assert signal.merges == 1 and signal.last_merged_step is None
 
 
-def test_a_syncer_clock_300_s_behind_is_still_counted():
-    """The syncer host's clock may run behind the launcher's: its records of now are stamped up
-    to CLOCK_SKEW_S before the watch's start and still count."""
-    tracker = st.StragglerTracker(cycles=1, since=10_000.0)
-    tracker.feed(_at(_join(1), 9_700.0))
-    tracker.feed(_at(_step(1, [0], fragments=1), 9_701.0))
-    assert [s.island for s in tracker.check(RUN2)] == [1]
+def test_a_syncer_clock_300_s_behind_is_still_counted(tmp_path):
+    """The syncer host's clock may run behind the launcher's: a late-listed incarnation's
+    records of now are stamped up to CLOCK_SKEW_S before the watch's start and still count."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    clock = [0.0]
+    watch = st.StragglerWatch(st.StoreTape(objects, interval_s=30, clock=lambda: clock[0], since=10_000.0),
+                              cycles=1, log=lambda m: None)
+    watch.poll(RUN2)
+    _chunk(objects, "hosta-20261126T130000Z", 0, _at(_join(1), 9_700.0), _at(_step(1, [0], fragments=1), 9_701.0))
+    signals = []
+    for _ in range(st.STORE_DISCOVER_POLLS):
+        clock[0] += 31.0
+        signals += watch.poll(RUN2)
+    assert [s.island for s in signals] == [1]
     assert st.CLOCK_SKEW_S >= 300
+
+
+def test_the_tail_s_records_count_whatever_their_clock(tmp_path):
+    """An incarnation read from its tail is read by position: a syncer clock an hour behind
+    is not taken for history (no clock is compared)."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    inc = "hosta-20261126T130000Z"
+    _chunk(objects, inc, 0, _at(_step(1, [0], fragments=1), 6_000.0))
+    clock = [0.0]
+    watch = st.StragglerWatch(st.StoreTape(objects, interval_s=30, clock=lambda: clock[0], since=10_000.0),
+                              cycles=1, log=lambda m: None)
+    assert watch.poll(RUN2) == []
+    _chunk(objects, inc, 1, _at(_join(1), 6_400.0), _at(_step(2, [0], fragments=1), 6_401.0))
+    clock[0] = 31.0
+    assert [s.island for s in watch.poll(RUN2)] == [1]
 
 
 def test_a_link_that_reconnects_keeps_the_count_and_the_mark():
@@ -441,8 +470,8 @@ def test_a_watch_started_on_a_history_does_not_count_it(tmp_path):
     _chunk(objects, inc, 0, _at(_join(0), 10.0), _at(_join(1), 10.0),
            *(_at(_step(n, [0], fragments=1), 10.0 + n) for n in range(1, 9)))
     clock = [0.0]
-    watch = st.StragglerWatch(st.StoreTape(objects, interval_s=30, clock=lambda: clock[0]), cycles=2,
-                              since=100.0, log=lambda m: None)
+    watch = st.StragglerWatch(st.StoreTape(objects, interval_s=30, clock=lambda: clock[0], since=100.0),
+                              cycles=2, log=lambda m: None)
     assert watch.poll(RUN2) == []
     _chunk(objects, inc, 1, *(_at(_step(n, [0], fragments=1), 101.0 + n) for n in range(9, 12)))
     clock[0] = 31.0
@@ -482,7 +511,7 @@ def test_the_store_tape_reads_at_most_its_chunks_per_poll_and_keeps_what_it_read
 
         def read(self, key):
             self.reads += 1
-            if self.reads == 4 and not self.failed:  # the tail's read is the 1st
+            if self.reads == 3 and not self.failed:  # the tail reads no chunk
                 self.failed = True
                 raise OSError("read timed out")
             return self.inner.read(key)
@@ -531,19 +560,57 @@ def test_a_failed_first_read_tries_the_tail_again_and_never_reads_the_history(tm
         assert [r["step"] for r in source.read()] == [99]
 
 
-def test_the_newest_incarnation_is_the_furthest_syncer_not_the_newest_name(tmp_path):
-    """No clock: the syncer that took over (a newer term) is read even when its folder's name
-    sorts first and its steps are behind."""
+def _two_syncers(tmp_path, old_tail, new_tail):
+    """Two syncer incarnations at the first read: ``old`` (stopped) and ``new`` (running)."""
     objects = DirectoryObjectStore(tmp_path / "store")
-    _chunk(objects, "z-20991231T000000Z", 0, dict(_step(50, [0]), syncer_epoch=1))
-    _chunk(objects, "a-20000101T000000Z", 0, dict(_step(40, [0]), syncer_epoch=2))
+    old, new = "z-20991231T000000Z", "a-20000101T000000Z"  # by name the stopped one sorts last
+    _chunk(objects, old, 0, *old_tail)
+    _chunk(objects, new, 0, *new_tail)
     clock = [0.0]
     source = st.StoreTape(objects, interval_s=30, clock=lambda: clock[0])
-    assert source.read() == [] and source.queue == ["a-20000101T000000Z"]
-    _chunk(objects, "a-20000101T000000Z", 1, dict(_step(41, [0]), syncer_epoch=2))
-    _chunk(objects, "z-20991231T000000Z", 1, dict(_step(51, [0]), syncer_epoch=1))  # the old one, late
-    clock[0] = 31.0
-    assert [r["step"] for r in source.read()] == [41]
+    assert source.read() == [] and source.known == {old, new}
+
+    def grows(inc, seq, *records):
+        _chunk(objects, inc, seq, *records)
+        clock[0] += 31.0
+        return source.read()
+
+    return source, old, new, grows
+
+
+def test_a_restarted_syncer_whose_last_chunk_has_only_its_own_records_is_read(tmp_path):
+    """No step or term in its last chunk (round opens, connections): nothing is picked, the
+    syncer that writes on is read."""
+    own = [{"kind": "round_open", "fragment": 0}, {"kind": "member_connected", "learner_id": 0},
+           {"kind": "round_attempt_timeout", "fragment": 0}]
+    _source, _old, new, grows = _two_syncers(tmp_path, [dict(_step(50, [0]), syncer_epoch=1)], own)
+    assert [r["step"] for r in grows(new, 1, dict(_step(51, [0]), syncer_epoch=1))] == [51]
+    assert [r["step"] for r in grows(new, 2, dict(_step(52, [0]), syncer_epoch=1))] == [52]
+
+
+def test_a_syncer_resumed_from_an_earlier_step_is_read(tmp_path):
+    """A syncer restarted from its checkpoint is behind the stopped one's step."""
+    _source, _old, new, grows = _two_syncers(tmp_path, [_step(50, [0])], [_step(30, [0])])
+    assert [r["step"] for r in grows(new, 1, _step(31, [0]))] == [31]
+
+
+def test_two_syncers_level_at_the_first_read_are_both_followed(tmp_path):
+    """Level progress, any names: whichever grows is read, each chunk once."""
+    _source, old, new, grows = _two_syncers(tmp_path, [_step(40, [0])], [_step(40, [0])])
+    assert [r["step"] for r in grows(old, 1, _step(41, [0]))] == [41]
+    assert [r["step"] for r in grows(new, 1, _step(42, [0]))] == [42]
+    assert grows(new, 2, _step(43, [0])) + grows(old, 2, _step(44, [0])) == [_step(43, [0]), _step(44, [0])]
+
+
+def test_a_full_listing_never_reads_a_known_incarnation_again(tmp_path):
+    """A full listing (every STORE_DISCOVER_POLLS reads) adds only incarnations it did not know:
+    a known one keeps its cursor, so no chunk is read twice."""
+    source, _old, new, grows = _two_syncers(tmp_path, [_step(1, [0])], [_step(2, [0])])
+    got = []
+    for seq in range(1, 3 * st.STORE_DISCOVER_POLLS):
+        got += grows(new, seq, _step(100 + seq, [0]))
+    assert [r["step"] for r in got] == [100 + seq for seq in range(1, 3 * st.STORE_DISCOVER_POLLS)]
+    assert source.fresh == set()
 
 
 def test_a_store_poll_starts_no_request_past_its_budget(tmp_path):
@@ -593,9 +660,15 @@ def test_the_launcher_watches_an_island_pool_only(tmp_path):
     assert none.notices() == [(st.UNAVAILABLE_EVENT, "the syncer runs on its own VM")]
     assert "watch off: the syncer runs on its own VM" in lines[-1]
     watch = st.watch_for(pool, local_tape=tmp_path / "tape.jsonl", objects=object(), log=lines.append)
-    assert isinstance(watch.source, st.FileTape) and watch.tracker.cycles == 3 and watch.tracker.since > 0
+    assert isinstance(watch.source, st.FileTape) and watch.tracker.cycles == 3
+    assert watch.quiet_s == 2 * 900  # two rounds at the syncer's default quorum timeout, no upload
     watch = st.watch_for(pool, objects=DirectoryObjectStore(tmp_path / "s"), log=lines.append)
-    assert isinstance(watch.source, st.StoreTape)
+    assert isinstance(watch.source, st.StoreTape) and watch.source.since > 0
+    assert watch.quiet_s == 2 * 900 + 2 * 30  # and two upload intervals of the store copy
+    soft = types.SimpleNamespace(**vars(pool), rl_sync_soft_deadline_s=60)
+    assert st.watch_for(soft, objects=DirectoryObjectStore(tmp_path / "s"), log=lines.append).quiet_s == 300
+    elastic = types.SimpleNamespace(**vars(pool), rl_elastic=True, rl_elastic_quorum_timeout_s=200)
+    assert st.watch_for(elastic, objects=DirectoryObjectStore(tmp_path / "s"), log=lines.append).quiet_s == 460
 
 
 # -- the fleet controller ------------------------------------------------------------------------
@@ -710,30 +783,51 @@ def test_without_a_watch_the_controller_reads_nothing(tmp_path):
 
 def test_a_slow_start_is_never_said_unavailable():
     """Nothing about this launch's islands read yet (its trainers still load): no notice."""
-    lines, tape = [], ScriptedTape()
-    watch = st.StragglerWatch(tape, cycles=1, log=lines.append)
+    lines, tape, now = [], ScriptedTape(), [0.0]
+    watch = st.StragglerWatch(tape, cycles=1, log=lines.append, quiet_s=300, clock=lambda: now[0])
     tape.pending.append(_join(5))  # another launch's island: not this one's first record
-    for _ in range(st.QUIET_POLLS * 3):
+    for _ in range(100):
+        now[0] += 30
         watch.poll(RUN2)
     assert lines == [] and watch.notices() == []
 
 
 def test_a_tape_silent_after_its_first_record_is_said_once_then_taken_back():
-    lines, tape = [], ScriptedTape()
-    watch = st.StragglerWatch(tape, cycles=1, log=lines.append)
+    lines, tape, now = [], ScriptedTape(), [0.0]
+    watch = st.StragglerWatch(tape, cycles=1, log=lines.append, quiet_s=300, clock=lambda: now[0])
     tape.pending.append(_join(0))
     watch.poll(RUN2)
-    for _ in range(st.QUIET_POLLS * 2):
+    for _ in range(20):
+        now[0] += 30
         watch.poll(RUN2)
-    assert len(lines) == 1 and "no syncer record read from test tape in 10 reads" in lines[0]
+    assert len(lines) == 1 and "no syncer record read from test tape in 300 s" in lines[0]
     ((kind, why),) = watch.notices()
     assert kind == st.UNAVAILABLE_EVENT and "no syncer record" in why and watch.notices() == []
     tape.pending.append(_step(1, [0, 1]))
     watch.poll(RUN2)
     assert watch.notices() == [(st.AVAILABLE_EVENT, "syncer records read again from test tape")]
-    for _ in range(st.QUIET_POLLS - 1):
+    for _ in range(9):
+        now[0] += 30
         watch.poll(RUN2)
-    assert watch.notices() == []  # one read short of a new silent stretch
+    assert watch.notices() == []  # 270 s: short of a new silent stretch
+
+
+def test_a_fleet_of_900_s_rounds_read_every_30_s_is_never_said_unavailable():
+    """The production defaults: the syncer's quorum timeout (900 s, no soft deadline) and the
+    store copy read every 30 s. A merge every 900 s is no silence."""
+    args = types.SimpleNamespace(training_mode="rl", rl_sync_island_lease_s=30.0)
+    lines, tape, now = [], ScriptedTape(), [0.0]
+    watch = st.StragglerWatch(tape, cycles=3, log=lines.append, clock=lambda: now[0],
+                              quiet_s=st.quiet_window_s(args, upload_s=30.0))
+    tape.pending.append(_join(0))
+    step = 0
+    for _ in range(4 * 3600 // 30):  # 4 hours of reads
+        now[0] += 30
+        if now[0] % 900 == 0:
+            step += 1
+            tape.pending.append(_step(step, [0, 1], fragments=1))
+        watch.poll(RUN2)
+    assert lines == [] and watch.notices() == []
 
 
 def test_the_launcher_reads_the_store_copy_for_an_island_launch_only(tmp_path, monkeypatch):
@@ -763,7 +857,7 @@ def test_a_flagged_island_that_stops_running_is_cleared_naming_why(tmp_path):
     from yeto.launch import fleet as lf
 
     for setup, why in ((lambda rec: rec.update(draining=True), "stopped or removed (island STOP)"),
-                       (lambda rec: rec.update(state=lf.RECOVERING), "relaunched"),
+                       (lambda rec: rec.update(state=lf.RECOVERING), "recovering"),
                        (lambda rec: rec.update(state=lf.DONE), "not running (done)")):
         ctl, _ops, store, tape, log = _controller(tmp_path / why.split()[0])
         tape.pending += [_join(0), _join(1), _step(1, [0, 1], fragments=1), _step(2, [0], fragments=1)]
@@ -790,6 +884,45 @@ def test_a_watch_read_again_writes_available(tmp_path):
     ctl.straggler._notices.append((st.AVAILABLE_EVENT, "syncer records read again"))
     ctl._poll_stragglers()
     assert [e[1] for e in log.kinds(st.AVAILABLE_EVENT)] == ["r-l0", "r-l1"]
+
+
+def _unreadable_record(store, island, times):
+    """Island ``island``'s record read fails ``times`` times (a 503 of the store), then reads."""
+    real, left = store.objects.read, [times]
+
+    def read(key):
+        if key == lc.state_key(island) and left[0] > 0:
+            left[0] -= 1
+            raise OSError("503 Slow Down")
+        return real(key)
+
+    store.objects.read = read
+    return left
+
+
+def test_a_left_mark_whose_record_does_not_read_is_cleared_at_a_later_poll(tmp_path):
+    ctl, _ops, store, _tape, log = _controller(tmp_path)
+    store.write(1, "running", straggler={"action": "wait", "missed_cycles": 3, "merges": 3, "fragments": 1,
+                                         "newest_step": 9, "last_merged_step": 6, "at": 1.0})
+    _unreadable_record(store, 1, 1)
+    ctl._poll_stragglers()  # its record did not read: no verdict, tried again
+    assert not log.kinds(st.CLEARED_EVENT)
+    ctl._poll_stragglers()
+    (cleared,) = log.kinds(st.CLEARED_EVENT)
+    assert cleared[2]["reason"] == "controller restarted" and store.read(1)["straggler"] is None
+    ctl._poll_stragglers()
+    assert len(log.kinds(st.CLEARED_EVENT)) == 1
+
+
+def test_a_mark_this_watch_wrote_while_the_record_did_not_read_is_kept(tmp_path):
+    ctl, _ops, store, tape, log = _controller(tmp_path)
+    left = _unreadable_record(store, 1, 10**6)
+    tape.pending += [_join(0), _join(1), _step(1, [0, 1], fragments=1), _step(2, [0], fragments=1)]
+    ctl._poll_stragglers()  # reported by this watch while its record does not read
+    assert [e[1] for e in log.kinds(st.EVENT)] == ["r-l1"]
+    left[0] = 0
+    ctl._poll_stragglers()
+    assert not log.kinds(st.CLEARED_EVENT) and store.read(1)["straggler"]["action"] == st.WAIT
 
 
 def test_a_mark_an_earlier_launcher_left_is_cleared_once_and_judged_again(tmp_path):

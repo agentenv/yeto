@@ -960,10 +960,12 @@ A merge cycle is one outer step of every fragment, so with 4 fragments and `N = 
 island is reported after 12 merges without it. A push the syncer refused does not count as
 merged. Counting starts when the island joins the syncer:
 
-- A launch counts only what the syncer records after the launch started. A relaunched or
-  moved island's new launch never counts the merges an earlier launch of it missed. Records
-  stamped up to 10 minutes before the launch started still count, in case the syncer host's
-  clock runs behind.
+- A launch counts only what the syncer records after the launch started: it reads each
+  syncer tape from its end at the launch's start. A relaunched or moved island's new launch
+  never counts the merges an earlier launch of it missed. No clock is compared for that,
+  so a syncer host whose clock is off is counted as usual. Only a syncer tape found later
+  is read from its start; there, records stamped more than 10 minutes before the launch
+  started are skipped (the clocks may differ up to 10 minutes before it does).
 - An island also counts as joined once a merge lists it `absent`: the syncer expects it. An
   island that a restarted launcher adopted joined before that launcher started, and is
   counted this way.
@@ -986,11 +988,13 @@ merged. Counting starts when the island joins the syncer:
   dropping and that never delivers is still reported.
 
 The report is written once per stretch. `island_straggler_cleared` closes the stretch, and its
-`reason` says why: a push of the island is merged again, it was `relaunched`, it was stopped
-or removed (island STOP), it is no longer running, or `controller restarted`. The last one is
-written by a launcher that starts, or adopts the island, while its record still holds a
-report from an earlier launcher; the new launcher then judges the island again. The
-record's `straggler` is set back to `null` at the same time.
+`reason` says why: a push of the island is merged again, it is `recovering`, it was
+`relaunched` (running again as a new launch), it was stopped or removed (island STOP), it
+is no longer running, or `controller restarted`. The last one is written by a launcher that
+starts, or adopts the island, while its record still holds a report from an earlier
+launcher; the new launcher then judges the island again. If that record does not read, it
+is read again at each poll until it does. The record's `straggler` is set back to `null` at
+the same time.
 
 The dashboard shows both events in its event stream. While the island is reported, its
 trainer card carries a `straggler` badge and its row in "Islands now" says `straggler`.
@@ -1015,8 +1019,10 @@ The controller reads the syncer's tape in one of two places:
 - otherwise, in a fleet launched island by island (`fleet.launch: per_island`), from its
   copy in the run store, `tapes/syncer/<incarnation>/<seq>.jsonl`. The syncer launch
   uploads it every 30 s (`YETO_RL_TAPE_UPLOAD_S`) when `--rl-checkpoint-store` is an
-  `s3://` store. Each island launch reads it every 30 s. Its first read starts at the end of
-  the syncer incarnation that got furthest (the newest syncer term, then the newest step).
+  `s3://` store. Each island launch reads it every 30 s. Its first read keeps the end of
+  every syncer incarnation there. No incarnation is picked as the current one: each read
+  lists every known incarnation after the last chunk it read, and reads the new chunks of
+  those that grew. A restarted syncer is read whatever its step or term.
 
 How late the report can be, with the store copy:
 
@@ -1026,7 +1032,8 @@ How late the report can be, with the store copy:
   outage is read in about one fifteenth of the outage's length: 1 hour of outage is caught
   up in about 4 minutes.
 - A restarted syncer writes to a new incarnation. The launch finds it at its next full
-  listing, which comes every 10 reads (about 5 minutes), and reads it from its start.
+  listing, which comes every 10 reads (about 5 minutes), and reads it from its start. Each
+  read lists every incarnation it knows once.
 - If the first read fails, every later read tries it again. Until one works nothing is
   read, and the syncer's earlier records are never read.
 
@@ -1042,10 +1049,12 @@ reported then, and training is not affected. This happens:
   the launch does not upload it to the run store, so the controller has nothing to read.
   Run the syncer on the controller's host (`--controller head`) or launch the fleet island
   by island to get the report.
-- when the launch reads no syncer record for 10 reads in a row (the store copy is missing
-  or stale). This is counted only after the first record about the launch's islands, so a
-  fleet whose trainers are still starting is not reported. Once records are read again,
-  the launch writes `island_straggler_available`.
+- when the launch reads no syncer record for two of the syncer's longest rounds plus two
+  upload intervals, and at least 5 minutes (the store copy is missing or stale). A round
+  lasts at most `--rl-sync-soft-deadline-s`, else the syncer's default quorum timeout of
+  900 s: with the defaults, 31 minutes. This is counted only after the first record about
+  the launch's islands, so a fleet whose trainers are still starting is not reported. Once
+  records are read again, the launch writes `island_straggler_available`.
 
 ### Removing an island
 

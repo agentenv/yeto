@@ -14,17 +14,20 @@ default, or a replacement the island's provider offers).
   (the distinct ``fragment`` ids merged so far, 1 for a non-fragment pool) an island is a
   straggler once ``N x P`` merges in a row went by without a push of it in their weights.
   A push the syncer refused, or one still in flight, is not merged and does not count.
-* **Only this launch's history.** The watch ignores records stamped (``time_unix``) more than
-  :data:`CLOCK_SKEW_S` before its own start (the launcher's and the syncer host's clocks may
-  differ that much), and reads the run store's copy from the tail of the furthest syncer
-  incarnation it finds at its first read: a relaunched or moved island's new launch never
-  counts the merges its earlier launches missed. No other decision reads a clock.
+* **Only this launch's history.** Each source starts at the tape's end when the watch starts
+  (the local file at its offset; the run store's copy at the tail of every syncer incarnation
+  there): a relaunched or moved island's new launch never counts the merges its earlier
+  launches missed, whatever the hosts' clocks say. Only an incarnation the store lists later
+  is read from its start, without its records stamped more than :data:`CLOCK_SKEW_S` before
+  the watch's start (a listing that missed it at the first read).
 * **When counting starts.** At the island's first ``pool_join`` read by this watch, or at the
   first merge that lists it ``absent`` (the syncer expects it: an island a restarted launcher
   adopted joined before this watch), or at its first merged push. Only its controller resets
   the count: when the island leaves running (recovering, draining, stopped) it starts again
-  once it runs again, from its next join for a new incarnation (a relaunch; a join written
-  before the controller holds it running counts) or at once for the same one. A ``pool_join``
+  once it runs again: at once for the same incarnation; for a new one (a relaunch) from its
+  join. A join read while the controller holds the island away from running (recovering)
+  counts; a relaunch the controller holds running again by its next poll, never seen away,
+  is counted from the first join read after that poll. A ``pool_join``
   of a reconnect (each connection is a new generation) or of a syncer that took over (a new
   term) keeps the count and the mark. A merged push of the island resets the count.
 * **A new launch catches up first.** A launch its controller relaunched (a spare node, a
@@ -41,14 +44,14 @@ default, or a replacement the island's provider offers).
 
 Sources (:func:`tape_source`): the syncer's tape file on this host (a head-mode syncer), or
 its copy in the run store (``tapes/syncer/<incarnation>/<seq>.jsonl``, uploaded every 30 s
-by ``yeto.rl.engine.tape_upload``). A store read costs at most :data:`STORE_LISTS_PER_POLL`
-listings of one incarnation's prefix after its last chunk read and :data:`STORE_GETS_PER_POLL`
-chunk reads, and starts no new request after :data:`STORE_POLL_BUDGET_S`. Finding the syncer's
-incarnations costs one listing page per incarnation, at the first read, every
-:data:`STORE_DISCOVER_POLLS` reads and while none is known; the first read also lists each
-incarnation once and reads its last chunk, for its tail. A source that does not read is skipped
+by ``yeto.rl.engine.tape_upload``). A store read costs one listing of each known incarnation's
+prefix after its last chunk read and at most :data:`STORE_GETS_PER_POLL` chunk reads, and
+starts no new request after :data:`STORE_POLL_BUDGET_S`. Finding the syncer's incarnations
+costs one listing page per incarnation, at the first read, every :data:`STORE_DISCOVER_POLLS`
+reads and while none is known; the first read also lists each incarnation once, for its
+tail. A source that does not read is skipped
 for that poll; nothing here ever stops or slows the fleet. When nothing can be watched (no tape
-to read, the watch turned off), or the tape goes silent for :data:`QUIET_POLLS` reads after its
+to read, the watch turned off), or the tape goes silent for :func:`quiet_window_s` after its
 first record about this launch's islands, the controller is given one notice
 (``island_straggler_unavailable``), and one more when records are read again
 (``island_straggler_available``).
@@ -72,11 +75,10 @@ DEFAULT_CYCLES = 3
 SYNCER_TAPES = "tapes/syncer/"
 STORE_POLL_S = 30.0  # the syncer's uploads are 30 s apart (tape_upload.DEFAULT_INTERVAL_S)
 STORE_GETS_PER_POLL = 16  # chunk reads per poll; the rest waits for the next poll
-STORE_LISTS_PER_POLL = 4  # listings of the incarnation being read per poll
 STORE_DISCOVER_POLLS = 10  # a full listing of tapes/syncer/ (a restarted syncer) every this many reads
 STORE_POLL_BUDGET_S = 5.0  # no new store request after this long in one poll
 MAX_READ_BYTES = 8 << 20  # one poll reads at most this much of a local tape
-QUIET_POLLS = 10  # reads without a syncer record, after the first one of this launch's islands, before that is said
+QUIET_MIN_S = 300.0  # the shortest silence of the syncer's tape, after its first record about this launch, that is said
 CLOCK_SKEW_S = 600.0  # the launcher's and the syncer host's clocks may differ by this much
 
 WAIT = "wait"  # the syncer merges without it; it is caught up once it delivers again
@@ -147,12 +149,10 @@ def _time(record: Mapping[str, Any]) -> float | None:
 @dataclass
 class StragglerTracker:
     """Folds syncer tape records (:meth:`feed`) and answers :meth:`check` (module doc).
-    ``since``: the watch's start (wall time); a record stamped more than
-    :data:`CLOCK_SKEW_S` before it is an earlier launch's history and is ignored."""
+    Which records are this launch's is its source's business (each one starts at the tape's
+    end); no clock is read here."""
 
     cycles: int = DEFAULT_CYCLES
-    since: float | None = None
-    clock: Callable[[], float] = time.time
     islands: dict[int, _Island] = field(default_factory=dict)
     fragments: set[int] = field(default_factory=set)
     newest_step: int | None = None
@@ -164,13 +164,9 @@ class StragglerTracker:
     def per_cycle(self) -> int:
         return max(1, len(self.fragments))
 
-    def _history(self, t: float | None) -> bool:
-        """Stamped before the watch started, beyond the clock skew allowed between hosts."""
-        return t is not None and self.since is not None and t < self.since - CLOCK_SKEW_S
-
     def feed(self, record: Mapping[str, Any]) -> None:
         kind = record.get("kind")
-        if kind not in ("pool_join", "outer_step") or self._history(_time(record)):
+        if kind not in ("pool_join", "outer_step"):
             return
         if kind == "pool_join":
             island = _int(record.get("island_id"))
@@ -321,47 +317,47 @@ class FileTape:
         return _records(data[: end + 1])
 
 
-def _progress(records: list[dict[str, Any]]) -> tuple[int, int]:
-    """How far a syncer got in ``records``: its newest term (``syncer_epoch``) and step. A
-    restarted syncer resumes at its checkpoint's step or takes over in a new term, so the
-    newest incarnation is the furthest one; no clock is read."""
-    epochs = [e for e in (_int(r.get("syncer_epoch")) for r in records) if e is not None]
-    steps = [s for s in (_int(r.get("step")) for r in records) if s is not None]
-    return (max(epochs, default=-1), max(steps, default=-1))
-
-
 class StoreTape:
     """The syncer's tape in the run store (``tapes/syncer/<incarnation>/<seq>.jsonl``).
 
-    The first read establishes the tail: it lists every syncer incarnation, reads each one's
-    last chunk, and starts at the tail of the furthest one (the newest term, then the newest
-    step; :func:`_progress`): what the syncer wrote before this watch is not read. Until that
-    worked (a listing or a read failed) every read tries it again and reads nothing else. From
-    then on each read lists the current incarnation's prefix after its last chunk read
-    (``start_after``) and reads its new chunks in order, at most :data:`STORE_GETS_PER_POLL`
-    (the rest at the next read). An incarnation found later (a restarted syncer, by a full
-    listing every :data:`STORE_DISCOVER_POLLS` reads) did not exist at the first read: it is
-    read from its start once the current one has no chunk left. A chunk read moves the cursor
-    past it, so a request that fails keeps what was read before it and is tried again at the
-    next read (``error`` says why); no chunk is read twice or skipped."""
+    No incarnation is picked as "the" syncer: a restarted syncer may resume an earlier step,
+    keep its term, or write only its own records (round opens, connections) at first. The
+    first read lists every syncer incarnation and keeps each one's tail (its last chunk): what
+    the syncers wrote before this watch is not read. Until that worked (a listing failed)
+    every read tries it again and reads nothing else. From then on each read lists every known
+    incarnation after its last chunk read (``start_after``; the one that grew most recently
+    first, then the one listed longest ago) and reads the new chunks of those that grew, at most
+    :data:`STORE_GETS_PER_POLL` (the rest at the next read). An incarnation found later (by a
+    full listing every :data:`STORE_DISCOVER_POLLS` reads) did not exist at the first read: it
+    is read from its start, without its records stamped more than :data:`CLOCK_SKEW_S` before
+    ``since`` (a listing that missed it at the first read). A chunk read moves the cursor past
+    it, so a request that fails keeps what was read before it and is tried again at the next
+    read (``error`` says why); no chunk is read twice or skipped."""
 
     def __init__(self, objects: Any, *, interval_s: float = STORE_POLL_S,
                  clock: Callable[[], float] | None = None, gets_per_poll: int = STORE_GETS_PER_POLL,
-                 discover_polls: int = STORE_DISCOVER_POLLS, budget_s: float = STORE_POLL_BUDGET_S) -> None:
+                 discover_polls: int = STORE_DISCOVER_POLLS, budget_s: float = STORE_POLL_BUDGET_S,
+                 since: float | None = None) -> None:
         self.objects = objects
         self.interval_s = float(interval_s)
         self.clock = clock or time.monotonic
         self.gets_per_poll, self.discover_polls, self.budget_s = int(gets_per_poll), int(discover_polls), budget_s
-        self.queue: list[str] = []  # the incarnations to read, the current one first
-        self.known: set[str] = set()
-        self.cursors: dict[str, str] = {}  # incarnation -> its last chunk read
+        self.since = time.time() if since is None else float(since)  # the watch's start (wall time)
+        self.cursors: dict[str, str] = {}  # incarnation -> its last chunk read ("" before its first)
+        self.fresh: set[str] = set()  # incarnations read from their start (found after the first read)
+        self.grew: dict[str, int] = {}  # incarnation -> the read that last found a new chunk of it
+        self.listed: dict[str, int] = {}  # incarnation -> the read that last listed it
         self.label = f"{getattr(objects, 'uri', 'store')}/{SYNCER_TAPES}"
         self.error: str | None = None
         self.polled = False  # whether the last read() asked the store (False within the interval)
-        self.tailed = False  # the first read's tail is established
+        self.tailed = False  # the first read's tails are established
         self.reads = 0
         self.requests = 0  # listings and chunk reads so far
         self._next: float | None = None
+
+    @property
+    def known(self) -> set[str]:
+        return set(self.cursors)
 
     def _incarnations(self) -> set[str]:
         """The syncer incarnations under ``tapes/syncer/``: one listing page per incarnation
@@ -382,29 +378,32 @@ class StoreTape:
                 return found
             cursor = f"{SYNCER_TAPES}{str(last)[len(SYNCER_TAPES):].split('/')[0]}/~"  # past its chunks
 
+    def _chunks(self, inc: str, after: str = "") -> list[str]:
+        self.requests += 1
+        return sorted(str(k) for k in self.objects.list(f"{SYNCER_TAPES}{inc}/", start_after=after)
+                      if str(k).endswith(".jsonl") and str(k) > after)
+
     def _tail(self) -> None:
-        """The first read: every incarnation's tail, and the furthest one to read from.
-        Committed only when every request worked (else tried again at the next read)."""
-        cursors, progress = {}, {}
+        """The first read: every incarnation's tail. Committed only when every listing worked
+        (else tried again at the next read)."""
+        cursors = {}
         for inc in sorted(self._incarnations()):
-            self.requests += 1
-            chunks = sorted(str(k) for k in self.objects.list(f"{SYNCER_TAPES}{inc}/") if str(k).endswith(".jsonl"))
+            chunks = self._chunks(inc)
             cursors[inc] = chunks[-1] if chunks else ""
-            data = None
-            if chunks:
-                self.requests += 1
-                data = self.objects.read(chunks[-1])
-            records = _records(data if isinstance(data, bytes) else str(data or "").encode())
-            progress[inc] = (*_progress(records), inc)
         self.cursors.update(cursors)
-        self.known.update(cursors)
-        self.queue = [max(progress, key=progress.__getitem__)] if progress else []
         self.tailed = True
 
     def _discover(self) -> None:
-        new = sorted(inc for inc in self._incarnations() if inc not in self.known)
-        self.known.update(new)  # not there at the first read: newer than every one that was
-        self.queue += new
+        for inc in sorted(self._incarnations() - set(self.cursors)):  # a known one keeps its cursor
+            self.cursors[inc] = ""  # not there at the first read: read from its start
+            self.fresh.add(inc)
+
+    def _records_of(self, inc: str, data: Any) -> list[dict[str, Any]]:
+        records = _records(data if isinstance(data, bytes) else str(data).encode())
+        if inc not in self.fresh:
+            return records
+        floor = self.since - CLOCK_SKEW_S
+        return [r for r in records if (_time(r) is None or _time(r) >= floor)]
 
     def read(self) -> list[dict[str, Any]]:
         now = self.clock()
@@ -413,27 +412,22 @@ class StoreTape:
             return []
         self._next = now + self.interval_s
         self.polled, self.error = True, None
-        started, out, gets, lists = self.clock(), [], 0, 0
+        started, out, gets = self.clock(), [], 0
         self.reads += 1
         try:
             if not self.tailed:
                 self._tail()
                 return []
-            if not self.queue or self.reads % self.discover_polls == 0:
+            if not self.cursors or self.reads % self.discover_polls == 0:
                 self._discover()
-            while self.queue and gets < self.gets_per_poll and lists < STORE_LISTS_PER_POLL \
-                    and self.clock() - started < self.budget_s:
-                inc = self.queue[0]
-                lists += 1
-                self.requests += 1
-                keys = sorted(str(k) for k in self.objects.list(f"{SYNCER_TAPES}{inc}/",
-                                                                start_after=self.cursors.get(inc, ""))
-                              if str(k).endswith(".jsonl") and str(k) > self.cursors.get(inc, ""))
-                if not keys:
-                    if len(self.queue) > 1:
-                        self.queue.pop(0)  # a newer syncer incarnation took over: read it from its start
-                        continue
+            order = sorted(self.cursors, key=lambda i: (-self.grew.get(i, -1), self.listed.get(i, -1), i))
+            for inc in order:
+                if gets >= self.gets_per_poll or self.clock() - started >= self.budget_s:
                     break
+                self.listed[inc] = self.reads
+                keys = self._chunks(inc, self.cursors[inc])
+                if keys:
+                    self.grew[inc] = self.reads
                 for key in keys:
                     if gets >= self.gets_per_poll or self.clock() - started >= self.budget_s:
                         break
@@ -442,10 +436,7 @@ class StoreTape:
                     data = self.objects.read(key)
                     self.cursors[inc] = key
                     if data:
-                        out += _records(data if isinstance(data, bytes) else str(data).encode())
-                else:
-                    continue
-                break
+                        out += self._records_of(inc, data)
         except Exception as error:  # noqa: BLE001 - what was read is kept; the rest at the next read
             self.error = f"{type(error).__name__}: {error}"[:300]
         return out
@@ -468,21 +459,22 @@ class StragglerWatch:
     the signals for the islands held running. A read that fails is logged once per stretch
     of failures and tried again at the next poll. :meth:`notices` hands the controller
     ``(event, reason)`` pairs to write: once the syncer recorded something about this launch's
-    islands (a join, or a merge that merged or expected one), :data:`QUIET_POLLS` reads in a
-    row without any record are said once (:data:`UNAVAILABLE_EVENT`), and the next record read
+    islands (a join, or a merge that merged or expected one), ``quiet_s`` (:func:`quiet_window_s`)
+    without any record read is said once (:data:`UNAVAILABLE_EVENT`), and the next record read
     takes it back (:data:`AVAILABLE_EVENT`). A fleet whose trainers start slowly is never said
     to be unavailable: nothing is counted before that first record."""
 
-    def __init__(self, source: Any, *, cycles: int = DEFAULT_CYCLES, since: float | None = None,
-                 log: Callable[[str], None] | None = None, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, source: Any, *, cycles: int = DEFAULT_CYCLES, quiet_s: float = QUIET_MIN_S,
+                 log: Callable[[str], None] | None = None, clock: Callable[[], float] = time.monotonic) -> None:
         import sys
 
         self.source = source
-        self.tracker = StragglerTracker(cycles=int(cycles), since=since, clock=clock)
+        self.tracker = StragglerTracker(cycles=int(cycles))
         self.log = log or (lambda m: print(m, file=sys.stderr, flush=True))
+        self.quiet_s, self.clock = float(quiet_s), clock
         self._failing = False
         self._seen = False  # a record about one of this launch's islands was read
-        self._quiet = 0  # reads in a row without a record since then
+        self._last: float | None = None  # when a record was last read, once seen
         self._said = False  # the silence was said (UNAVAILABLE_EVENT) and not taken back yet
         self._notices: list[tuple[str, str]] = []
 
@@ -515,19 +507,19 @@ class StragglerWatch:
             self.tracker.feed(record)
         islands = {int(k) for k in running} | {k for k, s in self.tracker.islands.items() if s.token is not None}
         self._seen = self._seen or any(self._about(r, islands) for r in records)
-        if records:
-            self._quiet = 0
+        now_q = self.clock()
+        if records and self._seen:
+            self._last = now_q
             if self._said:
                 self._said = False
                 self._notices.append((AVAILABLE_EVENT, f"syncer records read again from {self.source.label}"))
-        elif self._seen and running and getattr(self.source, "polled", True):
-            self._quiet += 1
-            if self._quiet == QUIET_POLLS and not self._said:
-                self._said = True
-                why = (f"no syncer record read from {self.source.label} in {QUIET_POLLS} reads; no straggler is "
-                       "reported until the syncer's tape is read again")
-                self.log(f"[launcher] WARNING: island straggler watch: {why}")
-                self._notices.append((UNAVAILABLE_EVENT, why))
+        elif (self._seen and running and getattr(self.source, "polled", True) and self._last is not None
+              and now_q - self._last >= self.quiet_s and not self._said):
+            self._said = True
+            why = (f"no syncer record read from {self.source.label} in {self.quiet_s:g} s; no straggler is "
+                   "reported until the syncer's tape is read again")
+            self.log(f"[launcher] WARNING: island straggler watch: {why}")
+            self._notices.append((UNAVAILABLE_EVENT, why))
         return self.tracker.check(running, now=now, grace_s=grace_s)
 
     def notices(self) -> list[tuple[str, str]]:
@@ -552,14 +544,26 @@ class UnavailableWatch:
 
 
 def tape_source(*, local_tape: str | os.PathLike[str] | None = None, local_offset: int = 0,
-                objects: Any = None) -> Any:
+                objects: Any = None, since: float | None = None) -> Any:
     """The syncer tape this controller can read: the local file of a syncer on this host,
     else the run store's copy; None when neither is there."""
     if local_tape:
         return FileTape(local_tape, offset=local_offset)
     if objects is not None:
-        return StoreTape(objects)
+        return StoreTape(objects, since=since)
     return None
+
+
+def quiet_window_s(args: Any, *, upload_s: float = 0.0) -> float:
+    """How long the syncer's tape may be silent before that is said: two of its longest rounds
+    (a round ends at its soft deadline, else at its quorum timeout: ``--rl-elastic-quorum-timeout-s``
+    or the syncer's default) and two upload intervals of its store copy (``upload_s``; 0 for a
+    tape on this host), at least :data:`QUIET_MIN_S`."""
+    from .syncer import SYNCER_DEFAULT_QUORUM_TIMEOUT_S, _rl_quorum_timeout_s
+
+    soft = getattr(args, "rl_sync_soft_deadline_s", None)
+    round_s = float(soft) if soft else float(_rl_quorum_timeout_s(args) or SYNCER_DEFAULT_QUORUM_TIMEOUT_S)
+    return max(QUIET_MIN_S, 2.0 * round_s + 2.0 * max(0.0, float(upload_s or 0.0)))
 
 
 def watch_for(args: Any, *, local_tape: str | os.PathLike[str] | None = None, local_offset: int = 0,
@@ -580,14 +584,19 @@ def watch_for(args: Any, *, local_tape: str | os.PathLike[str] | None = None, lo
     if cycles == 0:
         say("[launcher] island straggler watch off (--rl-island-straggler-cycles 0)")
         return UnavailableWatch("turned off (--rl-island-straggler-cycles 0)")
-    source = tape_source(local_tape=local_tape, local_offset=local_offset, objects=objects)
+    source = tape_source(local_tape=local_tape, local_offset=local_offset, objects=objects, since=time.time())
     if source is None:
         why = no_source or "no syncer tape to read here (a syncer on this host, or the run store's tapes/syncer/)"
         say(f"[launcher] island straggler watch off: {why}")
         return UnavailableWatch(why)
     say(f"[launcher] island straggler watch: an island none of whose pushes is merged in {cycles} merge "
         f"cycle(s) is reported ({EVENT}); syncer tape {source.label}")
-    return StragglerWatch(source, cycles=cycles, since=time.time(), log=log)
+    upload_s = 0.0
+    if isinstance(source, StoreTape):
+        from ..rl.engine.tape_upload import DEFAULT_INTERVAL_S, upload_interval_s
+
+        upload_s = upload_interval_s() or DEFAULT_INTERVAL_S
+    return StragglerWatch(source, cycles=cycles, quiet_s=quiet_window_s(args, upload_s=upload_s), log=log)
 
 
 def signal_fields(signal: Straggler, action: str | None) -> dict[str, Any]:

@@ -438,7 +438,7 @@ def test_a_stuck_island_relaunched_mid_run_is_watched_over_the_run_store(syncer_
     syncer launch's uploaders copy it chunk by chunk (``tapes/syncer/<incarnation>/``). The
     store also holds an earlier syncer's history in which island 1 missed 40 merges: it is
     never counted. Island 1 stops pushing and is reported once; then one of its ranks fails,
-    its controller relaunches it (cleared: relaunched); the new incarnation joins again
+    its controller relaunches it (cleared: recovering); the new incarnation joins again
     (catch-up) and stays silent: a new launch is not counted before its first merged push for
     up to its recover timeout, so it is reported again only after that grace and N merge cycles
     more; then it pushes and the mark is cleared. Island 0 is never touched."""
@@ -473,9 +473,12 @@ def test_a_stuck_island_relaunched_mid_run_is_watched_over_the_run_store(syncer_
 
     def watch(argv, island_states):
         w = launcher._island_straggler_watch(_launch_args(argv), island_states, None)
-        # a store read every 0.5 s, not every 30 s: QUIET_POLLS reads (5 s) stay longer than the
-        # 2 s quorum deadline between merges, as 10 x 30 s does against a real run's merges
+        # a store read every 0.5 s, not every 30 s, so the case runs in seconds (the uploaders
+        # copy a chunk every 0.3 s). The silence that is said is derived from the launch's argv
+        # (no soft deadline there: two rounds of the 900 s default quorum timeout and two 30 s
+        # uploads), far longer than this case, so no unavailable notice is written here
         w.source.interval_s = 0.5
+        assert w.quiet_s == st.quiet_window_s(_launch_args(argv), upload_s=30.0) >= st.QUIET_MIN_S
         watches[int(argv[argv.index("--rl-fleet-learner-id") + 1])] = w
         return w
 
@@ -596,7 +599,7 @@ def test_a_stuck_island_relaunched_mid_run_is_watched_over_the_run_store(syncer_
     assert first[2]["last_merged_step"] is not None  # its own stretch, not the history's 40 merges
     assert first[2]["newest_step"] - first[2]["last_merged_step"] >= CYCLES * P
     relaunched, back = launches.logs[1].kinds(st.CLEARED_EVENT)
-    assert relaunched[2]["reason"] == "relaunched" and back[2]["reason"] == "a push of it is merged again"
+    assert relaunched[2]["reason"] == "recovering" and back[2]["reason"] == "a push of it is merged again"
     steps = _outer_steps(tape.read_text())
     joins = [r for r in _records(tape) if r.get("kind") == "pool_join" and int(r["island_id"]) == 1
              and r.get("catch_up") and r["base_version"] <= second[2]["newest_step"]]

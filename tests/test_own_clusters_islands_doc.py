@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import types
 from pathlib import Path
 
 from test_fleet_island_changes import fleet_store  # noqa: F401 - fixture
@@ -39,7 +40,12 @@ def test_the_section_names_the_code_s_flags_and_events():
     for name in (st.EVENT, st.CLEARED_EVENT, st.UNAVAILABLE_EVENT, st.AVAILABLE_EVENT, st.WAIT,
                  st.SYNCER_TAPES.rstrip("/"), "controller restarted"):
         assert name in text
-    assert f"{st.QUIET_POLLS} reads in a row" in text and f"every {st.STORE_POLL_S:g} s" in text
+    assert f"at least {st.QUIET_MIN_S / 60:g} minutes" in text and f"every {st.STORE_POLL_S:g} s" in text
+    from yeto.launch.syncer import SYNCER_DEFAULT_QUORUM_TIMEOUT_S
+
+    defaults = st.quiet_window_s(types.SimpleNamespace(), upload_s=st.STORE_POLL_S)
+    flat = " ".join(text.split())
+    assert f"quorum timeout of {SYNCER_DEFAULT_QUORUM_TIMEOUT_S} s: with the defaults, {defaults / 60:g} minutes" in flat
     assert f"at most {st.STORE_GETS_PER_POLL} chunks" in text and f"every {st.STORE_DISCOVER_POLLS} reads" in text
     assert f"up to {st.CLOCK_SKEW_S / 60:g} minutes before" in text
     assert "(`--recover-timeout`" in text and "catch-up grace ran out" in text  # a new launch's grace
