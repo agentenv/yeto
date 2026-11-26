@@ -880,6 +880,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     clusters: list[str] = []
     sky_storages: dict[str, str] = {}  # bucket sky creates -> its island cluster (sky_storage_ledger)
     controller = None
+    fleet_log = None  # dashboard.fleet.FleetLog of the run (its store copy is stopped at the end)
     teardown_unverified = False
     run_started_unix = time.time()  # Modal rows created after this are this run's app
     # Every billed resource of this run goes into its crash-safe ledger; the cost guard
@@ -1286,6 +1287,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         sky_sdk_ops = SkySDKOps()
         # the failure-path teardown verifies every node instance
         sky_sdk_ops.nodes_by_cluster = dict(nodes_by_cluster)
+        # built before the controller: the finally block stops its store copy even when the
+        # controller cannot be built
+        fleet_log = _dashboard_fleet_log(args, tasks, results,
+                                         objects=None if island_states is None else island_states.objects)
         controller = FleetController(
             learners={name: (tasks[name], job_id) for name, (job_id, _h) in results.items()},
             syncer=None if syncer_cluster is None else (syncer_cluster, syncer_task, syncer_job),
@@ -1314,7 +1319,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             no_recover=verda["no_recover"] if verda else (),
             instance_guard=verda["guard"] if verda else None,
             on_rename=_rename_hook(clusters, on_clusters, [] if head_mode else [syncer_cluster]),
-            fleet_log=_dashboard_fleet_log(args, tasks, results),
+            fleet_log=fleet_log,
             syncer_finished_probe=local_syncer.finished if head_mode else None,
             left_pool_probe=(
                 (lambda name: name in event_collectors and event_collectors[name].left_pool)
@@ -1690,6 +1695,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     f"Terminate them from the cloud console, then: yeto down {prefix}",
                     file=sys.stderr,
                 )
+        if fleet_log is not None:
+            # the store copy of fleet.jsonl: its last lines (the island_stop just written
+            # included), bounded; a store that fails is a WARN, never the exit code
+            fleet_log.close()
         if ssh_islands is not None:
             ssh_islands.close()  # streams and locks; a kept island is reattached by the next launch
         if island_states is not None:

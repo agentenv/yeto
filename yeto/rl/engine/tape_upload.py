@@ -55,8 +55,10 @@ def safe_part(name: Any) -> str:
     return _SAFE.sub("_", str(name)).strip("._") or "_"
 
 
-def chunk_key(island: str, incarnation: str, seq: int) -> str:
-    return f"{TAPES_PREFIX}/{safe_part(island)}/{safe_part(incarnation)}/{seq:08d}.jsonl"
+def chunk_key(island: str, incarnation: str, seq: int, prefix: str = TAPES_PREFIX) -> str:
+    """``<prefix>/<island>/<incarnation>/<seq>.jsonl`` (``prefix``: ``tapes`` for the event
+    tapes, ``fleet/log`` for the launcher's ``fleet.jsonl``, ``dashboard.fleet_store``)."""
+    return f"{prefix}/{safe_part(island)}/{safe_part(incarnation)}/{seq:08d}.jsonl"
 
 
 def final_flush_s(environ: Any = None) -> float:
@@ -112,8 +114,10 @@ def upload_interval_s(spec_value: Any = None, environ: Any = None) -> float | No
 
 class TapeUploader:
     def __init__(self, objects: Any, tape: str | os.PathLike[str], *, island: str, incarnation: str,
-                 interval_s: float = DEFAULT_INTERVAL_S, log: Callable[[str], None] = print) -> None:
+                 interval_s: float = DEFAULT_INTERVAL_S, log: Callable[[str], None] = print,
+                 prefix: str = TAPES_PREFIX) -> None:
         self.objects = objects
+        self.prefix = prefix
         self.tape = Path(tape)
         self.island = str(island)
         self.incarnation = str(incarnation)
@@ -148,7 +152,7 @@ class TapeUploader:
                 return 0  # a torn last line waits for its newline
             data = data[: end + 1]
             try:
-                self.objects.write(chunk_key(self.island, self.incarnation, self.seq), data)
+                self.objects.write(chunk_key(self.island, self.incarnation, self.seq, self.prefix), data)
             except Exception as error:  # noqa: BLE001 - observation must never stop the island
                 self.failures += 1
                 self.log(f"[tape-upload] {self.tape.name}: {type(error).__name__}: {error}"[:300])

@@ -5,6 +5,12 @@
 accumulated wall clock and estimated $ (price table x GPUs x wall clock;
 an unpriced island has ``null`` amounts, never 0). Writing is best-effort:
 a failure is printed and never reaches the controller.
+
+``island_id`` is the island's learner id when the launch knows it (an island launch of a
+fleet launched island by island: ``--rl-fleet-learner-id``, the id the syncer tape names it
+by; :func:`from_env` ``learner_ids``), else the ``-l<m>`` index of its name (``m``: its
+position in the launch, the learner id of every other launch). With a run store the file
+is also copied there in chunks (:mod:`.fleet_store`), so the events survive the host.
 """
 
 from __future__ import annotations
@@ -25,6 +31,10 @@ _ISLAND_INDEX = re.compile(r"-l(\d+)(?:-|$)")
 def island_id_of(name: str) -> int | None:
     m = _ISLAND_INDEX.search(name or "")
     return int(m.group(1)) if m else None
+
+
+def _learner_id(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def meta_from_task(task: Any) -> dict:
@@ -80,6 +90,22 @@ class FleetLog:
         self.open_since: dict[str, float] = {}
         self.closed_s: dict[str, float] = {name: 0.0 for name in islands}
         self.last_tick: float | None = None
+        self.uploader: Any = None  # fleet_store: the chunked copy into the run store (None: local only)
+
+    def island_id(self, name: str) -> int | None:
+        """The island's learner id when its meta carries one, else the index in its name."""
+        learner = _learner_id(self.meta.get(name, {}).get("learner_id"))
+        return learner if learner is not None else island_id_of(name)
+
+    def close(self, timeout_s: float | None = None) -> bool:
+        """Stop the store copy after a bounded final upload (True: nothing left behind, or
+        no copy). Never raises."""
+        uploader, self.uploader = self.uploader, None
+        if uploader is None:
+            return True
+        from .fleet_store import FINAL_UPLOAD_S, stop_uploader
+
+        return stop_uploader(uploader, FINAL_UPLOAD_S if timeout_s is None else timeout_s)
 
     def _write(self, rec: dict) -> None:
         try:
@@ -102,7 +128,7 @@ class FleetLog:
         elif kind in ("island_lost", "island_stop") and name in self.open_since:
             self.closed_s[name] += now - self.open_since.pop(name)
         m = self.meta[name]
-        rec = {"event": kind, "time_unix": now, "island": name, "island_id": island_id_of(name),
+        rec = {"event": kind, "time_unix": now, "island": name, "island_id": self.island_id(name),
                **{k: m.get(k) for k in ("cloud", "region", "gpu", "gpus", "price_key")},
                **{k: m[k] for k in ("cpus", "memory_gib") if m.get(k) is not None}, **fields}
         self._write(rec)
@@ -118,7 +144,7 @@ class FleetLog:
         for name in self.meta:
             rate = self.rate(name)
             wall_h = self.wall_s(name, now) / 3600.0
-            rows.append({"island": name, "island_id": island_id_of(name), "rate_usd_h": rate,
+            rows.append({"island": name, "island_id": self.island_id(name), "rate_usd_h": rate,
                          "wall_h": wall_h, "cost_usd": rate * wall_h if rate is not None else None,
                          "running": name in self.open_since})
         priced = [r["cost_usd"] for r in rows if r["cost_usd"] is not None]
@@ -135,11 +161,16 @@ class FleetLog:
         return None
 
 
-def from_env(path: str | os.PathLike, tasks: dict[str, Any]) -> FleetLog:
+def from_env(path: str | os.PathLike, tasks: dict[str, Any], *, learner_ids: dict[str, int] | None = None) -> FleetLog:
     """Production constructor: price table/budget from YETO_DASHBOARD_PRICES /
-    YETO_DASHBOARD_BUDGET_USD (both optional)."""
+    YETO_DASHBOARD_BUDGET_USD (both optional). ``learner_ids``: island name -> learner id
+    when the launch's position is not the id (module doc)."""
     budget = os.environ.get("YETO_DASHBOARD_BUDGET_USD")
-    return FleetLog(path, {name: meta_from_task(t) for name, t in tasks.items()},
+    meta = {name: meta_from_task(t) for name, t in tasks.items()}
+    for name, learner in (learner_ids or {}).items():
+        if name in meta and _learner_id(learner) is not None:
+            meta[name]["learner_id"] = int(learner)
+    return FleetLog(path, meta,
                     prices=load_prices(os.environ.get("YETO_DASHBOARD_PRICES") or None),
                     budget_usd=float(budget) if budget else None)
 

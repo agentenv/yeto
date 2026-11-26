@@ -2593,8 +2593,14 @@ def _cmd_down_clusters(args) -> int:
 def _close_fleet_islands(name: str) -> list[str]:
     try:
         from .dashboard.fleet import FLEET_FILE, close_open_islands, teardown_stop_reason
+        from .dashboard.fleet_store import run_identity, upload_appended
 
-        return close_open_islands(runs.run_dir(name) / FLEET_FILE, teardown_stop_reason())
+        path = runs.run_dir(name) / FLEET_FILE
+        before = path.stat().st_size if path.is_file() else 0
+        closed = close_open_islands(path, teardown_stop_reason())
+        if closed:  # a fleet.jsonl copied into the run store gets these lines too (WARN on failure)
+            upload_appended(path, before, run=run_identity(name))
+        return closed
     except Exception as e:  # noqa: BLE001 - telemetry never fails a down
         print(f"[yeto] fleet.jsonl: island_stop not written ({e})", file=sys.stderr)
         return []

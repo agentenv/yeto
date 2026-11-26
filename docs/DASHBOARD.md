@@ -205,6 +205,48 @@ The head-side `fleet.jsonl` is written by `FleetController`
 and the budget can be passed to the launcher with the environment variables
 `YETO_DASHBOARD_PRICES` / `YETO_DASHBOARD_BUDGET_USD`.
 
+Each record's `island_id` is the island's learner id, the id the syncer tape uses.
+In a fleet launched island by island (`fleet.launch: per_island`) every island
+launch runs one island, island 0 of its launch (`<prefix>-l0-<cloud>`); its records
+carry the fleet learner id (`--rl-fleet-learner-id`), so the islands of the fleet
+stay apart on the page. Every other launch keeps the `-l<m>` index of the island
+name, as before.
+
+A launch that keeps its island records in the run store (an island fleet, or
+`--island-lifecycle on` with `--rl-checkpoint-store`) also copies `fleet.jsonl`
+there, in chunks, every 30 s (`YETO_RL_TAPE_UPLOAD_S`, 0 turns it off):
+`fleet/log/<lane>/<host>-p<pid>-<nonce>-<UTC start>/<seq>.jsonl`, lane `l<k>` for
+the island launch of learner `k` and `fleet` for a launch of the whole fleet. Every
+launcher process writes its own folder (the random nonce keeps two launchers of one
+host apart), so the events of a control plane that moved to another host, or of a
+host that was lost, stay in the store. Only this run's part of the local file is
+copied: `fleet.store.json` next to it records the run (its registry start), the
+store and the offset the copy starts at. A restarted launcher of the run goes on
+from that offset; a later run of the name starts at the file's end, and a launch
+that does not copy the file voids the record (no store from the file's end on).
+`yeto down` copies the `island_stop` lines it appends for islands a killed
+launcher left open, only into the store the record of this run names. The copy is observation only: a failed upload is a
+`WARN` line, retried with the next chunk, and the launcher's end (and `yeto down`)
+waits at most 15 s for the last one. A launch of one trainer island uploads
+nothing, as before. `--store` reads every folder next to the island tapes, and a
+record that is also in a local `fleet.jsonl` given with `--tapes` counts once. The
+page folds an island's lifecycle records by their own time, whatever the order it
+reads them in: a host's older records that arrive after the newer host's (its run
+directory has only its own lines) add their closed ready -> lost intervals and do
+not change the island's current state. Records of one source (one local file, one
+launcher folder in the store) fold in the order they were written, so a host clock
+stepped back (NTP) folds as before. A host clock that is off by more than the gap
+between two hosts' records still orders those records by that clock, and records of
+two hosts with the same `time_unix` fold in the order they are read (a known limit).
+For tools that read the file itself:
+
+```
+python -m yeto.dashboard.fleet_store merge --store s3://<bucket>/runs/<run> \
+    [--fleet-log ~/.yeto/runs/<run>/fleet.jsonl ...] --out fleet.merged.jsonl
+```
+
+writes one `fleet.jsonl`, in time order, each record once.
+
 ## Alert rules and thresholds
 
 | Rule | Default threshold | Level |
