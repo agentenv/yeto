@@ -96,8 +96,8 @@ def test_an_island_that_trained_keeps_its_policy_ages_and_read_position(tmp_path
 
 
 def test_a_single_trainer_that_never_trained_keeps_na(tmp_path):
-    """No fleet: the trainer chips, the backlog legend and a one-instant release timeline render
-    as before ("n/a", three time labels)."""
+    """No fleet: the trainer chips and the backlog legend render as before ("n/a"); a one-instant
+    release timeline draws one time label, as on every page."""
     t0 = 1_000_000.0
     r = Reducer(run="one")
     r.feed({"event": "rl_driver_start", "island_id": 0, "time_unix": t0, "placement": "colocated"})
@@ -110,7 +110,7 @@ def test_a_single_trainer_that_never_trained_keeps_na(tmp_path):
     assert "no trained rounds" in out["aTrainer"] and "policy ages <b>n/a</b>" in out["aTrainer"]
     assert "not trained yet" not in out["aTrainer"] and "n/a: trained groups" in out["aTrainer"]
     assert "read position n/a" in out["legBacklog"] and "not read yet" not in out["legBacklog"]
-    assert len([x for x in out["relTexts"] if re.fullmatch(r"\d\d:\d\d:\d\d", x)]) == 3
+    assert len([x for x in out["relTexts"] if re.fullmatch(r"\d\d:\d\d:\d\d", x)]) == 1
     # the run KPIs: a step time no trainer reported is not called "not trained yet" without a fleet
     assert not re.search(r'step p50</div><div class="kv[^"]*"[^>]*>not trained yet<', out["rKpis"])
 
@@ -170,8 +170,9 @@ def test_a_running_pool_whose_replacement_is_not_granted_waits_for_capacity(tmp_
 
 
 def test_a_release_timeline_of_one_instant_has_one_time_label(tmp_path):
-    """A fleet island whose timeline holds one instant (its single release, as a trainer that
-    failed right after releasing the base weights): one time label, not three drawn over each other."""
+    """A timeline holding one instant (a fleet island's single release, as a trainer that failed
+    right after releasing the base weights; the same on a single-trainer page): one time label,
+    not three drawn over each other."""
     r = _never_trained()
     t = r.max_ts
     r.feed({"event": "rl_policy_released", "island_id": 0, "time_unix": t, "policy_version": 1, "local_version": 1,

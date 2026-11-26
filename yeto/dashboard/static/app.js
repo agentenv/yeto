@@ -703,7 +703,7 @@ function aComp(A,ctx){
     '<div class="note">alert cards fire on a low summary_ok share and on many compacted trials ending truncated (docs/DASHBOARD.md, compaction_* thresholds); summary tokens n/a = the samples do not report summary_tokens; — = no trial was compacted</div>';
 }
 function tAxis(s,t0,t1,sx,H){
-  if(fleetOn()&&!(t1-t0>=1)){el("text",{x:sx(t0),y:H-6,"text-anchor":"start"},s).textContent=clock(t0);return}  // one instant (a fleet island's single release): one label, not three on top of each other
+  if(!(t1-t0>=1)){el("text",{x:sx(t0),y:H-6,"text-anchor":"start"},s).textContent=clock(t0);return}  // one instant (a single release or backlog point): one label, not three on top of each other
   [t0,(t0+t1)/2,t1].forEach(function(t,i){el("text",{x:sx(t),y:H-6,"text-anchor":["start","middle","end"][i]},s).textContent=clock(t)})}
 function blChart(box,leg,b){
   box.innerHTML="";leg.innerHTML="";
