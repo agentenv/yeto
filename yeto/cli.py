@@ -811,6 +811,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "learner down on its first failure; the syncer is always recovered)",
     )
     infra.add_argument(
+        "--spare-max-wait-s",
+        type=float,
+        default=None,
+        help="a resident ssh: trainer island with trainer-spare nodes that lost a node waits at most this "
+        "long for a free spare before it is given up (default 86400: 24 h)",
+    )
+    infra.add_argument(
         "--controller-poll",
         type=int,
         default=30,

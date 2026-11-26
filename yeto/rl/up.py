@@ -3880,11 +3880,16 @@ class Run:
 
         rows = (self.state.get("fleet_stops") or {}).get("islands") or ()
         stopped = [r for r in rows if r.get("stop_reason")]
+        # islands waiting for a spare node count as absent (up_fleet_runtime.waiting_spare)
+        waiting = self.fleet_rt().waiting_spare() if self.fleet_plan() is not None else {}
+        absent = [*stopped, *({"index": k, "name": self.fleet_plan().islands[k].name,
+                               "stop_reason": f"waiting for a spare node ({why})"}
+                              for k, why in sorted(waiting.items()))]
         minimum = int(getattr(self.fleet_plan(), "min_islands", 1) or 1)
         head = ("every island stopped" if len(stopped) == len(rows)
-                else f"{len(rows) - len(stopped)} island(s) run, fewer than fleet.min_islands {minimum}")
+                else f"{len(rows) - len(absent)} island(s) run, fewer than fleet.min_islands {minimum}")
         why = head + " (" + ", ".join(f"island {r['index']} ({r['name']}): {r['stop_reason']}"
-                                      for r in stopped) + ")"
+                                      for r in absent) + ")"
         event = "fleet_all_islands_stopped" if len(stopped) == len(rows) else "fleet_min_islands_stopped"
         self.flag_stop(reason.removeprefix(STOP_REASON_PREFIX), "fleet_stop", event, why,
                        grace_s=self.starvation_config.stop_grace_s, poll_s=poll_s,

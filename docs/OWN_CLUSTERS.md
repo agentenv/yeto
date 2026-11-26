@@ -252,8 +252,9 @@ nodes:
 Releasing kept leases: run `yeto cleanup --run <run>`. After it confirmed the stop of
 the run's islands on their nodes, it releases the leases those islands kept (only the
 ones of that run, and only when kept or run out). A node that stays unreachable keeps
-its lease kept; see "Spare nodes" (`yeto cluster release-node`) once that section is
-in this guide. Until then, release such a node by hand:
+its lease kept. A node a spare-pool island lost is quarantined: release it with
+`yeto cluster release-node` (see "Spare nodes" below). Release any other such node by
+hand:
 
 1. Make sure nothing of the run is left on the node: no `yeto-<run>-*` or
    `yeto-sampler-*` containers (`docker ps`, `podman ps`, with `sudo -n` too where
@@ -491,3 +492,197 @@ constraint.
   it was. `yeto cluster probe` and `yeto cluster check` always print the note.
 
 To drop the rule, delete the `fabric_group` lines.
+
+## Spare nodes
+
+A resident `ssh:` trainer island can keep running after one of its nodes is lost,
+if its inventory lists one or more spare nodes. A spare has the role
+`trainer-spare`:
+
+```yaml
+nodes:
+  - {name: b300-0, roles: [trainer], fabric_group: A, ...}
+  - {name: b300-1, roles: [trainer], fabric_group: A, ...}
+  - {name: b300-5, roles: [trainer-spare], fabric_group: A, ...}   # same card, card count, family, runtime
+```
+
+A spare is not an island node. The island still takes exactly as many `trainer`
+nodes as its `--gpu` says, so an inventory without spares behaves exactly as
+before. Every spare must match the island's nodes in device family, CPU
+architecture, card, card count, runtime and `store_env_file`, and it must have a
+rendezvous `address`. `yeto launch --dry-run` refuses a spare that cannot take a
+node's place, and lists the spares and their fabric groups under the island's
+`spares`. A device family without a node health checker (see "Node health" in
+`docs/NODE_RUNTIME.md`) never gets a spare: its spares do not apply at all. The dry
+run and the start print a WARN, and a failed island is relaunched on its own nodes,
+as without spares.
+
+### When a node is lost
+
+A node is lost when either of these holds:
+
+- its log stream over SSH ended, and it then failed `unreachable_polls` SSH checks
+  in a row (3 by default);
+- its node health check was bad twice in a row.
+
+An SSH check that fails while the node's stream still flows is not a loss on its
+own: the island fails, and the relaunch first stops it on every node. A node whose
+stop is not confirmed (on a power loss, rank 0 usually exits first and the dead
+node's stream only ends minutes later) is checked with `ssh true` on each relaunch
+poll; twice `unreachable_polls` checks in a row without an answer make it lost. A
+node that answers again is relaunched on, as before.
+
+A network partition is enough: a node that cannot be reached for about 2 to 5
+minutes (the stream's keepalive timeout plus the checks) is lost and quarantined,
+even if it was healthy. Each check of a waiting island tries the stops such a node
+still owes again, so its old container stops once it answers. Nothing lifts a
+quarantine on its own; release the node by hand (below) once it is reachable again.
+
+When a node is lost, the island writes `island_node_lost` and stops on its other
+nodes. The lost node is not waited for; one that still answers (a health loss) is
+stopped at once in the background. The node is quarantined:
+`fleet/nodes/<name>/quarantine.json` in the run store records why, which stop the
+node still owes, and the run's lease holder. With a `lease_store`:
+
+- the record is also written to `<lease_store>/nodes/<name>/quarantine.json`, next to
+  the node's `lease/`. Every run's trainer pick and spare pick leave the node out
+  until it is released. The pick prints which run and island quarantined each such
+  node and how to release it, once and on every waiting line. A new run whose
+  inventory lists no other free trainer node waits for one (`--rl-node-lease-wait-s`)
+  and then fails with the same note; it does not use a spare in its place;
+- a record that cannot be read (the store fails, or the record is not JSON) counts
+  as a quarantine, with the reason `quarantine record unreadable: ...`; if the store
+  cannot list the records, each node's record is read instead. A running island's
+  node is not taken as lost on such a read failure;
+- the run keeps its lease on the node (`kept: true`, no longer renewed) while it is
+  quarantined, also across a restarted launcher;
+- once a spare took a node's place, the run dir's lease record (`node-leases.json`)
+  names the spare. It is written before the island starts on the spare, and put back
+  if that start fails. A restarted launcher leases the island's current nodes, taken
+  from the island's spares journal (`ssh-islands/<island>-spares.json` in the run
+  dir), so it follows a replacement the old launcher stopped in the middle of. Every
+  start, reattach included, gives back the leases of old nodes the island no longer
+  runs on; an old node another run holds by then does not stop the island.
+
+A stop the node still owes stays in the run's ledger as a row of its own, priced as
+that node only, so `yeto cleanup --run <run>` still tries to stop it there. A lost
+node whose own stop was confirmed owes nothing for that incarnation and has no such
+row; picked again later, a loss of its new incarnation owes its stop again.
+
+### Which spare is taken
+
+The spare and the nodes that stay are placed together as one island. The nodes that
+stay never move; the spares are tried by node name, and the first one that meets
+every condition below is taken:
+
+- it is in the fabric group of the nodes that stay (`fabric_group`); a node whose
+  group is `unavailable` takes no multi-node place;
+- its node health check ran and passes now; an answer over SSH is not enough;
+- no other island of the run holds it (`fleet/nodes/<name>/claim.json`, written
+  once with an exclusive create);
+- it is not quarantined, by this run or (with a `lease_store`) by another run. The
+  wait reason names the run and island of another run's quarantine and how to
+  release the node;
+- its cross-run lease is free, when the inventory names a `lease_store`.
+
+The claims need a run store with an atomic exclusive create (s3:// or r2:// with
+`If-None-Match`, or a local directory). A check-then-write store, such as the OSS
+relay, is refused: two islands could take one spare there.
+
+The health checks run before the pick, outside the launcher's lock, so the other
+islands' supervision is not held up. The pick then claims the node and reads its
+records again.
+
+The spare takes the lost node's place in the same layout. If rank 0 was lost, the
+spare becomes rank 0 and the rendezvous address moves with it. The island's next
+incarnation starts under the same learner id and resumes from that learner's newest
+checkpoint: its round cut (`island-cuts/island<k>/LATEST`), or else its newest
+policy release (`trainer<k>/policy-releases/` when its samplers follow it).
+`island_node_replaced` records the old node, the new node and the resume step. To
+the syncer this is a short absence followed by a re-JOIN: the island catches up to
+the newest outer weights before it merges again, and the other islands keep merging
+meanwhile.
+
+### No free spare: waiting and backoff
+
+If no spare qualifies, the island waits (`island_waiting_spare`, with the reason,
+e.g. `fabric group A has no free healthy spare node (...)`). It checks again after
+60 s, then 120 s, doubling up to 900 s, and writes `island_waiting_spare` again
+every hour with `elapsed_s`. While it waits, the fleet controller does not give it
+up on `--recover-timeout`.
+
+Two separate times apply while an island waits:
+
+| Setting | Default | What it decides |
+|---|---|---|
+| `fleet.waiting_absent_after_s` (run config) | 3600 s (1 hour) | Whether the fleet goes on. For this long after its wait began, the waiting island still counts toward `fleet.min_islands`; after that it counts as absent, and a fleet left with fewer than `min_islands` islands stops (its samplers stop billing with it). |
+| `--spare-max-wait-s` (launch) | 86400 s (24 hours) | When the island is given up: after this long its relaunch is refused and it is abandoned (also under a fixed roster). |
+
+So in a fleet with more islands than `min_islands`, an island can wait up to 24
+hours while the others train. A one-island fleet, or one with exactly `min_islands`
+islands, is not stopped the moment an island starts waiting, but it stops after 1
+hour of waiting. The wait's start is kept in the island's journal, so a restarted
+launcher keeps counting; it starts normally, the quarantined node is lost again,
+and the island goes on waiting.
+
+### Replacement limit
+
+An island may replace at most 3 nodes within 24 hours. On the next loss its
+relaunch is refused, `island_replacement_limit` lists every node it replaced, and
+the island is given up. The fleet then goes on if `fleet.min_islands` islands still
+run.
+
+### Releasing a quarantined node
+
+Once a lost node is repaired, put it back with:
+
+```bash
+yeto cluster release-node b300-1 --inventory inventory.yaml --store s3://RUN-STORE --dry-run   # what would run
+yeto cluster release-node b300-1 --inventory inventory.yaml --store s3://RUN-STORE
+```
+
+`--store` is the run's `--rl-checkpoint-store`. The command:
+
+1. checks the node: its health check must run and pass (an answer over SSH alone is
+   not enough). `--force` skips the check and prints a WARN; a device family without
+   a health checker needs it;
+2. runs the stops the node still owes and closes each owed ledger row. The ledger is
+   the run's (`runs/<run>/resources.jsonl` on the machine that ran the launcher); run
+   elsewhere, the command says where the row is. When the launcher picks the node
+   again, it runs the row's stop and closes the row (`released elsewhere`) only once
+   that stop succeeded, so the node is billed once and the old container is gone.
+   A quarantine record that cannot be read needs `--force`: the stops it owes are not
+   known, so check the node for the run's containers by hand first;
+3. gives up the run's lease on the node (with a `lease_store`). A kept lease ends at
+   once. A live one (the run's launcher still renews it) ends only after a probe over
+   SSH found nothing of the run on the node; a lease another run holds is not
+   touched;
+4. removes the quarantine record, in the run store and in the `lease_store`.
+
+`--dry-run` prints the record, the stops it would run, the records it would remove
+(in the run store and the `lease_store`) and what it would do with the lease.
+
+From then on any island may take the node again, including one waiting for a spare.
+If the check, a stop, the probe or the lease release fails, the node stays
+quarantined (exit 1). The launcher never releases a quarantined node on its own.
+
+The run's launcher may still be running during the release. It never writes a
+quarantine record back: a stop it confirmed is recorded as a marker of its own
+(`fleet/nodes/<name>/settled/`), and the release first writes `released.json`, with
+its time, next to the record in both stores. A stop the launcher confirms after the
+release therefore records nothing. The launcher reads the record again before each
+stop it retries, and skips a stop the record no longer owes. A confirmed stop removes
+its incarnation's pid file and leaves a `stopped` marker in its state dir, so a later
+stop of that incarnation (release-node, `yeto cleanup`) succeeds without signalling a
+process that reused the pid. A ledger row is closed only after its stop was confirmed.
+
+### Known limits
+
+- The K3.1 customer layout has no spare. Its PP3 x TP8 x CP2 x EP16 trainer takes all
+  48 cards of the 6 x 8 B300 nodes, so a lost node fails the island as before. To
+  keep spares, use smaller islands, e.g. two 2-node islands, one sampler node and
+  one spare node.
+- A network partition quarantines: a healthy node that cannot be reached for 2 to 5
+  minutes is lost and stays quarantined until `yeto cluster release-node`.
+- The layout is never shrunk: without a spare the island waits; it does not change
+  TP/PP/EP.

@@ -128,8 +128,12 @@ PLAN_OBJECT = f"{FLEET_DIR}/plan.json"  # the plan in the run store
 DISPENSE_DIR = f"{FLEET_DIR}/dispense"  # the fleet's task ledger root (store_dispense.FLEET_DISPENSE_DIR)
 DISPENSE_MODES = ("fleet", "island")
 FLEET_KEYS = frozenset({"trainer_argv", "dispense", "step_s", "sandbox_usd_per_h", "fixed_roster", "min_islands",
-                        "island_lease_s", "launch", "max_islands"})
+                        "island_lease_s", "launch", "max_islands", "waiting_absent_after_s"})
 DEFAULT_MIN_ISLANDS = 1
+# fleet.waiting_absent_after_s: an island waiting for a spare node (a resident ssh: island
+# that lost a node, yeto.launch.island_spares) counts as running for fleet.min_islands this
+# long, then as absent (its own give-up is --spare-max-wait-s, 24 h)
+DEFAULT_WAITING_ABSENT_AFTER_S = 3600.0
 LEGACY_PLAN = "a plan written before fleet.fixed_roster"  # its launch had the fixed roster
 # fleet.launch: how the trainers start. synced_group (default): one yeto launch of every
 # trainer and the syncer. per_island: one yeto launch of the syncer and one per trainer
@@ -285,6 +289,13 @@ class FleetPlan:
     roster_reason: str | None = None  # why the roster is fixed (fleet.fixed_roster, or the pool's precondition)
     launch: str = LAUNCH_SYNCED_GROUP  # fleet.launch
     max_islands: int | None = None  # per_island: the syncer's learner id limit (fleet.max_islands)
+    waiting_absent_after_s: float | None = None  # fleet.waiting_absent_after_s (None: the default)
+
+    @property
+    def absent_after_s(self) -> float:
+        """How long an island waiting for a spare node still counts for ``min_islands``."""
+        return float(DEFAULT_WAITING_ABSENT_AFTER_S if self.waiting_absent_after_s is None
+                     else self.waiting_absent_after_s)
 
     @property
     def per_island(self) -> bool:
@@ -296,7 +307,9 @@ class FleetPlan:
                "syncer": {"usd_per_h": self.syncer_usd_per_h,
                           **({"placement": dict(self.syncer_placement)} if self.syncer_placement else {})},
                "roster": {"fixed": self.fixed_roster, "min_islands": self.min_islands,
-                          "lease_s": self.island_lease_s, "reason": self.roster_reason},
+                          "lease_s": self.island_lease_s, "reason": self.roster_reason,
+                          **({"waiting_absent_after_s": self.waiting_absent_after_s}
+                             if self.waiting_absent_after_s is not None else {})},
                "islands": [i.to_json() for i in self.islands]}
         if self.per_island:  # a synced-group plan stays byte for byte what it was
             out.update(launch=self.launch, max_islands=self.max_islands)
@@ -385,7 +398,8 @@ class FleetPlan:
                    fixed_roster=bool(roster.get("fixed", False)),
                    min_islands=int(roster.get("min_islands") or DEFAULT_MIN_ISLANDS),
                    island_lease_s=roster.get("lease_s"), roster_reason=roster.get("reason"),
-                   launch=str(doc.get("launch") or LAUNCH_SYNCED_GROUP), max_islands=doc.get("max_islands"))
+                   launch=str(doc.get("launch") or LAUNCH_SYNCED_GROUP), max_islands=doc.get("max_islands"),
+                   waiting_absent_after_s=roster.get("waiting_absent_after_s"))
 
 
 def plan_of(cfg: dict[str, Any]) -> FleetPlan | None:
@@ -554,6 +568,19 @@ def roster_options(cfg: dict[str, Any]) -> tuple[bool, int, float | None]:
             raise _err("fleet.island_lease_s is the syncer lease of the island pool; a fixed roster "
                        "(fleet.fixed_roster: true) has none: drop one of the two")
     return fixed, int(minimum), lease
+
+
+def waiting_absent_after_s(cfg: dict[str, Any]) -> float | None:
+    """``fleet.waiting_absent_after_s`` as given (None: unset, the default
+    :data:`DEFAULT_WAITING_ABSENT_AFTER_S`): an island waiting for a spare node counts as
+    running for ``fleet.min_islands`` this long after its wait began, then as absent."""
+    section = cfg.get("fleet") if isinstance(cfg.get("fleet"), dict) else {}
+    raw = section.get("waiting_absent_after_s")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise _err(f"fleet.waiting_absent_after_s must be a number of seconds > 0 (got {raw!r})")
+    return _seconds(raw, "fleet.waiting_absent_after_s")
 
 
 def membership_flags() -> frozenset[str]:
@@ -1335,7 +1362,7 @@ def compile_fleet(cfg: dict[str, Any], *, strict_breakers: bool = True) -> tuple
                      syncer_placement=syncer_placement(argv).to_json(),
                      fixed_roster=roster.fixed, min_islands=roster.min_islands,
                      island_lease_s=roster.lease_s, roster_reason=roster.reason,
-                     launch=launch, max_islands=max_islands)
+                     launch=launch, max_islands=max_islands, waiting_absent_after_s=waiting_absent_after_s(cfg))
     out = copy.deepcopy({k: v for k, v in cfg.items() if k != PLAN_KEY})
     out["trainer"] = {"argv": argv, "usd_per_h": None if all(p is None for p in prices)
                       else float(sum(p or 0.0 for p in prices))}

@@ -194,7 +194,8 @@ def test_the_record_and_lock_hooks_run_before_each_order(monkeypatch):
         ("submit", name)) or f"rid-{name}")
     monkeypatch.setattr(modal_runner, "ModalOps", Ops)
     monkeypatch.setattr(modal_runner, "ModalIslandOps", IslandOps)
-    monkeypatch.setattr(tp, "start_resident_ssh", lambda args, tasks, names, *rest: log.append(
+    ssh_kw = {}
+    monkeypatch.setattr(tp, "start_resident_ssh", lambda args, tasks, names, *rest, **kw: ssh_kw.update(kw) or log.append(
         ("ssh start", tuple(sorted(names)))) or "ssh-ops")
     on_call = lambda name, call_id: None  # noqa: E731
     specs = [ClusterSpec("aws", "us-east-1", 1, 8, "H100"), ClusterSpec("verda", None, 1, 8, "B300"),
@@ -218,6 +219,7 @@ def test_the_record_and_lock_hooks_run_before_each_order(monkeypatch):
                    ("on_order", "r-l2"), ("spawn", "r-l2"),  # r-l3 is adopted: kept, never spawned
                    ("guard", "r-l4"), ("ssh start", ("r-l4",))]
     assert island_ops.on_call is on_call and island_ops.calls == {"r-l3": "call-kept"}
+    assert ssh_kw == {"island_index": {"r-l4": 4}, "num_islands": 5}  # its own checkpoint keys (spare nodes)
     assert prov.results["r-l2"] == ("call-2", None) and prov.results["r-l3"] == ("call-kept", None)
 
 

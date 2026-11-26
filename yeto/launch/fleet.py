@@ -83,6 +83,9 @@ class _RlStrictFailure:
     reason: str
 
 
+SPARE_RETRY_SAY_S = 900.0  # "relaunch attempt failed" while an island waits for a spare node: this often
+
+
 class RelaunchBlocked(Exception):
     """Raised by ``sky_ops.relaunch`` when the island must not be relaunched at all
     (not now, not on a later poll): e.g. its Modal app was stopped by a teardown.
@@ -608,6 +611,9 @@ class FleetController:
             if health is not None:  # the source's node health checks (yeto.hw.node_health)
                 fields.setdefault("health", health)
                 rec["health_recorded"] = self._health_key(health)
+            spares = self._spares_view(rec["name"])  # an ssh: island with spare nodes (else no field)
+            if spares is not None:
+                fields.setdefault("spares", spares)
             self.recorder.record(
                 rec["name"], state or self._unified_state(rec),
                 handle=lifecycle.handle_of(ref.source, rec["name"], rec["job_id"]),
@@ -665,6 +671,7 @@ class FleetController:
             if not self._island_stop(rec):
                 self._poll(rec, is_syncer=False)
         except BaseException as error:
+            self._source_events(rec)
             if self.recorder is not None and rec["state"] != DONE:  # a stopped island stays done
                 state = lifecycle.ABANDONED if isinstance(error, FixedRosterIslandAbandoned) else lifecycle.FAILED
                 if rec.get("decision") is None and state == lifecycle.FAILED:
@@ -681,7 +688,50 @@ class FleetController:
             reason = rec.get("exit") if rec.get("exit") is not None else (
                 decision.detail if decision is not None else None)
             self._record(rec, reason=None if reason is None else str(reason)[:300])
+            self._source_events(rec)
+        elif self._source_events(rec):
+            self._record(rec)  # a spare-node event: the record shows the island's spares now
         self._health_events(rec)
+
+    def _source_events(self, rec) -> bool:
+        """The island source's own events since the last poll (``ops.island_events``: a resident
+        ``ssh:`` island with spare nodes writes ``island_node_lost``, ``island_waiting_spare``,
+        ``island_node_replaced``, ``island_replacement_limit``) into fleet.jsonl; True when
+        there were any. A source without them writes nothing."""
+        probe = getattr(self.ops, "island_events", None)
+        if probe is None:
+            return False
+        try:
+            events = list(probe(rec["name"]) or ())
+        except Exception:  # noqa: BLE001 - telemetry never breaks supervision
+            return False
+        for event in events:
+            fields = dict(event)
+            kind = str(fields.pop("kind", "island_event"))
+            self._fleet(kind, rec["name"], **fields)
+        return bool(events)
+
+    def _spares_view(self, name: str):
+        """The island's spare nodes as its source reports them (``ops.spares_view``), or None."""
+        probe = getattr(self.ops, "spares_view", None)
+        if probe is None:
+            return None
+        try:
+            return probe(name)
+        except Exception:  # noqa: BLE001 - a view only
+            return None
+
+    def _waiting_spare(self, rec) -> bool:
+        """The island's source waits for a spare node (``ops.waiting_spare``): the recovery
+        goes on past ``recover_timeout`` (the source checks again with its own backoff and
+        stops the island at its replacement limit)."""
+        probe = getattr(self.ops, "waiting_spare", None)
+        if probe is None:
+            return False
+        try:
+            return bool(probe(rec["name"]))
+        except Exception:  # noqa: BLE001 - unknown: the timeout applies
+            return False
 
     def _island_start(self, rec) -> bool:
         """Island ``rec``'s START request (``yeto island start``). Its record decides, not this
@@ -1302,6 +1352,7 @@ class FleetController:
     def _enter_recovering(self, rec, reason: str, is_syncer: bool) -> None:
         rec["state"] = RECOVERING
         rec["failed_at"] = self.ops.now()
+        rec.pop("spare_retry_said_at", None)  # a new recovery: its first retry line is said
         if not is_syncer:
             self._fleet("island_lost", rec["name"], reason=str(reason))
             text = str(reason)
@@ -1383,10 +1434,18 @@ class FleetController:
                 if self.on_relaunch is not None:
                     self.on_relaunch(rec["name"], attempt.result)
                 return
-            print(
-                f"[launcher] relaunch attempt for {rec['name']} failed; will retry",
-                file=sys.stderr,
-            )
+            if not is_syncer and self._waiting_spare(rec):
+                # waiting for a spare: its source says why at each check; this line every 15 min
+                said = rec.get("spare_retry_said_at")
+                if said is None or self.ops.now() - said >= SPARE_RETRY_SAY_S:
+                    rec["spare_retry_said_at"] = self.ops.now()
+                    print(f"[launcher] relaunch attempt for {rec['name']} failed (waiting for a spare node); "
+                          "will retry", file=sys.stderr)
+            else:
+                print(
+                    f"[launcher] relaunch attempt for {rec['name']} failed; will retry",
+                    file=sys.stderr,
+                )
         elapsed = self.ops.now() - rec["failed_at"]
         if self.fixed_roster and not is_syncer and not rec.get("left_pool"):
             elapsed += rec.get("recovering_s", 0.0)  # this window only
@@ -1395,7 +1454,16 @@ class FleetController:
                 return
         # A rejected-link relaunch has its own budget (the island never joined).
         timeout = WAN_RECOVERY_S if rec.get("wan_recovery") else self.recover_timeout
-        if timeout <= 0 or elapsed > timeout:
+        waiting = not is_syncer and self._waiting_spare(rec)
+        if not waiting:
+            rec.pop("spare_wait_said", None)  # the next wait says so again
+        if timeout > 0 and elapsed > timeout and waiting:
+            if not rec.get("spare_wait_said"):
+                rec["spare_wait_said"] = True
+                print(f"[launcher] {rec['name']}: recovering {elapsed:.0f}s, past the recover timeout "
+                      f"({timeout:.0f}s), while it waits for a spare node; not given up (its source checks "
+                      "again with a backoff)", file=sys.stderr)
+        elif timeout <= 0 or elapsed > timeout:
             if is_syncer:
                 # The syncer is never abandoned: without it no learner can
                 # make outer progress, so keep trying and complain loudly.

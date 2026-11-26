@@ -24,6 +24,10 @@ inventory declares and, with ``--need``, where an N-node island would go.
 Exit 0 when every probed node is in a group and no edge is missing, 1 when a
 node is fabric unavailable, an edge is missing or the deadline cut the probe
 short, 2 on a usage or inventory error, 3 when a node is busy.
+
+``yeto cluster release-node <name> --inventory <file> --store <run store>`` gives
+a node a spare-pool island quarantined back to the islands
+(:mod:`yeto.cluster_release_node`).
 """
 
 from __future__ import annotations
@@ -92,9 +96,9 @@ def idle_sections(node: Any) -> list[tuple[str, str]]:
 
 def add_parser(sub: Any) -> argparse.ArgumentParser:
     doc = (__doc__ or "").split("\n\n")
-    p = sub.add_parser("cluster", help="the machines of an SSH node inventory: fabric groups (probe, check)",
-                       description=doc[0])
-    csub = p.add_subparsers(dest="cluster_command", metavar="{probe,check}")
+    p = sub.add_parser("cluster", help="the machines of an SSH node inventory: fabric groups (probe, check), "
+                       "quarantined nodes (release-node)", description=doc[0])
+    csub = p.add_subparsers(dest="cluster_command", metavar="{probe,check,release-node}")
     csub.required = True
     probe = csub.add_parser(
         "probe", help="group the inventory's nodes by fabric (ib_write_bw + NCCL transport between nodes)",
@@ -124,6 +128,9 @@ def add_parser(sub: Any) -> argparse.ArgumentParser:
     check.add_argument("--inventory", required=True, help="the SSH node inventory (YAML / JSON)")
     check.add_argument("--nodes", default=None, help="the candidate nodes (comma-separated names; default all)")
     check.add_argument("--need", type=int, default=None, help="place an island of this many nodes")
+    from .cluster_release_node import add_parser as add_release_node  # noqa: PLC0415
+
+    add_release_node(csub)
     return p
 
 
@@ -138,6 +145,10 @@ def main(args: argparse.Namespace, *, ops: Any = None, log: Any = None, clock: A
         return probe_main(args, ops=ops, log=log, clock=clock, leases=leases)
     if command == "check":
         return check_main(args)
+    if command == "release-node":
+        from .cluster_release_node import main as release_node_main  # noqa: PLC0415
+
+        return release_node_main(args)
     _say(f"[yeto] cluster: unknown command {command!r}")
     return 2
 

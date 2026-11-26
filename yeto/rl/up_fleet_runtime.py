@@ -28,7 +28,12 @@ trainer is judged on its own: ``run.trainer_exit`` when its record in the run st
 (``fleet/trainers/<k>/state.json``) shows it given up or failed, ``run.trainer_silence``
 when its event tape stops growing. The run's STOP flag (the whole launch) is kept for
 the fleet-wide stops: ``run.budget``, ``run.wall_clock`` and fewer islands running than
-``fleet.min_islands`` (default 1: every island stopped). An island without an event tape
+``fleet.min_islands`` (default 1: every island stopped); an island whose record shows it
+waiting for a spare node (``spares.waiting_spare``: a resident ``ssh:`` island that lost a
+node, :mod:`yeto.launch.island_spares`) still counts there for
+``fleet.waiting_absent_after_s`` (default 1 h) after its wait began, then as absent (a spare
+usually comes within minutes; a fleet whose islands wait longer stops, its samplers with
+it). The island's own give-up is ``--spare-max-wait-s`` (24 h), a separate matter. An island without an event tape
 (a sky / Verda / fetchable SSH island, a launch without records) keeps the run's own
 silence over the launcher log (:meth:`FleetRuntime.judges_every_trainer`). A fixed roster
 (``plan.fixed_roster``) keeps the path before the island STOP: no island STOP is written
@@ -285,14 +290,52 @@ class FleetRuntime:
         self.stop_island(k, name, why)
         return True
 
+    MIN_ISLANDS_REASON = "fleet.min_islands"
+
+    def waiting_spare(self, now: float | None = None) -> dict[int, str]:
+        """The running islands whose record shows them waiting for a spare node
+        (``spares.waiting_spare``) for longer than ``fleet.waiting_absent_after_s``
+        (``plan.absent_after_s``; a record without the wait's start counts from when this
+        runtime first saw it wait): island -> why. They count as absent for ``min_islands``."""
+        import time  # noqa: PLC0415
+
+        now = time.time() if now is None else float(now)
+        active = self.active()
+        if not active:
+            return {}
+        try:
+            records = self.trainer_records(now)
+        except Exception:  # noqa: BLE001 - unknown: not waiting
+            return {}
+        seen = self.__dict__.setdefault("_waiting_seen", {})
+        limit = float(getattr(self.plan, "absent_after_s", 3600.0))
+        out = {}
+        for k in active:
+            spares = (records.get(k) or {}).get("spares")
+            if not (isinstance(spares, dict) and spares.get("waiting_spare")):
+                seen.pop(k, None)
+                continue
+            since = spares.get("waiting_since")
+            since = float(since) if isinstance(since, (int, float)) else seen.setdefault(k, now)
+            waited = now - since
+            if waited > limit:
+                out[k] = (f"{str(spares.get('wait_reason') or 'no free spare node')[:300]}; waiting {waited:.0f} s, "
+                          f"past fleet.waiting_absent_after_s {limit:.0f} s")
+        return out
+
     def all_stopped(self) -> str | None:
         """The fleet's stop reason once fewer islands run than ``fleet.min_islands`` (default 1:
         every island stopped by a trip), else None: the first stopped island's reason (a
-        fleet-scoped trip's when there was one)."""
+        fleet-scoped trip's when there was one). An island waiting for a spare node counts
+        as absent (:meth:`waiting_spare`; reason :data:`MIN_ISLANDS_REASON`)."""
         stops = self.stops()
         running = stops.running()
-        if len(running) >= max(1, int(getattr(self.plan, "min_islands", 1) or 1)):
-            return None
+        minimum = max(1, int(getattr(self.plan, "min_islands", 1) or 1))
+        if len(running) >= minimum:
+            waiting = self.waiting_spare()
+            if len(running) - len(waiting) >= minimum:
+                return None
+            return self.MIN_ISLANDS_REASON
         if stops.fleet_stop_reason is not None:
             return stops.fleet_stop_reason
         first = next((i.index for i in self.plan.islands if stops.stop_reason(i.index) is not None), None)

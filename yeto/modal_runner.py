@@ -2469,6 +2469,21 @@ class RoutingOps:
         take = getattr(self._for(name), "take_health_events", None)
         return take(name) if take else []
 
+    def island_events(self, name):
+        """The source's own events of the island (resident ``ssh:`` islands with spare nodes)."""
+        probe = getattr(self._for(name), "island_events", None)
+        return probe(name) if probe else []
+
+    def spares_view(self, name):
+        """The island's spare nodes (resident ``ssh:`` islands with spare nodes); None otherwise."""
+        probe = getattr(self._for(name), "spares_view", None)
+        return probe(name) if probe else None
+
+    def waiting_spare(self, name):
+        """The island waits for a spare node (resident ``ssh:`` islands with spare nodes)."""
+        probe = getattr(self._for(name), "waiting_spare", None)
+        return bool(probe(name)) if probe else False
+
     def now(self):
         return self.sky_ops.now()
 
