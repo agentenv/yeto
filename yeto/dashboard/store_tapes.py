@@ -20,10 +20,15 @@ by the same walk. ``interval_s`` spaces the polls of the store (the uploads are
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
+import logging
 import os
+import re
 import time
 from typing import Any, Callable
+
+_log = logging.getLogger(__name__)
 
 PREFIX = "tapes/"
 _SEQ_SPAN = 1 << 32  # offset = seq * span + byte position inside the chunk
@@ -37,6 +42,58 @@ def tape_of(key: str, prefix: str = PREFIX) -> str | None:
         return None
     parts = key[len(prefix):].split("/")
     return prefix + "/".join(parts[:2]) + "/" if len(parts) == 3 else None
+
+
+# a trainer launch's tape folder ends with its start (tape_upload: ``l<k>-<host>-<YYYYmmddTHHMMSSZ>``)
+_STARTED = re.compile(r"-(\d{8}T\d{6}Z)$")
+_UNDATED_LOGGED: set[str] = set()
+
+
+def launch_started(incarnation: str) -> float | None:
+    """Epoch seconds of the start in a launch's tape folder name (``...-20261125T230755Z``);
+    None when the name carries none (a sampler's folder) or a malformed one."""
+    m = _STARTED.search(str(incarnation))
+    if m is None:
+        return None
+    try:
+        return _dt.datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=_dt.timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def _launch_ordered(keys: list[str], prefix: str) -> list[str]:
+    """``keys`` sorted as before (by name), except that an island's incarnations come in the
+    order they started (their folder names' UTC stamps; one second apart or less: by name), so
+    the newest launch is read last and its records are the island's current state: by name, a
+    move to another host can sort its new folder first (``l0-computeinstance-...`` before
+    ``l0-modal-...``). An island with one incarnation (or none dated) reads exactly as before."""
+    by_island: dict[str, set[str]] = {}
+    for k in keys:
+        parts = k[len(prefix):].split("/") if k.startswith(prefix) else []
+        if len(parts) == 3:
+            by_island.setdefault(parts[0], set()).add(parts[1])
+    rank: dict[tuple[str, str], tuple] = {}
+    for island, incs in by_island.items():
+        if len(incs) < 2:
+            continue
+        started = {i: launch_started(i) for i in incs}
+        if any(v is None for v in started.values()):
+            if island not in _UNDATED_LOGGED:
+                _UNDATED_LOGGED.add(island)
+                _log.debug("store tapes: island %s has incarnation folders without a start stamp (%s): read by name",
+                           island, sorted(i for i, v in started.items() if v is None))
+            continue
+        for pos, inc in enumerate(sorted(incs, key=lambda i: (started[i], i))):
+            rank[(island, inc)] = (pos,)
+    if not rank:
+        return sorted(keys)
+
+    def key(k: str) -> tuple:
+        parts = k[len(prefix):].split("/") if k.startswith(prefix) else []
+        if len(parts) == 3 and (parts[0], parts[1]) in rank:
+            return (prefix + parts[0] + "/", rank[(parts[0], parts[1])], parts[2])
+        return (k, (), "")
+    return sorted(keys, key=key)
 
 
 def open_objects(store: str, environ: Any = None) -> Any:
@@ -86,7 +143,8 @@ class StoreTapes:
         page = getattr(self.objects, "list_page", None)
         if not callable(page):  # an object API without paged listings: everything, every poll
             self.requests += 1
-            return sorted(k for k in self.objects.list(self.prefix) if k.endswith(".jsonl") and not self._done(k))
+            return _launch_ordered([k for k in self.objects.list(self.prefix) if k.endswith(".jsonl") and not self._done(k)],
+                                   self.prefix)
         new: list[str] = []
         cursor = ""
         while True:
@@ -94,7 +152,7 @@ class StoreTapes:
             self.requests += 1
             new += [k for k in keys if k.endswith(".jsonl") and not self._done(k)]
             if last is None:
-                return sorted(new)
+                return _launch_ordered(new, self.prefix)
             # the page ended inside a known tape: the rest of it up to its cursor is consumed
             cursor = max(last, self.cursors.get(tape_of(last, self.prefix) or "", ""))
 

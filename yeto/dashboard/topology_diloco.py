@@ -221,13 +221,49 @@ class _Island:
         return best or (None, None)
 
 
+def _launch_rank(reducer, iid: str):
+    """For an island with more than one trainer launch (a move, a restart): a sort key of its
+    events by the launch they belong to, in the order the launches started (the stamp in
+    their tape folder names, else their first record; a tie: by name); an event of no launch
+    (a launcher-side record) goes with the newest launch started by its time. None for an
+    island with one launch or none: its events keep the order they were read in."""
+    from .reducer import _store_launch  # noqa: PLC0415
+    from .store_tapes import launch_started  # noqa: PLC0415
+
+    launches = (reducer.islands.get(iid) or {}).get("launches") or {}
+    if len(launches) < 2:
+        return None
+    start = {}
+    for name, row in launches.items():
+        t = launch_started(name)
+        start[name] = (t if t is not None else (row.get("first_ts") or 0.0), name)
+    ordered = sorted(start.values())
+
+    def rank(e: dict) -> tuple:
+        launch = _store_launch(str(e.get("source") or ""))
+        if launch in start:
+            return start[launch]
+        ts = e.get("ts") or 0.0
+        return max((s for s in ordered if s[0] <= ts), default=ordered[0])
+    return rank
+
+
 def _fold(reducer, ids: set[str], now: float) -> dict[str, _Island]:
     out = {i: _Island() for i in ids}
+    per: dict[str, list[dict]] = {i: [] for i in ids}
     for e in reducer.events:
         ts, iid = e.get("ts"), e.get("island")
         if ts is None or ts > now or iid not in out:
             continue
-        out[iid].feed(e.get("type"), e.get("record") or {}, ts)
+        per[iid].append(e)
+    for iid, evs in per.items():
+        # a moved or restarted trainer: its launches' records in the order the launches ran,
+        # whatever order their tapes were read in (polls, folder names), so the newest
+        # launch's step, outer sweep and fragment versions are the island's (an older
+        # launch's late tail never overwrites them)
+        rank = _launch_rank(reducer, iid)
+        for e in sorted(evs, key=rank) if rank is not None else evs:
+            out[iid].feed(e.get("type"), e.get("record") or {}, e["ts"])
     for isl in out.values():
         isl.phases.sort()
     return out
