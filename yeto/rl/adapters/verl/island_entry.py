@@ -653,6 +653,13 @@ def stop_on_ray_cpu_shortfall(ray_info: Mapping[str, Any]) -> None:
 
     problem = cpu_shortfall(ray_info)
     if problem is None:
+        resources = ray_info.get("after") or ray_info.get("before") or {}
+        if "CPU" in resources and float(resources["CPU"]) < MIN_RAY_CPUS:
+            # enough for the trainer actor, maybe not for verl's other CPU actors (TQ storage
+            # units, agent / reward workers), which Ray would leave pending with no error
+            print(f"[yeto-verl] WARNING: the island Ray has {float(resources['CPU']):g} CPU slots, fewer than "
+                  f"the {MIN_RAY_CPUS} a verl island is started with; verl CPU actors may wait for slots "
+                  f"(ray start --num-cpus {MIN_RAY_CPUS})", file=sys.stderr, flush=True)
         return
     error = RayResourcesUnsatisfiable(problem)
     code = island_stop_exit(error)

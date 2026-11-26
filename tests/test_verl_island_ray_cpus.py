@@ -156,11 +156,12 @@ def test_the_island_entry_stops_with_the_deterministic_stop_exit(monkeypatch, ca
 
 
 class _FakeRay:
-    """``ray.wait`` / ``ray.get`` / ``placement_group_table`` over a fake clock."""
+    """``ray.wait`` / ``ray.get`` / ``placement_group_table`` / resources over a fake clock."""
 
-    def __init__(self, *, ready_after=None, groups=None):
+    def __init__(self, *, ready_after=None, groups=None, total=None):
         self.now, self.ready_after = 0.0, ready_after
         self.groups = groups or (lambda now: {})
+        self.total = total or {"CPU": 32.0, "GPU": 1.0}
         self.util = SimpleNamespace(placement_group_table=lambda: self.groups(self.now))
 
     def wait(self, refs, timeout):
@@ -175,48 +176,88 @@ class _FakeRay:
         return "initialized"
 
     def cluster_resources(self):
-        return {"CPU": 8.0, "GPU": 1.0}
+        return dict(self.total)
 
     def available_resources(self):
-        return {"CPU": 7.0, "GPU": 1.0}
+        return {k: v - (10.0 if k == "CPU" else 0.0) for k, v in self.total.items()}
 
 
 class _Actor:
     __ray_ready__ = SimpleNamespace(remote=lambda: "ready-ref")
 
 
-def test_a_trainer_actor_ray_does_not_place_stops_after_the_timeout():
-    ray = _FakeRay()
+def _await(ray, *, state="ALIVE", timeout_s=1800):
+    rr.await_actor(_Actor(), demand={"CPU": 10.0}, timeout_s=timeout_s, poll_s=10, ray_mod=ray,
+                   clock=lambda: ray.now, state_of=lambda actor: state)
+
+
+def test_a_trainer_actor_asking_more_than_the_ray_has_stops_within_the_grace():
+    ray = _FakeRay(total={"CPU": 8.0, "GPU": 1.0})
     with pytest.raises(rr.RayResourcesUnsatisfiable) as raised:
-        rr.await_actor(_Actor(), demand={"CPU": 10.0}, timeout_s=300, ray_mod=ray)
+        _await(ray)
     assert str(raised.value).startswith(
-        "the verl trainer actor asked Ray for {'CPU': 10} and was not placed within 300 s; "
-        "the island Ray has {'CPU': 8, 'GPU': 1} in all, {'CPU': 7, 'GPU': 1} free")
-    assert ray.now == 300
-    rr.await_actor(_Actor(), demand={"CPU": 10.0}, timeout_s=300, ray_mod=_FakeRay(ready_after=40))
+        "the verl trainer actor asks Ray for {'CPU': 10}, more than the island Ray has in all "
+        "({'CPU': 8, 'GPU': 1}; CPU 10 > 8): it can never be placed")
+    assert ray.now <= 50  # within the grace (30 s) and a poll, not after the backstop
 
 
-def test_a_worker_placement_group_pending_past_the_timeout_stops_the_island():
+def test_a_slow_cold_start_with_enough_resources_is_never_stopped(capsys):
+    """Placed, constructing for an hour (model download, FSDP build): waited for."""
+    ray = _FakeRay(ready_after=3600)
+    _await(ray, state="ALIVE", timeout_s=1800)
+    assert ray.now == 3600
+    assert "not ready after 1800 s (Ray state ALIVE); waiting" in capsys.readouterr().out
+    ray = _FakeRay(ready_after=3600)
+    _await(ray, state=None, timeout_s=1800)  # a state Ray does not tell: never taken for pending
+    assert ray.now == 3600
+
+
+def test_an_actor_ray_still_holds_pending_creation_stops_at_the_backstop():
+    ray = _FakeRay()
+    with pytest.raises(rr.RayResourcesUnsatisfiable, match=r"still reports it PENDING_CREATION after 1800 s: the "
+                                                           r"island Ray has \{'CPU': 32, 'GPU': 1\} in all"):
+        _await(ray, state="PENDING_CREATION", timeout_s=1800)
+    assert 1800 <= ray.now <= 1810
+
+
+def test_a_worker_group_asking_more_than_the_ray_has_stops_within_the_grace():
     pending = {"pg1": {"state": "PENDING", "bundles": {0: {"GPU": 1.0, "CPU": 1.0}, 1: {"GPU": 1.0}}}}
+    ray = _FakeRay(groups=lambda now: pending, total={"CPU": 8.0, "GPU": 1.0})
+    with pytest.raises(rr.RayResourcesUnsatisfiable, match=r"ask for more than the island Ray has in all: they can "
+                                                           r"never be placed, asking for \{'CPU': 1, 'GPU': 2\}"):
+        rr.get_watching_placements("init-ref", timeout_s=1800, poll_s=10, ray_mod=ray, clock=lambda: ray.now)
+    assert ray.now <= 50
+
+
+def test_a_worker_group_that_fits_but_stays_pending_stops_at_the_backstop():
+    pending = {"pg1": {"state": "PENDING", "bundles": {0: {"GPU": 1.0}}}}
     ray = _FakeRay(groups=lambda now: pending)
-    with pytest.raises(rr.RayResourcesUnsatisfiable, match=r"stayed pending for more than 300 s, asking for "
-                                                           r"\{'CPU': 1, 'GPU': 2\}") as raised:
-        rr.get_watching_placements("init-ref", timeout_s=300, poll_s=10, ray_mod=ray, clock=lambda: ray.now)
-    assert 300 < ray.now <= 320 and "{'CPU': 8, 'GPU': 1} in all" in str(raised.value)
+    with pytest.raises(rr.RayResourcesUnsatisfiable, match="stayed pending for more than 1800 s") as raised:
+        rr.get_watching_placements("init-ref", timeout_s=1800, poll_s=10, ray_mod=ray, clock=lambda: ray.now)
+    assert 1800 < ray.now <= 1820 and "{'CPU': 32, 'GPU': 1} in all" in str(raised.value)
 
 
 def test_a_slow_init_whose_groups_get_placed_is_waited_for():
     """A model load takes long: a group pending for a while, then placed, is not a fault."""
-    ray = _FakeRay(ready_after=2000, groups=lambda now: (
-        {"pg1": {"state": "PENDING" if now < 200 else "CREATED", "bundles": {0: {"GPU": 1.0}}},
+    ray = _FakeRay(ready_after=5000, groups=lambda now: (
+        {"pg1": {"state": "PENDING" if now < 1200 else "CREATED", "bundles": {0: {"GPU": 1.0}}},
          "pg0": {"state": "CREATED", "bundles": {0: {"CPU": 1.0}}}}))
-    assert rr.get_watching_placements("init-ref", timeout_s=300, poll_s=10, ray_mod=ray,
+    assert rr.get_watching_placements("init-ref", timeout_s=1800, poll_s=10, ray_mod=ray,
                                       clock=lambda: ray.now) == "initialized"
-    assert ray.now == 2000
+    assert ray.now == 5000
 
 
 def test_the_schedule_timeout_is_read_from_the_environment():
-    assert rr.schedule_timeout_s({}) == 300.0
-    assert rr.schedule_timeout_s({rr.SCHEDULE_TIMEOUT_ENV: "60"}) == 60.0
-    assert rr.schedule_timeout_s({rr.SCHEDULE_TIMEOUT_ENV: "x"}) == 300.0
-    assert rr.schedule_timeout_s({rr.SCHEDULE_TIMEOUT_ENV: "0"}) == 300.0
+    assert rr.schedule_timeout_s({}) == 1800.0
+    assert rr.schedule_timeout_s({rr.SCHEDULE_TIMEOUT_ENV: "600"}) == 600.0
+    assert rr.schedule_timeout_s({rr.SCHEDULE_TIMEOUT_ENV: "x"}) == 1800.0
+    assert rr.schedule_timeout_s({rr.SCHEDULE_TIMEOUT_ENV: "0"}) == 1800.0
+
+
+def test_a_ray_with_the_trainer_slots_but_fewer_than_32_warns(capsys):
+    from yeto.rl.adapters.verl.island_entry import stop_on_ray_cpu_shortfall
+
+    stop_on_ray_cpu_shortfall({"before": {"CPU": 16.0, "GPU": 1.0}})
+    assert "the island Ray has 16 CPU slots, fewer than the 32" in capsys.readouterr().err
+    stop_on_ray_cpu_shortfall({"before": {"CPU": 32.0, "GPU": 1.0}})
+    assert capsys.readouterr().err == ""
