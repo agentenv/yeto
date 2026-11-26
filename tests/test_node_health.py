@@ -120,7 +120,7 @@ def test_an_unfinished_nvlink_fabric_fails_the_node():
     r = check(node_text(fabric=(0, FABRIC_IN_PROGRESS)))
     assert r.ok_single is False
     assert r.reasons == ["NVLink fabric In Progress/N/A on 8/8 GPUs (fabric manager: active)"]
-    stopped = check(node_text(fabricmanager=(3, "failed")), check(node_text()).facts)
+    stopped = check(node_text(fabricmanager=(3, fm_out("failed"))), check(node_text()).facts)
     assert stopped.reasons == ["nvidia-fabricmanager failed (was active)"]
 
 
@@ -433,15 +433,15 @@ def test_memory_and_ecc_baselines_follow_the_pci_address_not_the_index():
 
 
 def test_a_node_without_nvswitch_passes_with_its_fabric_manager_inactive_and_no_fabric():
-    pcie = dict(fabricmanager=(3, "inactive"), fabric=(1, ""))
+    pcie = dict(fabricmanager=(3, fm_out("inactive")), fabric=(1, ""))
     first = check(node_text(**pcie))
     second = check(node_text(**pcie), first.facts)
     assert first.ok_single and second.ok_single and second.facts["fm"] == "inactive"
     assert second.facts["fabric"] == "none"
     na = "    Fabric\n        State : N/A\n        Status : N/A\n" * 8  # a PCIe card: no NVLink fabric
-    r = check(node_text(fabric=(0, na), fabricmanager=(3, "inactive")), first.facts)
+    r = check(node_text(fabric=(0, na), fabricmanager=(3, fm_out("inactive"))), first.facts)
     assert r.ok_single and r.facts["fabric"] == "none"
-    stopped = check(node_text(fabricmanager=(3, "inactive")), check(node_text()).facts)
+    stopped = check(node_text(fabricmanager=(3, fm_out("inactive"))), check(node_text()).facts)
     assert stopped.reasons == ["nvidia-fabricmanager inactive (was active)"]  # one that ran and stopped
     # nvidia-smi -q cut off by its section's timeout: what it printed is not the fabric's state
     hung = check(node_text(fabric=(124, FABRIC_IN_PROGRESS)), first.facts)
@@ -455,7 +455,10 @@ def test_a_node_without_nvswitch_passes_with_its_fabric_manager_inactive_and_no_
 # entry, no device file and no NVIDIA PCI bridge; ten Mellanox devices whose VPD does not
 # read; GPUs "NVIDIA B300 SXM6 AC" with a Completed fabric.
 B300_ROOT = dict(vpd=10, sw=1)  # as root: the VPD of the switch management port names SW_MNG
-B300_ROOT_NO_SW = dict(vpd=10, sw=0)  # every VPD read, none names it
+B300_ROOT_NO_SW = dict(vpd=10, sw=0)  # every VPD read, none names it: the GPUs still say NVSwitch
+VPD_NO_SW = dict(name="NVIDIA H100 80GB HBM3", vpd=10, sw=0)  # a fabric, every VPD read without the port
+UNIT_GONE = dict(load="not-found", fm_proc=0)  # no unit, no nv-fabricmanager process (a shared NVSwitch VM)
+UNIT_IN_CONTAINER = dict(load="not-found", fm_proc=1)  # no unit, its process from a driver container
 HOPPER = dict(name="NVIDIA H100 80GB HBM3", proc=4, pci=4)  # Hopper HGX: NVSwitch on the host's PCIe
 HIDDEN = dict(name="NVIDIA H100 80GB HBM3")  # a fabric, no NVSwitch shown, VPD unread: not determined
 TRAY = dict(name="NVIDIA GB300")  # an NVL72-class compute tray: a Completed fabric, switches elsewhere
@@ -465,18 +468,24 @@ PCIE_NA = dict(name="NVIDIA H100 PCIe", mlx=2,
 NO_PROBE = HIDDEN
 
 
-def fm_out(state: str | None, *, proc=None, dev=0, pci=0, mlx=10, vpd=0, sw=0, restarts=0) -> str:
-    """The fabricmanager section's output; ``proc`` / ``pci`` None: no procfs dir / no lspci."""
-    lines = ([state] if state else []) + [f"nrestarts={'' if restarts is None else restarts}"]
+def fm_out(state: str | None, *, load="loaded", fm_proc=None, proc=None, dev=0, pci=0, mlx=10, vpd=0, sw=0,
+           restarts=0) -> str:
+    """The fabricmanager section's output; ``load`` the unit's LoadState (``not-found``:
+    ``fm_proc`` nv-fabricmanager processes); ``proc`` / ``pci`` / ``vpd`` None: no procfs
+    dir / no lspci / no timeout (the VPD not read)."""
+    lines = ([state] if state else []) + [f"loadstate={load}"]
+    lines += [] if fm_proc is None else [f"fm_proc={fm_proc}"]
+    lines += [f"nrestarts={'' if restarts is None else restarts}"]
     lines += ([] if proc is None else [f"nvswitch_proc={proc}"]) + [f"nvswitch_dev={dev}"]
-    lines += ([] if pci is None else [f"nvswitch_pci={pci}"]) + [f"mlx={mlx}", f"mlx_vpd={vpd}", f"sw_mng={sw}"]
+    lines += ([] if pci is None else [f"nvswitch_pci={pci}"]) + [f"mlx={mlx}"]
+    lines += [] if vpd is None else [f"mlx_vpd={vpd}", f"sw_mng={sw}"]
     return "\n".join(lines)
 
 
 def fm_text(state: str | None, boot=BOOT, *, name="NVIDIA B300 SXM6 AC", restarts=0, **over) -> str:
     """A healthy 8-GPU node (default: HGX B300, as above) whose fabric manager reads
     ``state`` in ``boot`` (None: the section timed out, nothing printed)."""
-    probe = {k: over.pop(k) for k in ("proc", "dev", "pci", "mlx", "vpd", "sw") if k in over}
+    probe = {k: over.pop(k) for k in ("load", "fm_proc", "proc", "dev", "pci", "mlx", "vpd", "sw") if k in over}
     fm = (124, "") if state is None else (0 if state == "active" else 3, fm_out(state, restarts=restarts, **probe))
     over.setdefault("gpus", (0, gpus_text(name=name)))
     return node_text(fabricmanager=fm, xid=(0, xid_text(boot=boot)), **over)
@@ -519,7 +528,7 @@ def test_a_read_failure_keeps_the_fabric_manager_memory():
     assert rs[2].result.facts["fm_boot"] == BOOT
 
 
-@pytest.mark.parametrize("node", [PCIE, PCIE_NA, TRAY, B300_ROOT_NO_SW], ids=["pcie", "pcie-na", "gb-tray", "vpd-no-sw"])
+@pytest.mark.parametrize("node", [PCIE, PCIE_NA, TRAY, VPD_NO_SW], ids=["pcie", "pcie-na", "gb-tray", "vpd-no-sw"])
 @pytest.mark.parametrize("state", ["inactive", "failed", "activating"])
 def test_a_node_without_nvswitch_of_its_own_is_never_judged_on_its_fabric_manager(node, state):
     _, rs = watch_through(*[fm_text(state, restarts=n, **node) for n in range(4)])
@@ -535,8 +544,13 @@ def test_whether_the_node_has_nvswitch_of_its_own():
     assert of() == ("yes", "B200/B300 GPU with an NVLink fabric")  # HGX B300, not root
     assert of(name="NVIDIA B200") == ("yes", "B200/B300 GPU with an NVLink fabric")
     assert of(**B300_ROOT) == ("yes", "ConnectX VPD SW_MNG")
-    assert of(**B300_ROOT_NO_SW) == ("no", "ConnectX VPD without SW_MNG")
-    assert of(vpd=4, sw=0) == ("yes", "B200/B300 GPU with an NVLink fabric")  # some VPD unread: by the GPUs
+    # REV-905c M: a VPD without the port does not overrule B200 / B300 GPUs with a fabric
+    assert of(**B300_ROOT_NO_SW) == ("yes", "B200/B300 GPU with an NVLink fabric")
+    assert of(**VPD_NO_SW) == ("no", "ConnectX VPD without SW_MNG")
+    assert of(name="NVIDIA H100 80GB HBM3", vpd=4, sw=0) == ("unread", "NVSwitch not determined")  # some unread
+    assert of(name="NVIDIA H100 80GB HBM3", vpd=None) == ("unread", "NVSwitch not determined")  # no timeout
+    assert of(name="NVIDIA H100 80GB HBM3", dev=1) == ("yes", "device files")  # a single NVSwitch
+    assert of(name="NVIDIA B40") == ("unread", "NVSwitch not determined")  # B-like, not B200 / B300
     assert of(**HOPPER) == ("yes", "procfs")
     assert of(name="NVIDIA H100 80GB HBM3", dev=8) == ("yes", "device files")
     assert of(name="NVIDIA H100 80GB HBM3", pci=4) == ("yes", "lspci")
@@ -662,7 +676,12 @@ def test_the_fabric_manager_absolute_rule_judges_one_check_alone():
     assert absolute(b300.facts) == ("unread", "NVSwitch not determined")
     assert absolute(check(fm_text("failed", **HIDDEN)).facts) == ("unread", "NVSwitch not determined")
     assert absolute(check(fm_text(None)).facts) == ("unread", "nvidia-fabricmanager state unread")
-    assert absolute(check(fm_text(None, **HIDDEN)).facts) == ("unread", "NVSwitch not determined")
+    assert absolute(check(fm_text(None, **HIDDEN)).facts) == ("unread", "FM section timed out")
+    # REV-905c L2: cut off after the state line (the VPD reads): not "state unread"
+    cut = node_text(fabricmanager=(124, "failed\nloadstate=loaded\nnrestarts=0\nnvswitch_dev=0"),
+                    gpus=(0, gpus_text(name="NVIDIA H100 80GB HBM3")))
+    assert absolute(check(cut).facts) == ("unread", "FM section timed out after reading state")
+    assert check(cut).facts["fm_state"] == "failed"
     assert absolute(check(node_text(gpus=(124, ""))).facts)[0] == "unread"  # nvidia-smi did not answer
     assert absolute({})[0] == "unread" and absolute({"nvswitch": 4, "fm_state": "failed"})[0] == "unread"
     # its own read, never carried: an unread check after a bad one is unread
@@ -678,10 +697,20 @@ def test_the_fabric_manager_section_reads_systemctl_and_the_nvswitch_probe(tmp_p
     assert read(host_probe.Section(0, fm_out("active", proc=4, pci=None)))[2] == dict(
         nvswitch_proc=4, nvswitch_dev=0, mlx=10, mlx_vpd=0, sw_mng=0)
     assert read(host_probe.Section(3, fm_out("unknown")))[0] == ""  # not a state
+    assert read(host_probe.Section(3, fm_out("failed", vpd=None)))[2] == dict(nvswitch_dev=0, nvswitch_pci=0, mlx=10)
     assert read(host_probe.Section(127, "nrestarts=\nnvswitch_dev=0")) == ("", None, {"nvswitch_dev": 0})
     assert read(host_probe.Section(0, "active")) == ("active", None, {})  # an older script's output
+    assert read(host_probe.Section(3, "failed")) == ("", None, {})  # no LoadState: no unit known to have failed
     assert read(host_probe.Section(127, "active")) == ("", None, {})  # systemctl not found: no state
     assert read(None) == ("", None, {})
+    # REV-905c H: the LoadState decides what inactive / failed mean
+    assert read(host_probe.Section(3, fm_out("inactive", load="not-found", fm_proc=0)))[0] == "not running"
+    assert read(host_probe.Section(3, fm_out("inactive", load="not-found", fm_proc=2)))[0] == "active"
+    assert read(host_probe.Section(3, fm_out("inactive", load="not-found")))[0] == ""  # no process count
+    assert read(host_probe.Section(3, fm_out("inactive", load="masked")))[0] == ""
+    assert read(host_probe.Section(3, fm_out("activating", load="masked")))[0] == "activating"
+    assert read(host_probe.Section(124, fm_out("failed")))[2]["timed_out"] == 2
+    assert read(host_probe.Section(124, ""))[2] == {"timed_out": 1}
 
     def run(path, **env):  # the section as the check runs it (its stderr merged), on a host of fakes
         out = subprocess.run(["bash", "-c", probe_script([("fabricmanager", node_health.FM_SCRIPT)])],
@@ -694,37 +723,85 @@ def test_the_fabric_manager_section_reads_systemctl_and_the_nvswitch_probe(tmp_p
     for tool in ("bash", "ls", "wc", "tr", "grep", "head", "printf"):
         if shutil.which(tool):
             (tools / tool).symlink_to(shutil.which(tool))
-    (fakes / "systemctl").write_text('#!/bin/bash\nif [ "$1" = is-active ]; then echo failed; exit 3; fi\n'
-                                     'if [ "$1" = show ]; then echo 5; fi\n')
+    unit = fakes / "unit"  # the fake unit's LoadState
+    unit.write_text("loaded")
+    (fakes / "systemctl").write_text(
+        f'#!/bin/bash\nread -r load < {shlex.quote(str(unit))}\n'
+        'if [ "$1" = is-active ]; then if [ "$load" = loaded ]; then echo failed; else echo inactive; fi; exit 3; fi\n'
+        'if [ "$1" = show ]; then case "$3" in LoadState) echo "$load";; NRestarts) echo 5;; esac; fi\n')
     (fakes / "lspci").write_text("#!/bin/bash\necho '05:00.0 0680: 10de:22a3 (rev a1)'\n"
                                  "echo '06:00.0 0680: 10de:22a3 (rev a1)'\necho '18:00.0 0302: 10de:2901 (rev a1)'\n")
+    (fakes / "timeout").write_text('#!/bin/bash\nshift\nexec "$@"\n')
     for f in fakes.iterdir():
         f.chmod(0o755)
-    proc, dev, sys_pci = tmp_path / "proc-nvswitch", tmp_path / "dev", tmp_path / "pci"
+    proc, nvsw, dev, sys_pci = tmp_path / "proc", tmp_path / "proc-nvswitch", tmp_path / "dev", tmp_path / "pci"
     dev.mkdir()
-    for name, vendor, vpd in (("0000:01:00.0", "0x15b3", b"PN\x00MCX75\x00V3SMDL=SW_MNG\x00"),
-                              ("0000:02:00.0", "0x15b3", b"PN\x00MCX75\x00"), ("0000:02:00.1", "0x15b3", b""),
-                              ("0000:03:00.0", "0x15b3", None), ("0000:18:00.0", "0x10de", b"")):
+    for pid, comm in (("1", "systemd"), ("4242", "nv-fabricmanage"), ("4243", "nv-fabricmanagerx"), ("self", "x")):
+        (proc / pid).mkdir(parents=True)
+        (proc / pid / "comm").write_text(comm + "\n")
+    # SW_MNG on a .1 function only (REV-905c M): every function is read
+    for name, vendor, vpd in (("0000:01:00.0", "0x15b3", b"PN\x00MCX75\x00"),
+                              ("0000:01:00.1", "0x15b3", b"PN\x00MCX75\x00V3SMDL=SW_MNG\x00"),
+                              ("0000:02:00.0", "0x15b3", b""), ("0000:03:00.0", "0x15b3", None),
+                              ("0000:18:00.0", "0x10de", b"")):
         (sys_pci / name).mkdir(parents=True)
         (sys_pci / name / "vendor").write_text(vendor + "\n")
         if vpd is not None:
             (sys_pci / name / "vpd").write_bytes(vpd)
-    paths = dict(__YETO_NVSW_PROC=str(proc), __YETO_DEV=str(dev), __YETO_SYS_PCI=str(sys_pci))
-    sec = run(f"{fakes}:{tools}", **paths)
-    assert sec.rc == 3 and read(sec) == ("failed", 5, dict(nvswitch_dev=0, nvswitch_pci=2, mlx=3, mlx_vpd=2,
+    paths = dict(__YETO_PROC=str(proc), __YETO_NVSW_PROC=str(nvsw), __YETO_DEV=str(dev), __YETO_SYS_PCI=str(sys_pci))
+    path = f"{fakes}:{tools}"
+    sec = run(path, **paths)
+    assert sec.text.splitlines()[:2] == ["failed", "loadstate=loaded"]  # the state first
+    assert sec.rc == 3 and read(sec) == ("failed", 5, dict(nvswitch_dev=0, nvswitch_pci=2, mlx=4, mlx_vpd=3,
                                                             sw_mng=1))
-    proc.mkdir()
+    unit.write_text("not-found")  # a fabric manager in a driver container: its process (comm cut at 15)
+    assert read(run(path, **paths))[0] == "active" and "fm_proc=1" in run(path, **paths).text
+    (proc / "4242" / "comm").write_text("bash\n")
+    assert read(run(path, **paths))[0] == "not running"
+    unit.write_text("loaded")
+    nvsw.mkdir()
     for n in range(4):
-        (proc / f"0000:0{n}:00.0").write_text("")
+        (nvsw / f"0000:0{n}:00.0").write_text("")
         (dev / f"nvidia-nvswitch{n}").write_text("")
     (dev / "nvidia-nvswitchctl").write_text("")  # the control device is not a switch
     (fakes / "lspci").write_text("#!/bin/bash\nexit 1\n")  # lspci there, failing: no count (L1)
-    assert read(run(f"{fakes}:{tools}", **paths))[2] == dict(nvswitch_proc=4, nvswitch_dev=4, mlx=3, mlx_vpd=2,
-                                                             sw_mng=1)
+    assert read(run(path, **paths))[2] == dict(nvswitch_proc=4, nvswitch_dev=4, mlx=4, mlx_vpd=3, sw_mng=1)
+    (fakes / "timeout").unlink()  # no timeout: no VPD read (it could hang the section)
+    assert read(run(path, **paths))[2] == dict(nvswitch_proc=4, nvswitch_dev=4, mlx=4)
     (fakes / "systemctl").unlink()
     (fakes / "lspci").unlink()
-    sec = run(f"{fakes}:{tools}", **paths)  # no systemctl, no lspci
+    sec = run(path, **paths)  # no systemctl, no lspci
     assert sec.rc == 127 and read(sec)[:2] == ("", None) and "nvswitch_pci" not in read(sec)[2]
+
+
+def test_a_fabric_manager_without_its_unit_is_judged_by_its_process():
+    # REV-905c H: no unit on the host (a GPU Operator driver container runs nv-fabricmanager;
+    # a shared NVSwitch VM runs it on its service VM): systemctl says inactive, nothing stopped
+    for node in (dict(HOPPER), {}, dict(B300_ROOT_NO_SW)):  # NVSwitch devices; B300 by name; B300 root, PF VPD
+        _, rs = watch_through(*[fm_text("inactive", **UNIT_GONE, **node)] * 3)
+        assert [r.verdict for r in rs] == ["ok"] * 3 and all(r.result.reasons == [] for r in rs)
+        assert node_health.fabric_manager_absolute(rs[0].result.facts)[0] == "unread"
+        assert rs[0].result.facts["fm"] == "not running" and rs[0].result.facts["fm_state"] == ""
+        _, rs = watch_through(*[fm_text("inactive", **UNIT_IN_CONTAINER, **node)] * 3)
+        assert [r.verdict for r in rs] == ["ok"] * 3 and rs[0].result.facts["fm"] == "active"
+    # the fabric not completed: bad by its own reason, as before
+    stuck = fm_text("inactive", fabric=(0, FABRIC_IN_PROGRESS), **UNIT_GONE, **HOPPER)
+    _, rs = watch_through(stuck, stuck)
+    assert [r.verdict for r in rs] == ["bad_once", "lost"]
+    assert rs[0].result.reasons == ["NVLink fabric In Progress/N/A on 8/8 GPUs (fabric manager: not running)"]
+    # its process seen in this boot counts as active: gone later, it must run (and reaches lost)
+    _, rs = watch_through(fm_text("inactive", **UNIT_IN_CONTAINER), fm_text("inactive", **UNIT_GONE),
+                          fm_text("inactive", **UNIT_GONE))
+    assert [r.verdict for r in rs] == ["ok", "bad_once", "lost"]
+    assert rs[1].result.reasons == ["nv-fabricmanager not running (was active)"]
+    # a new boot forgets it; a GB tray is never judged
+    _, rs = watch_through(fm_text("inactive", **UNIT_IN_CONTAINER), fm_text("inactive", boot="boot-2", **UNIT_GONE))
+    assert [r.verdict for r in rs] == ["ok", "ok"]
+    _, rs = watch_through(fm_text("inactive", **UNIT_IN_CONTAINER, **TRAY), fm_text("inactive", **UNIT_GONE, **TRAY))
+    assert [r.verdict for r in rs] == ["ok", "ok"]
+    # an unjudged read: the next judged read is still the first
+    _, rs = watch_through(fm_text("inactive", **UNIT_GONE), fm_text("failed"), fm_text("failed"))
+    assert [r.verdict for r in rs] == ["ok", "bad_once", "lost"]
 
 
 def test_without_a_boot_id_the_fabric_manager_is_judged_as_before():

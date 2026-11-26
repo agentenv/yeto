@@ -293,17 +293,27 @@ Whether the node has NVSwitch of its own, in this order:
 | the driver lists NVSwitch devices in `/proc/driver/nvidia-nvswitch/devices`, or `/dev/nvidia-nvswitch<N>` exist, or `lspci` shows an NVIDIA PCI bridge (class `0680`) | yes (Hopper HGX) |
 | a GPU name starts with `GB` | no (an NVL72-class compute tray: its NVSwitches sit in the switch trays) |
 | no GPU has a real NVLink fabric state (`N/A`, or no `Fabric` block) | no (PCIe) |
-| a Mellanox (`15b3`) device's VPD names the NVLink switch management port (`SMDL=SW_MNG`) | yes (HGX B200 / B300) |
-| the VPD of every Mellanox device read and none names it | no |
-| every GPU is a B200 / B300 (not GB, not PCIe) and has a real fabric state | yes (HGX B200 / B300, without root) |
+| the VPD of a Mellanox (`15b3`) PCI function, any function, names the NVLink switch management port (`SMDL=SW_MNG`) | yes (HGX B200 / B300) |
+| every GPU is a B200 / B300 (not GB, not PCIe) and has a real fabric state | yes (HGX B200 / B300, without root; a VPD without the port does not overrule it) |
+| the VPD of every Mellanox function read and none names it | no |
 | anything else, or the fabric state did not read | not determined |
 
 On HGX B200 / B300 the NVSwitches are not PCIe devices of the host. They sit behind a
 ConnectX bridge that the fabric manager reaches through NVLSM (NVIDIA Fabric Manager
 User Guide). The host shows no procfs entry, no device file and no class `0680`
 bridge; amazon-eks-ami PR 2840 reports the same on p6-b200. Hence the VPD rule, and
-the GPU-name rule for a user that cannot read the VPD (it reads as root only). A node
-whose NVSwitch is not determined is never taken for one without.
+the GPU-name rule for a user that cannot read the VPD (it reads as root only). Each VPD
+read is bounded to 1 s (`timeout 1`); without a `timeout` command the VPD is not read. A
+node whose NVSwitch is not determined is never taken for one without. A section cut
+off after the state line says `FM section timed out after reading state`.
+
+The state comes from systemd only for a unit that is `loaded`. `systemctl is-active`
+prints `inactive` for a unit that does not exist, so for a `not-found` unit the check
+looks for an `nv-fabricmanager` process instead (`/proc/<pid>/comm`). That is the case
+when a GPU Operator driver container runs the fabric manager, or on a shared NVSwitch VM
+whose fabric manager runs on the service VM. A process found reads `active`; none is not
+judged at a first check (the fabric state judges the node). `inactive` / `failed` of a
+unit in another LoadState (`masked`, unknown) is not judged either.
 
 The rules over the checks:
 
@@ -311,8 +321,9 @@ The rules over the checks:
   manager is never judged, even when it was active earlier in the boot. A tray may
   have the unit installed, and it fails there. A fabric that is not `Completed` makes
   the node bad by its own reason.
-- Once the fabric manager was active in a boot, every later check of that boot that
-  does not read `active` (`inactive`, `failed`, `activating`, `deactivating`) is bad,
+- Once the fabric manager was active in a boot (its unit, or its process when there is
+  no unit), every later check of that boot that does not read `active` (`inactive`,
+  `failed`, `activating`, `deactivating`, or no process when there is no unit) is bad,
   until it is active again. This also holds when NVSwitch was not determined: a fabric
   manager that ran has a fabric to manage. One that stays down makes the node `lost`
   after two checks, even while the fabric still reads `Completed`.

@@ -145,27 +145,34 @@ XID_SCRIPT = (
     f"journalctl -k -b -o short-monotonic --no-pager | grep -E 'NVRM: Xid' | tail -c {XID_TAIL_BYTES}; "
     "else echo source=none; fi; true"
 )
-# the fabric manager's state (first line; the section's exit code is systemctl's), its unit's
-# restarts, and what shows NVSwitch on the node (:func:`nvswitch_of`): the driver's NVSwitch
-# devices (procfs, device files), NVIDIA PCI bridges (class 0680; only when lspci runs), and the
-# Mellanox (15b3) PCI devices with how many of their VPD read and name the NVLink switch
-# management port (SMDL=SW_MNG: NVSwitch behind a ConnectX bridge, HGX B200 / B300; root only).
-# The __YETO_* paths are for tests.
+# The fabricmanager section. First, so that a section cut off later still has them: the
+# fabric manager's state (the section's exit code is systemctl's) and its unit's LoadState;
+# for a unit that is not there (not-found: a fabric manager run by a GPU Operator driver
+# container, or by the service VM of a shared NVSwitch VM), the nv-fabricmanager processes
+# (comm is cut at 15 characters). Then its unit's restarts, and what shows NVSwitch on the
+# node (:func:`nvswitch_of`): the driver's NVSwitch devices (procfs, device files), NVIDIA PCI
+# bridges (class 0680; only when lspci runs), and every Mellanox (15b3) PCI function with how
+# many of their VPD read (1 s each; none read without timeout) and name the NVLink switch
+# management port (SMDL=SW_MNG: NVSwitch behind a ConnectX bridge, HGX B200 / B300; root
+# only). The __YETO_* paths are for tests.
 FM_SCRIPT = "\n".join((
     '__s=$(systemctl is-active nvidia-fabricmanager 2>/dev/null); __rc=$?; [ -n "$__s" ] && echo "$__s"',
+    '__ls=$(systemctl show -p LoadState --value nvidia-fabricmanager 2>/dev/null); echo "loadstate=$__ls"',
+    '[ "$__ls" = not-found ] && echo "fm_proc=$(grep -lsx nv-fabricmanage "${__YETO_PROC:-/proc}"/[0-9]*/comm '
+    "2>/dev/null | wc -l | tr -d ' ')\"",
     'echo "nrestarts=$(systemctl show -p NRestarts --value nvidia-fabricmanager 2>/dev/null)"',
     '__p="${__YETO_NVSW_PROC:-/proc/driver/nvidia-nvswitch/devices}"',
     "[ -d \"$__p\" ] && echo \"nvswitch_proc=$(ls -A \"$__p\" 2>/dev/null | wc -l | tr -d ' ')\"",
     "echo \"nvswitch_dev=$(ls -d \"${__YETO_DEV:-/dev}\"/nvidia-nvswitch[0-9]* 2>/dev/null | wc -l | tr -d ' ')\"",
     "if command -v lspci >/dev/null 2>&1; then __l=$(lspci -n -d 10de: 2>/dev/null) "
     "&& echo \"nvswitch_pci=$(printf '%s\\n' \"$__l\" | grep -c ' 0680: ')\"; fi",
-    '__m=0; __r=0; __w=0',
-    'for __f in $(grep -lx 0x15b3 "${__YETO_SYS_PCI:-/sys/bus/pci/devices}"/*.0/vendor 2>/dev/null); do',
+    '__m=0; __r=0; __w=0; __t=; command -v timeout >/dev/null 2>&1 && __t=1',
+    'for __f in $(grep -lx 0x15b3 "${__YETO_SYS_PCI:-/sys/bus/pci/devices}"/*/vendor 2>/dev/null); do',
     '  __m=$((__m + 1)); __d=${__f%/vendor}',
-    "  if __v=$(set -o pipefail; head -c 2048 \"$__d/vpd\" 2>/dev/null | tr -d '\\000'); then __r=$((__r + 1)); "
-    'case "$__v" in *SW_MNG*) __w=$((__w + 1));; esac; fi',
+    "  if __v=$(set -o pipefail; timeout 1 head -c 2048 \"$__d/vpd\" 2>/dev/null | tr -d '\\000'); then "
+    '__r=$((__r + 1)); case "$__v" in *SW_MNG*) __w=$((__w + 1));; esac; fi',
     'done',
-    'echo "mlx=$__m"; echo "mlx_vpd=$__r"; echo "sw_mng=$__w"',
+    'echo "mlx=$__m"; [ -n "$__t" ] && { echo "mlx_vpd=$__r"; echo "sw_mng=$__w"; }',
     'exit $__rc',
 ))
 _SECTIONS = (
@@ -337,11 +344,17 @@ def _prev_boot(prev: Mapping[str, Any]) -> str:
 
 
 def read_fabric_manager(sec: Any) -> tuple[str, int | None, dict[str, int]]:
-    """``(state, NRestarts, probe)`` of the ``fabricmanager`` section (:data:`FM_SCRIPT`):
-    the state is '' when it did not read (systemctl missing, no state printed), NRestarts
-    None when it did not read, ``probe`` the counts the section printed (``nvswitch_proc``,
-    ``nvswitch_dev``, ``nvswitch_pci``, ``mlx``, ``mlx_vpd``, ``sw_mng``; a count it did not
-    print is missing: not read)."""
+    """``(state, NRestarts, probe)`` of the ``fabricmanager`` section (:data:`FM_SCRIPT`).
+
+    The state is systemctl's for a unit that is ``loaded``; ``inactive`` / ``failed`` of a
+    unit in another LoadState (``not-found`` prints ``inactive`` too) is no state. A unit
+    that is ``not-found``: ``active`` when an ``nv-fabricmanager`` process runs, else
+    :data:`FM_ABSENT` (not judged at a first read: the fabric state judges the node). ''
+    when it did not read (systemctl missing, no state printed). NRestarts None when it did
+    not read; ``probe`` the counts the section printed (``nvswitch_proc``, ``nvswitch_dev``,
+    ``nvswitch_pci``, ``mlx``, ``mlx_vpd``, ``sw_mng``; a count it did not print is missing:
+    not read), and ``timed_out`` when the section was cut off by its timeout (2: after
+    systemctl's state, 1: before)."""
     if sec is None:
         return "", None, {}
     kv: dict[str, str] = {}
@@ -355,8 +368,20 @@ def read_fabric_manager(sec: Any) -> tuple[str, int | None, dict[str, int]]:
             state = line.split()[0]
     if sec.rc == 127 or state not in FM_STATES:
         state = ""
+    printed = bool(state)  # systemctl's state line came (the probe after it may not have)
+    load = kv.get("loadstate")
+    if load == "not-found":
+        procs = _num(kv.get("fm_proc", ""))
+        state = "" if procs is None else ("active" if procs > 0 else FM_ABSENT)
+    elif load != "loaded" and state in ("inactive", "failed"):  # no unit to have stopped
+        state = ""
     probe = {k: n for k in PROBE_KEYS if (n := _num(kv.get(k, ""))) is not None}
+    if sec.rc in (124, 137):
+        probe["timed_out"] = 2 if printed else 1
     return state, _num(kv.get("nrestarts", "")), probe
+
+
+FM_ABSENT = "not running"  # no unit and no nv-fabricmanager process
 
 
 PROBE_KEYS = ("nvswitch_proc", "nvswitch_dev", "nvswitch_pci", "mlx", "mlx_vpd", "sw_mng")
@@ -375,12 +400,13 @@ def nvswitch_of(probe: Mapping[str, int], gpu_names: Sequence[str], fabric: bool
       ``/dev/nvidia-nvswitch<N>``) or lspci an NVIDIA PCI bridge (class 0680): Hopper HGX;
     * no: a GPU named ``GB...`` (an NVL72-class compute tray: its NVSwitches are in the
       switch trays), or no real fabric state (PCIe);
-    * yes: a Mellanox device whose VPD names the NVLink switch management port (``SW_MNG``):
-      HGX B200 / B300, whose NVSwitches sit behind a ConnectX bridge, not on the host's PCIe
-      (no procfs entry, no device file, no class 0680); the VPD reads as root only;
-    * no: the VPD of every Mellanox device read, none names it;
+    * yes: a Mellanox function whose VPD names the NVLink switch management port
+      (``SW_MNG``): HGX B200 / B300, whose NVSwitches sit behind a ConnectX bridge, not on
+      the host's PCIe (no procfs entry, no device file, no class 0680); the VPD reads as
+      root only;
     * yes: every GPU a B200 / B300 (not GB, not PCIe) with a real fabric state (the rule
-      without root);
+      without root; a VPD without the port does not overrule it);
+    * no: the VPD of every Mellanox function read, none names it;
     * unread: anything else (the fabric unread, another GPU with a fabric and no NVSwitch
       device shown): never taken for no."""
     names = [re.sub(r"^NVIDIA\s+", "", str(n).strip()).upper() for n in gpu_names if str(n).strip()]
@@ -393,11 +419,14 @@ def nvswitch_of(probe: Mapping[str, int], gpu_names: Sequence[str], fabric: bool
         return NVSWITCH_NO, "no NVLink fabric"
     if probe.get("sw_mng", 0) > 0:
         return NVSWITCH_YES, "ConnectX VPD SW_MNG"
+    if fabric and names and all(_B_SXM.match(n) and "PCIE" not in n for n in names):
+        return NVSWITCH_YES, "B200/B300 GPU with an NVLink fabric"
     mlx, vpd = probe.get("mlx"), probe.get("mlx_vpd")
     if mlx and vpd == mlx and probe.get("sw_mng") == 0:
         return NVSWITCH_NO, "ConnectX VPD without SW_MNG"
-    if fabric and names and all(_B_SXM.match(n) and "PCIE" not in n for n in names):
-        return NVSWITCH_YES, "B200/B300 GPU with an NVLink fabric"
+    if probe.get("timed_out"):
+        return NVSWITCH_UNREAD, ("FM section timed out after reading state" if probe["timed_out"] == 2
+                                 else "FM section timed out")
     return NVSWITCH_UNREAD, "NVSwitch not determined"
 
 
@@ -413,12 +442,14 @@ def fabric_manager_absolute(facts: Mapping[str, Any]) -> tuple[str, str]:
     fabric manager: any state but ``active`` is bad (``detail``: the reason). A node known
     to have no NVSwitch of its own (PCIe, a GB compute tray, ConnectX VPD without the switch
     port) is ok whatever its state. NVSwitch not determined, or the state not read (a check
-    whose ``nvidia-smi`` did not answer has neither): unread, never bad nor ok."""
+    whose ``nvidia-smi`` did not answer has neither; no unit and no ``nv-fabricmanager``
+    process, :data:`FM_ABSENT`, is not read either: the fabric state judges the node):
+    unread, never bad nor ok."""
     nvswitch, state = facts.get("nvswitch"), facts.get("fm_state")
     if nvswitch == NVSWITCH_NO:
         return FM_OK, f"no NVSwitch on the node ({facts.get('nvswitch_by') or '?'})"
     if nvswitch != NVSWITCH_YES:
-        return FM_UNREAD, "NVSwitch not determined"
+        return FM_UNREAD, str(facts.get("nvswitch_by") or "NVSwitch not determined")
     if state not in FM_STATES:
         return FM_UNREAD, "nvidia-fabricmanager state unread"
     if state == "active":
@@ -628,6 +659,10 @@ class CudaChecker(Checker):
         active: the boot of its XID cursor (else this one); without ``fm_judged``: judged
         when it has ``fm``.
 
+        A unit that is not there (:func:`read_fabric_manager`): an ``nv-fabricmanager``
+        process reads ``active`` (and is remembered so), none reads :data:`FM_ABSENT`, a
+        reason only in a boot in which it must run.
+
         On a node that must run it (``fm_boot`` this boot, or NVSwitch), ``NRestarts`` that
         grew since the previous check of the same boot is a reason for that check: a unit
         that restarts between two checks (systemd's own ``Restart=``) reads ``active`` at
@@ -654,7 +689,7 @@ class CudaChecker(Checker):
                 facts[key] = value
             else:
                 facts.pop(key, None)
-        if fm in FM_STATES:
+        if fm in FM_STATES or fm == FM_ABSENT:
             facts["fm"] = fm
         if nvswitch == NVSWITCH_NO:  # no NVSwitch of its own: nothing to manage here
             if restarts is not None and boot:
@@ -662,6 +697,8 @@ class CudaChecker(Checker):
             return []
         must = bool(need) and need == boot  # it must be active in this boot
         out = []
+        if fm == FM_ABSENT and must:  # no unit: its process ran in this boot and is gone
+            out.append(f"nv-fabricmanager {fm} ({'NVSwitch present' if why == 'nvswitch' else 'was active'})")
         if fm in FM_STATES and fm != "active":
             if must:
                 out.append(f"nvidia-fabricmanager {fm} ({'NVSwitch present' if why == 'nvswitch' else 'was active'})")
