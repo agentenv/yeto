@@ -1270,6 +1270,7 @@ class SshSamplerPoolOps:
         self._health_generation: dict[str, int] = {}  # ticket -> the assignment its health check is of
         self._health_lost: set[str] = set()  # tickets whose node's health read lost (drain holds its slot)
         self._images: dict[str, Any] | None = None  # node -> site_images.Choice, fixed at the first start
+        self._images_lock = threading.Lock()  # parallel starts (IslandPool) choose the images once
 
     def attach_control(self, control: Any) -> dict[str, Any]:
         """The store control plane (``store_state.PoolControl``): the provider's tickets, holds
@@ -1485,9 +1486,13 @@ class SshSamplerPoolOps:
         for every node (:func:`pool_image_choices`, what the dry-run prints) and kept in
         the pool's state (:meth:`images_path`): a replacement node and a restarted pool
         controller start the same image, the catalog is not read again."""
-        if self._images is None:
-            self._images = self._pin_images()
-        choice = self._images.get(node.name)
+        images = self._images
+        if images is None:
+            with self._images_lock:  # double-checked: one start chooses, the others take its choice
+                if self._images is None:
+                    self._images = self._pin_images()
+                images = self._images
+        choice = images.get(node.name)
         if choice is None:
             return node_image(self.conf, node, spec_of(self.cfg))
         if isinstance(choice, Exception):
@@ -1518,10 +1523,17 @@ class SshSamplerPoolOps:
                   if not isinstance(c, Exception) and not _explicit(c)}
         if pinned:
             try:
+                import tempfile  # noqa: PLC0415
+
                 path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_suffix(".tmp")
-                tmp.write_text(json.dumps({"key": key, "images": pinned}, indent=1, sort_keys=True))
-                tmp.replace(path)
+                fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+                try:
+                    with os.fdopen(fd, "w") as handle:
+                        handle.write(json.dumps({"key": key, "images": pinned}, indent=1, sort_keys=True))
+                    os.replace(tmp, path)
+                except BaseException:
+                    Path(tmp).unlink(missing_ok=True)
+                    raise
             except OSError as error:  # the pool runs; a restarted controller chooses again
                 _log(f"ssh pool: the chosen images were not kept in {path}: {error}")
             for name, c in sorted(choices.items()):

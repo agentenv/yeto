@@ -67,13 +67,16 @@ def _site_catalog_trainer_nodes(args) -> tuple[list | None, str]:
     if not path or not getattr(args, "gpu", None):
         return None, ""
     from ..gpu_spec import parse_gpu_spec
-    from .node_inventory import InventoryError, island_nodes, load_inventory
+    from .node_inventory import InventoryError, load_inventory
 
     try:
         clouds = [spec.cloud for spec in parse_gpu_spec(args.gpu)]
         if "ssh" not in clouds:
             return None, ""
-        nodes = island_nodes(load_inventory(path), "trainer")
+        # the trainer nodes and their spares (a role of the trainer's kind: trainer-spare): a spare
+        # that replaces a node runs the island's image, so the record must fit it too
+        nodes = [n for n in load_inventory(path)
+                 if not n.roles or any(r == "trainer" or r.startswith("trainer-") for r in n.roles)]
     except (ValueError, InventoryError):  # the launch's own checks name a bad --gpu or inventory
         return None, ""
     if not nodes or any(n.image for n in nodes):

@@ -360,7 +360,8 @@ def test_the_inventory_accepts_site_images_and_refuses_a_non_path():
     assert [n.name for n in parse_inventory({"site_images": "/etc/yeto/images.yaml", "nodes": [node]})] == ["b300-0"]
     with pytest.raises(InventoryError, match="site_images: must be a file path"):
         parse_inventory({"site_images": ["a"], "nodes": [node]})
-    with pytest.raises(InventoryError, match=r"known: \['images', 'node_health', 'nodes', 'site_images'\]"):
+    with pytest.raises(InventoryError,
+                       match=r"known: \['images', 'lease_store', 'node_health', 'nodes', 'site_images'\]"):
         parse_inventory({"lease": "x", "nodes": [node]})
 
 
@@ -532,9 +533,7 @@ def test_the_pool_fixes_its_images_at_the_first_start_and_keeps_them(tmp_path, m
     monkeypatch.setattr(sp, "spec_of", lambda cfg: spec)
 
     def ops():
-        o = sp.SshSamplerPoolOps.__new__(sp.SshSamplerPoolOps)
-        o.cfg, o.conf, o.run_id, o.state_dir, o._images = {}, conf, "run1", tmp_path / "state", None
-        return o
+        return _pool_ops(conf, tmp_path)
 
     first = ops()
     assert first.image_for(conf.nodes[0]) == REF3
@@ -571,3 +570,108 @@ def test_an_unquoted_yaml_timestamp_reads_as_its_iso_text(tmp_path):
     assert "at: 2026-11-26T10:00:00Z" in path.read_text()
     (r,) = si.load(path)
     assert r.at == "2026-11-26T10:00:00Z"
+
+
+def _pool_ops(conf, tmp_path):
+    o = sp.SshSamplerPoolOps.__new__(sp.SshSamplerPoolOps)
+    o.cfg, o.conf, o.run_id, o.state_dir, o._images = {}, conf, "run1", tmp_path / "state", None
+    import threading
+
+    o._images_lock = threading.Lock()
+    return o
+
+
+def test_parallel_starts_choose_the_pool_images_once(tmp_path, monkeypatch):
+    import threading
+    import time as _time
+
+    spec = json.loads(K31_SPEC.read_text())
+    monkeypatch.setattr(sp, "spec_of", lambda cfg: spec)
+    conf = _pool(write_catalog(tmp_path / "c.yaml", record(role="sampler", engine="vllm", ref=REF3)))
+    calls = []
+
+    def choices(conf_, spec_, *, only=None):  # each call would see a newer catalog (an adopt in between)
+        calls.append(1)
+        _time.sleep(0.2)
+        ref = f"registry.example/site/vllm-{len(calls)}@sha256:{D1}"
+        return {"b300-0": si.Choice(ref, si.SOURCE_SITE, why="test")}
+
+    monkeypatch.setattr(sp, "pool_image_choices", choices)
+    ops = _pool_ops(conf, tmp_path)
+    barrier, got, errors = threading.Barrier(6), [], []
+
+    def start():
+        barrier.wait()
+        try:
+            got.append(ops.image_for(conf.nodes[0]))
+        except Exception as error:  # noqa: BLE001
+            errors.append(error)
+
+    threads = [threading.Thread(target=start) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert errors == [] and len(calls) == 1 and set(got) == {f"registry.example/site/vllm-1@sha256:{D1}"}
+    kept = json.loads(ops.images_path().read_text())
+    assert kept["images"]["b300-0"]["ref"] == got[0]  # the state file names the image the nodes run
+    assert [p.name for p in ops.images_path().parent.iterdir()] == [ops.images_path().name]  # no temporary file
+
+
+def _kept(ops, spec, images, **key):
+    from yeto.launch import engine_images
+
+    needs = engine_images.spec_needs(spec)
+    doc = {"key": {"model": needs.get("model"), "engine": needs.get("engine_pref"), "catalog": ops.conf.site_images,
+                   **key}, "images": images}
+    ops.images_path().parent.mkdir(parents=True, exist_ok=True)
+    ops.images_path().write_text(json.dumps(doc))
+
+
+def test_a_kept_image_never_replaces_a_named_one_or_another_model(tmp_path, monkeypatch):
+    spec = json.loads(K31_SPEC.read_text())
+    monkeypatch.setattr(sp, "spec_of", lambda cfg: spec)
+    catalog = write_catalog(tmp_path / "c.yaml", record(role="sampler", engine="vllm", ref=REF3))
+    kept = {"b300-0": {"ref": f"registry.example/site/kept@sha256:{D2}", "source": si.SOURCE_SITE}}
+    named = _pool_ops(_pool(catalog, image=f"ghcr.io/x/pool@sha256:{D1}"), tmp_path)
+    _kept(named, spec, kept)
+    assert named.image_for(named.conf.nodes[0]) == f"ghcr.io/x/pool@sha256:{D1}"  # the configuration names it
+    auto = _pool_ops(_pool(catalog), tmp_path / "b")
+    _kept(auto, spec, kept)
+    assert auto.image_for(auto.conf.nodes[0]) == kept["b300-0"]["ref"]  # the same pool: its start's image
+    other = _pool_ops(_pool(catalog), tmp_path / "c")
+    _kept(other, spec, kept, model="Qwen/Qwen3-8B")
+    assert other.image_for(other.conf.nodes[0]) == REF3  # kept for another model: chosen again
+
+
+def test_a_record_of_another_device_family_does_not_fit():
+    from types import SimpleNamespace
+
+    r = si.parse_record(record(device_family="cuda"))
+    ppu = SimpleNamespace(name="p0", family="ppu", cpu_arch="x86_64", card_arch="sm103")
+    assert r.problems(ppu) == ["it is a cuda image, node p0 is ppu"]
+    assert si.parse_record(record(device_family=None)).problems(ppu) == []
+
+
+def test_the_trainer_match_takes_the_spares_too(tmp_path, capsys):
+    from yeto.launch.rl_backend import _builtin_rl_image, resolve_default_rl_image
+
+    inv = _inventory(tmp_path, catalog=write_catalog(tmp_path / "c.yaml", record()), nodes=2)
+    doc = yaml.safe_load(inv.read_text())
+    doc["nodes"][0]["roles"] = ["trainer"]
+    doc["nodes"][1].update(roles=["trainer-spare"], card="H200", hbm_gib=141)  # the record does not fit the spare
+    inv.write_text(yaml.safe_dump(doc))
+    args = _args(inv)
+    resolve_default_rl_image(args)
+    assert args.rl_image == _builtin_rl_image(args)
+    assert "b300-1 has sm90" in capsys.readouterr().err
+
+
+def test_the_kept_file_is_written_through_a_temporary_file_of_its_own(tmp_path, monkeypatch):
+    spec = json.loads(K31_SPEC.read_text())
+    monkeypatch.setattr(sp, "spec_of", lambda cfg: spec)
+    ops = _pool_ops(_pool(write_catalog(tmp_path / "c.yaml", record(role="sampler", engine="vllm", ref=REF3))),
+                    tmp_path)
+    ops.images_path().with_suffix(".tmp").mkdir(parents=True)  # another writer's fixed temporary path
+    assert ops.image_for(ops.conf.nodes[0]) == REF3
+    assert json.loads(ops.images_path().read_text())["images"]["b300-0"]["ref"] == REF3
