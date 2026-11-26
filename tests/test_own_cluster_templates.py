@@ -23,9 +23,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 KIT = ROOT / "examples" / "own-cluster"
 TEMPLATES = ("run.own-trainer-sky-sampler.json", "run.own-trainer-modal-sampler.json", "run.own-sampler-pool.json",
-             "run.fleet-own-and-cloud.json")
+             "run.fleet-own-and-cloud.json", "run.own-trainer-own-sampler.json")
 ENDPOINT = "https://acct.r2.example"
 SAMPLER_IMAGE = "ghcr.io/example/vllm-qwen3@sha256:" + "0" * 64
+TRAINER_IMAGE = "ghcr.io/example/yeto-miles@sha256:" + "1" * 64
 
 
 def _probe_url(body: str) -> str:
@@ -64,7 +65,8 @@ def _fill(tmp_path: Path) -> dict[str, Path]:
             "<store.env>": str(tmp_path / "store.env"), "<store-endpoint>": ENDPOINT,
             "<model-revision>": "a" * 40, "<prompts.jsonl>": str(tmp_path / "prompts.jsonl"),
             "<algorithm-spec.async-age2-tis.json>": str(ROOT / "examples/k31/algorithm-spec.async-age2-tis.json"),
-            "<modal-secret>": "oc-store", "<volume>": "oc-weights", "<sampler-image>": SAMPLER_IMAGE}
+            "<modal-secret>": "oc-store", "<volume>": "oc-weights", "<sampler-image>": SAMPLER_IMAGE,
+            "<trainer-image>": TRAINER_IMAGE}
     for path in KIT.iterdir():
         if path.suffix == ".yaml" or path.name.startswith("sampler-spec"):
             fill[f"<{path.name}>"] = str(tmp_path / path.name)
@@ -280,6 +282,70 @@ def test_an_own_sampler_pool_bills_nothing_and_runs_on_the_node_runtime(kit, cap
     assert "estimated spend: $0.00 per node hour" in out
 
 
+def _launch_plan(out: str) -> dict:
+    """The trainer launch dry run's plan: the JSON object of the output with island_requests."""
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"^\{$", out, re.M):
+        try:
+            doc, _ = decoder.raw_decode(out, match.start())
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and "island_requests" in doc:
+            return doc
+    raise AssertionError("no launch plan in the output")
+
+
+def test_an_own_trainer_island_with_an_own_sampler_pool_spends_nothing(kit, capsys):
+    """Every node is the site's own: a 2-node ssh trainer island and a 1-node ssh pool on
+    one B300 inventory; the spend is $0 and budget.wall_h (the run.wall_clock breaker,
+    restarted by every run up) is written out, not left to the 3 h default."""
+    from yeto.launch import ssh_sampler_pool
+    from yeto.launch.node_inventory import island_nodes, load_inventory
+
+    cfg = _cfg(kit, "run.own-trainer-own-sampler.json")
+    argv = cfg["trainer"]["argv"]
+    assert cfg["trainer"]["usd_per_h"] == 0 and argv[argv.index("--gpu") + 1] == "ssh:2x8xb300"
+    assert argv[argv.index("--rl-image") + 1] == f"docker:{TRAINER_IMAGE}"
+    assert cfg["budget"]["wall_h"] == 6
+    (pool,) = cfg["samplers"]
+    assert pool["provider"]["kind"] == "ssh" and "nodes" not in pool["provider"] and pool["target"] == 1
+    assert pool["provider"]["inventory"] == argv[argv.index("--rl-node-inventory") + 1]
+    conf = ssh_sampler_pool.parse_config(pool)
+    assert conf.node_runtime is True and [n.name for n in conf.nodes] == ["own-b300-2"]  # by roles: [sampler]
+    nodes = load_inventory(KIT / "inventory.own-b300-nodes.yaml")
+    assert [n.name for n in island_nodes(nodes, "trainer")] == ["own-b300-0", "own-b300-1"]
+    # a node merged from the YAML anchor without its own address would take the other's
+    assert len({n.address for n in nodes}) == len({n.host for n in nodes}) == len(nodes)
+    (sampler_node,) = [n for n in nodes if "sampler" in n.roles]
+    # the sampler spec fits its node and serves what the trainer releases (bf16, reloaded in place)
+    spec = json.loads(kit.files["sampler-spec.qwen3-4b-vllm-own-b300.json"].read_text())
+    server = spec["engine"]["server"]
+    assert pool["spec"] == str(kit.files["sampler-spec.qwen3-4b-vllm-own-b300.json"])
+    assert spec["engine"]["options"]["tp"] == int(server["topology"].removeprefix("tp")) == sampler_node.cards_per_node
+    assert server["card_model"] == sampler_node.card == "B300"
+    assert server["in_place_reload"] is True and server["quant_scheme"] == server["precision"] == "bf16"
+    # the sampler writes to the run's bucket (another bucket: the trainer waits out first_group)
+    bucket = cfg["store"].removeprefix("s3://").split("/", 1)[0]
+    assert spec["store"] == f"{pool['provider']['workdir']}/stage/{bucket}/runs/__RUN_PREFIX__"
+    rc, out = _dry_run(kit, "run.own-trainer-own-sampler.json", capsys)
+    assert rc == 0, out.why
+    assert ("dry run: spend estimate $0.00/h = pools $0.00/h (own-b300 (ssh) 1 x $0) + trainer $0/h "
+            "(own nodes: ssh:2x8xb300); over the 6 h wall clock $0.00 (budget.usd $5)") in out
+    assert "estimated spend: $0.00 per node hour" in out
+    # the trainer's two nodes and the pool's node each reach the store and the registry
+    assert _reach_calls() == {node: REACHED for node in ("own-b300-0", "own-b300-1", "own-b300-2")}
+    assert f"dry run: own nodes own-b300-0, own-b300-1: checking over ssh that they reach store {ENDPOINT}" in out
+    assert f"dry run: own nodes own-b300-2: checking over ssh that they reach store {ENDPOINT}" in out
+    launches = [c for c in kit.commands if "launch" in c]
+    assert launches and all(c[c.index("--gpu") + 1] == "ssh:2x8xb300" for c in launches)
+    plan = _launch_plan(out)
+    (island,) = plan["island_requests"]
+    assert plan["total_gpus"] == 16 and island["num_nodes"] == 2
+    assert island["ssh_island"]["rank_layout"]["world"] == 16
+    assert island["ssh_island"]["image"] == TRAINER_IMAGE  # the template's --rl-image
+    assert [n["name"] for n in island["ssh_island"]["nodes"]] == ["own-b300-0", "own-b300-1"]
+
+
 def test_a_fleet_of_an_own_and_a_cloud_island_counts_the_own_trainer_at_zero(kit, capsys):
     rc, out = _dry_run(kit, "run.fleet-own-and-cloud.json", capsys)
     assert rc == 0, out.why
@@ -340,6 +406,8 @@ def test_the_fleet_shape_check_reads_each_island_and_only_a_shape_bound_full_lay
     ("run.own-trainer-sky-sampler.json", "own-b300-0"),
     ("run.fleet-own-and-cloud.json", "own-b300-0"),
     ("run.own-sampler-pool.json", "own-smp-2"),
+    ("run.own-trainer-own-sampler.json", "own-b300-1"),
+    ("run.own-trainer-own-sampler.json", "own-b300-2"),
 ])
 def test_a_node_that_cannot_reach_the_store_refuses_the_run_up_and_names_both(kit, name, node, capsys):
     FakeSsh.unreachable = {(node, ENDPOINT)}
@@ -402,7 +470,7 @@ def test_the_templates_run_on_the_shipped_inventory_and_the_docs_name_them():
     assert [n.name for n in island_nodes(nodes, "trainer")] == TRAINER_NODES
     assert [n.name for n in nodes if "sampler" in n.roles] == SAMPLER_NODES
     docs = (ROOT / "docs" / "OWN_CLUSTERS.md").read_text()
-    for name in (*TEMPLATES, "inventory.own-nodes.yaml"):
+    for name in (*TEMPLATES, "inventory.own-nodes.yaml", "inventory.own-b300-nodes.yaml"):
         assert name in docs, name
     for heading in ("## Trainer with cloud samplers", "## Own sampler pools"):
         assert heading in docs

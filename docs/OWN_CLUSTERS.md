@@ -16,6 +16,7 @@ The templates are in `examples/own-cluster/`:
 | `run.own-trainer-modal-sampler.json` | own trainer, Modal L40S samplers |
 | `run.own-sampler-pool.json` | own sampler pool, Modal trainer |
 | `run.fleet-own-and-cloud.json` | a fleet of one own island and one cloud island |
+| `run.own-trainer-own-sampler.json` | own 2-node trainer island and an own one-node sampler pool, nothing billed; on `inventory.own-b300-nodes.yaml` (two 8 x B300 trainer nodes, one 8 x B300 sampler node) with `sampler-spec.qwen3-4b-vllm-own-b300.json` |
 | `sampler-spec.qwen3-4b-vllm*.json` | the Qwen3-4B vLLM sampler of each route (sky, Modal, own nodes) |
 
 Every value in angle brackets is yours to fill in: `<run>`, `<bucket>`,
