@@ -261,8 +261,12 @@ def test_forward_tables_name_flags_of_both_layers():
 # flags: syncer, docker, git, pip, ray, torchrun, sky, ... Pinned so that an island
 # flag renamed in the schema but still spelled the old way in the launcher fails.
 _NON_RL_LITERALS = frozenset({
-    # yeto image adopt (yeto.launch.image_adopt): its flags, and the card tools / docker ps of its idle check
+    # yeto image adopt (yeto.launch.image_adopt): its flags, the card tools / docker ps of its idle
+    # check, and its smoke (yeto.launch.image_smoke: the scripts/prune_layers.py --layers of the
+    # trainer cut; --smoke-arg=--flag=value in its help)
     "--role", "--strict-arch", "--allow-busy", "--showpids", "--csv", "--filter",
+    "--inventory", "--engine", "--catalog", "--min-image-free-gib", "--model-config", "--model-path",
+    "--smoke-store", "--smoke-layers", "--smoke-arg", "--sampler-spec", "--layers", "--flag",
     # podman / docker CLI flags of the own-SSH-node sampler pool (yeto.launch.ssh_sampler_pool)
     "--security-opt", "--signal", "--tail", "--type",
     # the AgentENV-side regctl setting the task image check names (yeto.launch.agentic_setup)

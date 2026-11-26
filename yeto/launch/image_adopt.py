@@ -44,6 +44,8 @@ from pathlib import Path
 from typing import Any
 
 from . import engine_images, image_manifest, image_pull, site_images, trainer_image_check
+from .image_smoke import MAX_LAYERS as MAX_SMOKE_LAYERS
+from .image_smoke import StepResult
 from .node_inventory import Node, card_arch_of
 
 STEPS = ("manifest", "probe", "fit", "pull", "smoke")
@@ -141,15 +143,6 @@ class ImageFacts:
         if self.lock:
             out["image_lock"] = str(self.lock.get("image") or self.lock.get("name") or "present")
         return {k: str(v) for k, v in out.items() if v}
-
-
-@dataclass
-class StepResult:
-    name: str
-    ok: bool
-    detail: str
-    seconds: float
-    data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -782,3 +775,133 @@ class Adopter:
             "device_family": engine_images.canonical_device_family(node.device_family),
             "cpu_arch": node.cpu_arch, "card_archs": [arch] if arch else [], "versions": facts.versions(),
             "evidence": evidence, "status": site_images.VERIFIED})
+
+
+# --- yeto image adopt ------------------------------------------------------------------
+
+
+def add_parser(sub: Any) -> Any:
+    p = sub.add_parser("image", help="site images: `yeto image adopt <ref> --model M --role trainer|sampler "
+                                     "--inventory INV`")
+    image_sub = p.add_subparsers(dest="image_command", metavar="{adopt}", required=True)
+    a = image_sub.add_parser(
+        "adopt", help="check, pre-pull and smoke an image built for a model; record it in the site image catalog",
+        description="Adopt an image built for one model on the nodes of an SSH inventory: registry manifest and "
+                    "digest, a probe of the image on one node, its fit to every node of the role, a parallel "
+                    "pre-pull with the image root checked, and the role's smoke on one node. Only a passing "
+                    "smoke writes the site image catalog (the inventory's site_images:, else "
+                    f"{site_images.DEFAULT_PATH}); an island or pool that names no image then takes it.")
+    a.add_argument("ref", help="the image: REGISTRY/IMAGE:TAG or REGISTRY/IMAGE@sha256:<digest>")
+    a.add_argument("--model", required=True, help="the model the image is built for (an HF id)")
+    a.add_argument("--role", required=True, choices=site_images.ROLES)
+    a.add_argument("--inventory", required=True, help="the SSH node inventory (YAML / JSON)")
+    a.add_argument("--engine", default=None,
+                   help="trainer: the --rl-backend (default: the model registry's); sampler: vllm | sglang | "
+                        "vllm-ascend (default: the engine found in the image)")
+    a.add_argument("--node", default=None, help="the node that probes and smokes (default: the first of the role)")
+    a.add_argument("--catalog", default=None, help="the site image catalog (default: the inventory's site_images:)")
+    a.add_argument("--min-image-free-gib", type=float, default=120.0,
+                   help="free GiB the image root (docker data root / containerd store) of every node needs")
+    a.add_argument("--attention-backend", default="auto",
+                   help="the trainer's attention backend, for the trainer image floor (default auto)")
+    a.add_argument("--dry-run", action="store_true", help="print every step and command; reach no registry or node")
+    t = a.add_argument_group("trainer smoke")
+    t.add_argument("--model-config", default=None,
+                   help="the model's config.json (default: a local dir / the HF cache, else fetched from the Hub)")
+    t.add_argument("--model-revision", default=None, help="the HF revision the smoke cuts")
+    t.add_argument("--model-path", default=None,
+                   help="the model's checkpoint directory on the smoke node (instead of downloading it there)")
+    t.add_argument("--smoke-store", default=None, help="s3://BUCKET/PREFIX: the smoke run's store (its checkpoint)")
+    t.add_argument("--smoke-layers", type=int, default=None,
+                   help=f"layers of the cut (default: the most, at most {MAX_SMOKE_LAYERS}, that fit one node)")
+    t.add_argument("--smoke-arg", action="append", default=[], metavar="ARG",
+                   help="an extra `yeto launch` argument of the smoke (repeat; --smoke-arg=--flag=value)")
+    s = a.add_argument_group("sampler smoke")
+    s.add_argument("--sampler-spec", default=None, help="the pool's sampler spec (JSON) whose engine is smoked")
+    s.add_argument("--release", default=None,
+                   help="the release directory the smoke reloads (container path; default: the engine's base weights)")
+    return p
+
+
+def _model_config(args: Any) -> dict[str, Any]:
+    from ..rl.model_registry.match import load_config  # noqa: PLC0415
+
+    if args.model_config:
+        return load_config(args.model_config)[0]
+    try:
+        return load_config(args.model)[0]
+    except FileNotFoundError:
+        if args.dry_run:
+            raise
+    from ..rl.model_registry.cli import _fetch  # noqa: PLC0415 - config.json only, never weights
+
+    with open(_fetch(args.model, "config.json", args.model_revision), encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _plan(args: Any, request: AdoptRequest, run_id: str) -> Any:
+    """The smoke plan, with the image as :data:`.image_smoke.REF` (the trainer's backend:
+    the registry's, which has a smoke only for the default backend)."""
+    from . import image_smoke  # noqa: PLC0415
+
+    workdir = Path(site_images.default_path()).parent / "image-adopt" / run_id
+    if request.role == "trainer":
+        plan = image_smoke.trainer_plan(
+            request.probe_node, model=request.model, config=_model_config(args), engine=request.engine,
+            store=args.smoke_store, run_id=run_id, workdir=workdir, model_revision=args.model_revision,
+            model_path=args.model_path, layers=args.smoke_layers, extra_args=tuple(args.smoke_arg))
+        return plan
+    if not args.sampler_spec:
+        raise image_smoke.SmokeError("the sampler smoke runs the pool's sampler spec: pass --sampler-spec")
+    spec = json.loads(Path(args.sampler_spec).expanduser().read_text())
+    return image_smoke.sampler_plan(request.probe_node, spec=spec, run_id=run_id, release=args.release)
+
+
+def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
+    """``yeto image adopt``: 0 recorded (or a dry run), 1 a step failed, 2 a bad request."""
+    from . import image_smoke  # noqa: PLC0415
+    from .node_inventory import InventoryError, load_inventory  # noqa: PLC0415
+
+    out = out or sys.stdout
+    try:
+        nodes = role_nodes(load_inventory(args.inventory), args.role)
+        catalog = args.catalog or str(site_images.inventory_catalog_path(args.inventory))
+        request = AdoptRequest(ref=args.ref, model=args.model, role=args.role, nodes=tuple(nodes),
+                               engine=args.engine, node=args.node, catalog=catalog,
+                               min_image_free_gib=args.min_image_free_gib, attention_backend=args.attention_backend)
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
+        slug = re.sub(r"[^a-z0-9]+", "-", args.model.rsplit("/", 1)[-1].lower()).strip("-")[:24] or "model"
+        run_id = f"adopt-{slug}-{args.role}-{stamp}"
+        plan = _plan(args, request, run_id)
+    except (InventoryError, site_images.SiteImagesError, image_smoke.SmokeError, FileNotFoundError, OSError,
+            ValueError) as error:
+        print(f"yeto image adopt: {error}", file=sys.stderr)
+        return 2
+    if args.dry_run:
+        node = request.probe_node
+        role = [n.name for n in request.nodes]
+        lines = [f"yeto image adopt (dry run): {args.ref} for {args.model} as {args.role} on {len(role)} node(s) "
+                 f"{role}",
+                 f"1. manifest: HEAD of {args.ref} in its registry; a tag is pinned to its digest "
+                 f"(below: {image_smoke.REF})",
+                 f"2. probe on {node.name}: {probe_script(image_smoke.REF, node)[:200]} ...",
+                 f"3. fit: CPU, device runtime, built card architectures and the {args.role} engine on {role}",
+                 f"4. pull: ssh + host probe (image root >= {args.min_image_free_gib:g} GiB free), then docker pull "
+                 f"{image_smoke.REF} on {role} in parallel",
+                 "5. " + "\n".join(plan.lines()),
+                 f"then: a verified-smoke record in {catalog}"]
+        print("\n".join(lines), file=out)
+        return 0
+
+    def smoke(adopter: Adopter, ref: str, facts: ImageFacts, engine: str) -> StepResult:
+        return image_smoke.run_plan(plan, ops=adopter.ops, ref=ref, python=facts.python_path, log=adopter.log)
+
+    adopter = Adopter(request, ops=ops, smoke=smoke)
+    try:
+        report = adopter.run()
+    except AdoptError as error:
+        print("\n".join(adopter.report.lines()), file=out)
+        print(f"yeto image adopt: {error}; the site image catalog {catalog} is unchanged", file=sys.stderr)
+        return 1
+    print("\n".join(report.lines()), file=out)
+    return 0

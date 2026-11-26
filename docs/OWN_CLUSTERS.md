@@ -704,3 +704,125 @@ process that reused the pid. A ledger row is closed only after its stop was conf
   minutes is lost and stays quarantined until `yeto cluster release-node`.
 - The layout is never shrunk: without a spare the island waits; it does not change
   TP/PP/EP.
+
+## Onboarding a model image
+
+A new model often comes with an image built for it: a trainer image with the
+kernels and Miles / Megatron versions the model needs, or a sampler image with the
+vLLM or SGLang build that serves it. `yeto image adopt` takes such an image into
+your site, checked and smoked on your own nodes, and records it in the **site image
+catalog**. From then on a trainer island or a sampler pool of those nodes that
+names no image runs it for that model.
+
+```
+yeto image adopt REGISTRY/IMAGE:TAG --model ORG/MODEL --role trainer \
+    --inventory cluster.yaml --smoke-store s3://BUCKET/image-smoke --dry-run
+
+yeto image adopt REGISTRY/IMAGE:TAG --model ORG/MODEL --role sampler \
+    --inventory cluster.yaml --sampler-spec sampler-spec.json --dry-run
+```
+
+`--dry-run` prints every step with its commands and reaches no registry and no
+node. Drop it to adopt the image. The steps, in order:
+
+1. **manifest**: yeto asks the registry for the image's manifest (with the
+   registry login a pull would use: `SKYPILOT_DOCKER_USERNAME` /
+   `SKYPILOT_DOCKER_PASSWORD` / `SKYPILOT_DOCKER_SERVER`, else
+   `~/.docker/config.json`) and pins a tag to its digest. A missing manifest
+   stops here, before any node is contacted.
+2. **probe**: one node (`--node`, default the first of the role) runs the image once
+   with its cards and reads the CPU architecture, Python, torch, CUDA or HIP, the
+   card architectures the image's kernels were built for, the engine packages and
+   the yeto image lock (`/opt/yeto/image`).
+3. **fit**: the image against every node of the role: CPU architecture, device
+   runtime, card architecture (a node's `sm_N` must be built, or a `compute_M` PTX
+   with M <= N; a ROCm node's `gfx` target must be built), the trainer image
+   floors yeto knows, and the role's engine package. A mismatch names the image's
+   lowest card architecture and the node's card, for example
+   `the image is built for sm_90/sm_100 (lowest sm90); node a100-0 has A100-80GB (sm80)`.
+4. **pull**: every node of the role (spares included, `roles: [trainer-spare]`)
+   is checked over SSH, and its image root (the docker data root, or
+   `/var/lib/containerd` with the containerd image store) must have
+   `--min-image-free-gib` free (default 120). Only when every node passes does the
+   pull run, on all nodes in parallel. A node that fails is named with the
+   preflight's finding or docker's error line.
+5. **smoke**, on the probe node:
+   - **trainer**: the model is cut to its first N layers (all their experts, the
+     embeddings and the head, `scripts/prune_layers.py`), N being the largest, at
+     most 16, whose trainer state fits one node in the model registry's sizing
+     (`yeto adapt`'s backend and recipe for the full model). A one-node `ssh:`
+     island then trains one round on synthetic rollouts (no sampler), ends it with
+     a cut in `--smoke-store`, and a second launch resumes from that cut and trains
+     another round. The node needs `scratch:` in the inventory (the cut model is
+     written there). `--model-path` takes the checkpoint from a directory on the
+     node instead of the Hub. When the registry's flags for the model need a file
+     (for example `--rl-expert-selection` for Kimi K3.1), pass it with
+     `--smoke-arg=--rl-expert-selection=/path/selection.json`; any other
+     `yeto launch` flag the run needs goes the same way. Only the Miles backend has
+     a trainer smoke so far.
+   - **sampler**: the engine of `--sampler-spec` (the pool's sampler spec) starts
+     in the image the way the node runtime starts a sampler (the node's device
+     flags and directories), generates once, reloads (the weights of `--release`,
+     default its base weights, as policy version 1) and generates again. A failing
+     step is named, for example `smoke failed: engine: reload failed: ...`.
+
+Any failed step stops the adoption and leaves the catalog unchanged. After a
+passing smoke the catalog gets a `verified-smoke` record with the digest, the
+versions the probe read and the evidence of the run (time, node, seconds per
+step, the nodes that pulled the image).
+
+### The site image catalog
+
+The catalog is `~/.yeto/site-images.yaml`, or the file the inventory names with
+its top-level `site_images:` (a relative path is taken from the inventory's
+directory):
+
+```yaml
+site_images: images/site-images.yaml
+nodes:
+  - name: b300-0
+    ...
+```
+
+Each record:
+
+```yaml
+version: 1
+images:
+  - model: ORG/MODEL
+    role: trainer                  # trainer | sampler
+    engine: miles                  # trainer: the --rl-backend; sampler: vllm | sglang | vllm-ascend
+    ref: REGISTRY/IMAGE@sha256:<64 hex>
+    device_family: cuda
+    cpu_arch: x86_64
+    card_archs: [sm103]            # the card architecture the smoke ran on
+    versions: {python: 3.12.3, torch: 2.9.1+cu130, cuda: "13.0", megatron-core: 0.15.0}
+    evidence: {at: "2026-11-26T10:00:00Z", node: b300-0, seconds: 1834.2, result: pass}
+    status: verified-smoke         # verified-smoke | retired
+```
+
+To stop using a record, set its `status: retired`. A broken catalog (bad YAML, an
+unknown key, a tag instead of a digest) is refused with the file and the record
+named, but only by a run that reads it.
+
+### Which image a run uses
+
+For an `ssh:` trainer island and an ssh sampler pool node:
+
+1. the image the configuration names: `--rl-image`, an inventory `image:` or
+   `images:`, a pool's `container.image`. The catalog is not read;
+2. else the newest `verified-smoke` record of the catalog for the run's model and
+   role whose CPU architecture, card architecture and device family match every
+   node of the island (or the pool node);
+3. else the built-in default (the pinned `--rl-image`, or the engine image catalog's
+   choice for a pool's `container.image: auto`).
+
+The launcher and `pool --dry-run` print the image and where it came from, for
+example:
+
+```
+[launcher] ssh trainer image REGISTRY/IMAGE@sha256:... (adopted 2026-11-26T10:00:00Z on b300-0) (source: site image catalog ...)
+```
+
+A configuration that names its image prints nothing new and runs exactly as
+before.
