@@ -779,7 +779,23 @@ start the control unit on another host. `yeto run up` there takes the run over:
      for example an old control host that comes back during a store outage) refuses before
      anything starts: exit 2, nothing launched, nothing written. The unit tries again every
      30 s; once the store reads, the sequence numbers decide which host drives.
+   - A starting `run up` only reads the mirror until every check before ordering passed (its
+     lock, the forced-stop check, the preflight, the cluster preflight, the fleet plan, the
+     sandbox prepare). It takes its number and writes the mirror first right before the pools
+     start, after reading the mirror again (restored again, its own steps kept, when another
+     host wrote it meanwhile; a forced stop found then refuses it too). A `run up` that is
+     refused (exit 2 or 10) never fences the host that drives the run.
    - At its exit, `run up` writes the last state the 30 s interval had kept back.
+   - A fenced `run up` asks its host's island launches (registered in this host's run
+     registry) of an SSH or Modal island to hand their islands over: it writes the `HANDOFF`
+     flag in each launch's run directory. At its next poll (15 s) the launch acts as fenced:
+     it orders and tears down nothing more, ends with exit 12 and releases its records lock,
+     while the island trains on. The new host then takes that island over without waiting
+     for the lease to run out (the start grace below still applies). A sky island's launch
+     is not asked: no other host can take it over, so it goes on supervising its island. A
+     launch that starts removes a flag an earlier control host left. A launch that did not
+     see the flag (its host lost, or cut off from the run store with its control host) is
+     taken over once its lease ran out.
 3. **Each island launch is taken over once its lease ran out.** An island launch holds its
    records lock (`fleet/trainers/<k>/lock`, a 120 s lease it renews) while its supervisor
    lives. The trainer worker of the new host takes an island over only:
@@ -889,6 +905,14 @@ machines. They stay in the old host's resource ledger.
 
 ### Limits
 
+- **National Compute sampler pools cannot be used with an on-site control plane.** `yeto run up`
+  (`--dry-run` too) refuses such a fleet with exit 10 (a configuration error; the control
+  unit does not restart). Why: an NC pool's leases are in the client ledger of the host
+  that ordered them; after a takeover another control host could neither follow nor release
+  them, and they would bill on unseen. Instead, use SSH or Modal sampler pools (their records
+  are in the run store), or run the fleet without `fleet.syncer_service` (no takeover).
+- **Sky sampler pools need `fleet.sky_api_server`** with an on-site control plane (see
+  "Sampler pools on another host"); without it they are refused the same way (exit 10).
 - If the syncer's host is lost, so is its checkpoint. Start the service on another host only for
   a new run.
 - If the syncer's checkpoint is gone from its host (its working directory was cleared) while

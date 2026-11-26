@@ -634,7 +634,7 @@ def onsite_pool_problem(cfg: dict[str, Any]) -> str | None:
                 return (f"pool {pool.name} (island {island.name}) is a National Compute pool, and an on-site control "
                         "plane (fleet.syncer_service) moves to another host when its host is lost: its leases are in the "
                         "client ledger of the host that ordered them, which another host can neither follow nor release "
-                        "(docs/OWN_CLUSTERS.md). Use ssh or Modal pools, or run the fleet without fleet.syncer_service")
+                        "(docs/OWN_CLUSTERS.md, Limits). Use ssh or Modal pools, or run the fleet without fleet.syncer_service")
     return None
 
 

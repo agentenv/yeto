@@ -795,6 +795,27 @@ def _seed_ssh_journals(args, records, refs, ssh_names, environ=None, states=None
     return seeded
 
 
+def _watch_handoff(args, island_states, environ=None) -> None:
+    """An island launch of an on-site control plane (``JOURNAL_FROM_STORE_ENV``): its island
+    state store watches the run's hand-off flag (``yeto.runs.handoff_flag_path``), which the
+    control host writes when it is fenced (another host drives the run): this launcher then
+    acts as fenced (exit 12, nothing torn down, its records lock released), and the island
+    trains on until the other host's takeover launch reattaches it. A flag an earlier
+    control host left is removed first: it was meant for an earlier launch of this name."""
+    if (environ if environ is not None else os.environ).get(JOURNAL_FROM_STORE_ENV) != "1":
+        return
+    from . import runs
+
+    flag = runs.handoff_flag_path(args.cluster_prefix)
+    try:
+        flag.unlink(missing_ok=True)
+    except OSError as error:
+        print(f"[launcher] WARNING: the hand-off flag {flag} left by an earlier launch was not removed "
+              f"({error}); it is not watched", file=sys.stderr)
+        return
+    island_states.handoff_flag = flag
+
+
 def _lost_island_records(island_states) -> bool:
     """This launcher no longer holds the island records (checked now): another launcher
     supervises the fleet, so this one tears nothing of it down."""
@@ -1041,6 +1062,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                   f"(exit {ISLAND_RECORDS_LOCKED_EXIT})", file=sys.stderr)
             return ISLAND_RECORDS_LOCKED_EXIT
         island_states.keep_lease()
+        _watch_handoff(args, island_states)
         try:
             recorder, adoption, kept_syncer = _plan_island_records(
                 args, specs, learner_names, island_states, island_lock, relaunch=relaunch, ssh_names=ssh_names,

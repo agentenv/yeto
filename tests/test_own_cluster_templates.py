@@ -859,8 +859,8 @@ def test_only_an_on_site_control_plane_s_pools_are_checked():
 
     def plan(provider, *, service="10.0.0.5", per_island=True):
         pool = types.SimpleNamespace(provider=provider, name=f"i0-{provider}")
-        return {fleet.PLAN_KEY: fleet.FleetPlan.__new__(fleet.FleetPlan)} if False else types.SimpleNamespace(
-            per_island=per_island, syncer_service=service, islands=(types.SimpleNamespace(name="own", pools=(pool,)),))
+        return types.SimpleNamespace(per_island=per_island, syncer_service=service,
+                                     islands=(types.SimpleNamespace(name="own", pools=(pool,)),))
 
     import unittest.mock as mock
 
@@ -868,6 +868,10 @@ def test_only_an_on_site_control_plane_s_pools_are_checked():
         with mock.patch.object(fleet, "plan_of", lambda cfg, p=plan(provider): p):
             problem = fleet.onsite_pool_problem({"fleet": {"syncer_service": "10.0.0.5"}})
         assert bool(problem) is refused, (provider, problem)
+        if provider == "nc":  # the reason, the alternatives and where the limit is written
+            assert "client ledger of the host that ordered them" in problem
+            assert "Use ssh or Modal pools, or run the fleet without fleet.syncer_service" in problem
+            assert "docs/OWN_CLUSTERS.md, Limits" in problem
     with mock.patch.object(fleet, "plan_of", lambda cfg: plan("sky", service=None)):
         assert fleet.onsite_pool_problem({"fleet": {}}) is None  # no on-site control plane: as before
     with mock.patch.object(fleet, "plan_of", lambda cfg: plan("sky")):

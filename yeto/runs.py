@@ -52,6 +52,21 @@ def stop_flag_path(name: str) -> Path:
     return run_dir(name) / "STOP"
 
 
+def handoff_flag_path(name: str) -> Path:
+    """``<run_dir>/HANDOFF``: an island launch of an on-site control plane whose control host
+    was fenced (``yeto.rl.up``, exit 76) hands its island over: it ends without tearing
+    anything down (exit 12) and releases its records lock, so the control host that drives
+    the run now takes the island over at once; the island trains on meanwhile."""
+    return run_dir(name) / "HANDOFF"
+
+
+def request_handoff(name: str, why: str) -> Path:
+    path = handoff_flag_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"hand-off requested at {time.time():.3f}: {why}\n", encoding="utf-8")
+    return path
+
+
 def request_stop(name: str) -> Path:
     path = stop_flag_path(name)
     path.parent.mkdir(parents=True, exist_ok=True)

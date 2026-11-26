@@ -12,9 +12,11 @@ import pytest
 
 from test_fleet_trainer_worker import FakeLaunches, fleet, member
 from test_onsite_takeover import LATER, T0, _seed, moving_on_a, started_on_a, worker_on
+from test_rl_algorithm_provenance import _fake_sky  # noqa: F401 - autouse: a fake sky module
 
 from yeto.launch import island_lifecycle as lifecycle
 from yeto.rl import trainer_worker as tw
+from yeto.rl.engine.object_store import DirectoryObjectStore
 
 
 def ended_there(objects, k: int, state: str, *, record: dict | None = None, name: str | None = None,
@@ -461,3 +463,114 @@ def test_an_adopted_modal_call_is_in_the_takeover_host_s_ledger(tmp_path):
         tp._adapter("modal").spawn(prov, Ops())
         calls = [r.id for r in ledger.open_resources() if r.kind == "modal_call"]
         assert calls == expect and prov.results["isl"] == ("fc-1", None)
+
+
+# -- M4: a fenced control host's island launches hand their islands over -----------------------
+
+def _launch_holding(objects, k: int, at: float):
+    """Island ``k``'s launch on host A holds its records lock, renewed just now (``at``)."""
+    from yeto.launch.pool.store_lock import StoreLock
+
+    lock = StoreLock.acquire(objects, lifecycle.lock_prefix(k), holder=f"launch run-i{k} on host-a", ttl_s=120.0,
+                             clock=lambda: at, reclaim=True)
+    assert lock is not None
+    store = lifecycle.IslandStateStore(objects, log=lambda m: None, fence=lock)
+    return lock, store
+
+
+@pytest.mark.parametrize("handed_off", [True, False])
+def test_a_fenced_control_host_s_launch_hands_its_island_over_at_once(tmp_path, monkeypatch, handed_off):
+    """M4: host A was fenced while its island launch still runs (its lease renewed): asked to
+    hand over (the flag), the launch acts as fenced (nothing ordered, nothing torn down) and its
+    end releases the records lock; host B takes the island over now, not only once the lease
+    ran out. Without the flag the launch keeps its island (B waits)."""
+    from yeto import launcher, runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    objects, store, _a, locks = started_on_a(tmp_path)
+    for lock in locks.values():
+        lock.release()
+    lock, states = _launch_holding(objects, 0, LATER - 10)
+    monkeypatch.setenv(launcher.JOURNAL_FROM_STORE_ENV, "1")
+    runs.request_handoff("run-i0", "an earlier control host")  # left for an earlier launch: removed
+    launcher._watch_handoff(SimpleNamespace(cluster_prefix="run-i0"), states)
+    assert not runs.handoff_flag_path("run-i0").exists()
+    lock.clock = lambda: LATER - 5
+    states.guard_order("an order")  # holds: not handed off
+    if handed_off:
+        runs.request_handoff("run-i0", "fenced")
+    lost = launcher._lost_island_records(states)  # the launcher's end: hands off, tears nothing down
+    assert lost is handed_off
+    if handed_off:
+        assert isinstance(states.fenced, lifecycle.IslandRecordsHandedOff)
+        with pytest.raises(lifecycle.IslandRecordsFenced):
+            states.guard_order("a relaunch")
+        lock.release()  # the launcher's finally
+    b, launches = worker_on(objects, store, "host-b", LATER)
+    b.step()
+    assert ("run-i0" in [p for p, _ in launches.starts]) is handed_off
+    assert (b.load(0)["host"] == "host-b") is handed_off
+
+
+def test_an_island_launch_watches_the_hand_off_flag_of_an_on_site_control_plane_only(tmp_path, monkeypatch):
+    from yeto import launcher, runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.delenv(launcher.JOURNAL_FROM_STORE_ENV, raising=False)
+    states = lifecycle.IslandStateStore(DirectoryObjectStore(tmp_path / "store"), log=lambda m: None)
+    runs.request_handoff("run-i0", "x")
+    launcher._watch_handoff(SimpleNamespace(cluster_prefix="run-i0"), states)
+    assert states.handoff_flag is None and runs.handoff_flag_path("run-i0").exists()  # untouched
+    launcher._watch_handoff(SimpleNamespace(cluster_prefix="run-i0"), states,
+                            environ={launcher.JOURNAL_FROM_STORE_ENV: "1"})
+    assert states.handoff_flag == runs.handoff_flag_path("run-i0")
+
+
+def test_the_background_store_hands_off_at_its_next_poll(tmp_path, monkeypatch):
+    """The controller's poll reads the store's ``fenced`` (``FleetController._raise_if_fenced``):
+    the background thread sets it from the flag while nothing is written (the lease renewal)."""
+    import time
+
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    objects = DirectoryObjectStore(tmp_path / "store")
+    lock, _ = _launch_holding(objects, 0, time.time())
+    lock.clock = time.time
+    states = lifecycle.IslandStateStore(objects, log=lambda m: None, fence=lock, background=True, stop_poll_s=0.05)
+    states.handoff_flag = runs.handoff_flag_path("run-i0")
+    states.keep_lease()
+    runs.request_handoff("run-i0", "fenced")
+    deadline = time.time() + 5
+    while states.fenced is None and time.time() < deadline:
+        time.sleep(0.02)
+    states.close()
+    assert isinstance(states.fenced, lifecycle.IslandRecordsHandedOff)
+
+
+def test_a_launcher_asked_to_hand_over_ends_hands_off_and_releases_its_records_lock(monkeypatch, tmp_path):
+    """M4, the island launch: the hand-off flag of its fenced control host, written after its
+    start, ends it with exit 12; nothing cancelled, stopped or torn down (the islands train
+    on), and its records lock is released for the host that drives the run now."""
+    from test_island_adopt import _fleet_args, _store
+    from test_rl_launcher_island_failure import Clock, _setup
+
+    from yeto import launcher, runs
+    from yeto.launch.pool.store_lock import StoreLock
+
+    record = []
+    _setup(monkeypatch, tmp_path, failing=set(), succeeding={0, 1}, clock=Clock(), record=record)
+    _store(monkeypatch, tmp_path)
+    monkeypatch.setenv(launcher.JOURNAL_FROM_STORE_ENV, "1")
+    real = launcher._watch_handoff
+
+    def watch_then_fenced(args, states, environ=None):
+        real(args, states, environ)
+        runs.request_handoff(args.cluster_prefix, "host host-b drives the run now")  # its control host fenced
+
+    monkeypatch.setattr(launcher, "_watch_handoff", watch_then_fenced)
+    args = _fleet_args(tmp_path)
+    assert launcher.run(args) == launcher.ISLAND_RECORDS_LOCKED_EXIT
+    assert [r for r in record if r[0] in ("cancel", "stop_app", "down", "terminate")] == []
+    objects = DirectoryObjectStore(tmp_path / "store")
+    assert StoreLock.holder_of(objects, launcher.ISLAND_RECORDS_LOCK) is None  # released at its end

@@ -1953,6 +1953,8 @@ def test_a_control_unit_without_the_island_hmac_key_is_a_configuration_error(tmp
     RunUpConfigRefused): exit 10, never restarted; another refusal before ordering stays 2."""
     monkeypatch.delenv("YETO_ISLAND_HMAC_KEY")
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    objects = DirectoryObjectStore(tmp_path / "store")  # the run store: run up reads its state mirror
+    monkeypatch.setattr(up.Run, "_objects", lambda self, *a, **kw: objects)
     path = onsite_config(tmp_path)
     logs: list[str] = []
     assert fs.run_control(str(path), log=logs.append) == fs.CONFIG_EXIT
