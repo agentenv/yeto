@@ -185,33 +185,80 @@ def test_a_launch_gone_without_a_run_record_is_torn_down_before_the_move(tmp_pat
     _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
     w.step()
     assert launches.torn_down == ["run-i0"]
+    assert [p for p, _ in launches.starts] == ["run-i0"]  # nothing ordered in the step that tears it down
+    w.step()  # no ledger left open: the move goes on
     assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
 
 
-@pytest.mark.parametrize("ledger, torn", [
-    ([{"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0"}], True),  # an INIT cluster left behind
-    ([], False),  # all released: its own teardown did it
-    (OSError("disk"), True),  # unread: not known
-])
-def test_a_failed_launch_with_open_ledger_rows_is_torn_down_before_the_move(tmp_path, ledger, torn):
+class Clock:
+    def __init__(self) -> None:
+        self.t = 1_000_000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _ledger_fleet(tmp_path, rows, *, budget=3):
+    """An island whose launch fails while a new target is applied; its old launch's ledger
+    has ``rows`` open (a list, mutated by the test; an exception: unread)."""
     objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
     launches = FakeLaunches()
-    asked = []
 
     def open_resources(prefix):
-        asked.append(prefix)
-        if isinstance(ledger, Exception):
-            raise ledger
-        return ledger
+        if isinstance(rows, Exception):
+            raise rows
+        return rows
 
     launches.open_resources = open_resources
-    w = worker(objects, store, launches)
+    clock, logs = Clock(), []
+    w = tw.TrainerWorker(store, objects, launches, lifecycle.IslandStateStore(objects, log=lambda m: None),
+                         log=logs.append, clock=clock, relaunch_budget=budget)
     w.step()
     launches.end("run-i0", 1, log="sky: no capacity in any zone")
     _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    return w, launches, clock, logs
+
+
+def test_a_move_waits_for_the_old_prefix_s_teardown_before_ordering(tmp_path):
+    """Bug 30: the old launch left an INIT cluster open in its ledger. Its prefix is torn
+    down and the next incarnation orders nothing until the ledger has no open row (a leftover
+    machine would hold the target's quota and fail the new order)."""
+    rows = [{"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0"}]
+    w, launches, clock, logs = _ledger_fleet(tmp_path, rows)
     w.step()
-    assert asked == ["run-i0"]
-    assert getattr(launches, "torn_down", []) == (["run-i0"] if torn else [])
+    assert launches.torn_down == ["run-i0"] and [p for p, _ in launches.starts] == ["run-i0"]
+    assert w.load(0)["state"] == tw.MOVING and w.load(0)["clearing"]["prefix"] == "run-i0"
+    clock.t += tw.CLEAR_TIMEOUT_S / 2
+    w.step()  # down not done yet: still nothing ordered
+    assert [p for p, _ in launches.starts] == ["run-i0"]
+    rows.clear()  # `yeto down` released it
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+    record = w.load(0)
+    assert record["incarnation"] == 1 and record["relaunches"] == 0 and record["clearing"] is None
+    assert any("old prefix torn down" in m for m in logs)
+
+
+def test_a_teardown_that_does_not_finish_in_time_orders_nothing_and_counts(tmp_path):
+    w, launches, clock, logs = _ledger_fleet(tmp_path, OSError("ledger unread"), budget=2)
+    w.step()
+    assert launches.torn_down == ["run-i0"]
+    clock.t += tw.CLEAR_TIMEOUT_S + 1
+    w.step()  # timed out: an infrastructure failure, torn down again, still nothing ordered
+    assert [p for p, _ in launches.starts] == ["run-i0"] and launches.torn_down == ["run-i0", "run-i0"]
+    assert w.load(0)["relaunches"] == 1 and w.load(0)["state"] == tw.MOVING
+    assert any("still not torn down" in m and "run-i0" in m for m in logs)
+    clock.t += tw.CLEAR_TIMEOUT_S + 1
+    w.step()  # the budget spent: given up with its bill open, nothing ordered
+    record = w.load(0)
+    assert record["state"] == lifecycle.ABANDONED and record["billing_open"]
+    assert [p for p, _ in launches.starts] == ["run-i0"]
+
+
+def test_a_failed_launch_whose_ledger_is_all_released_moves_at_once(tmp_path):
+    w, launches, clock, logs = _ledger_fleet(tmp_path, [])
+    w.step()
+    assert getattr(launches, "torn_down", []) == []
     assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
 
 
