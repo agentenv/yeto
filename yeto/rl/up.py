@@ -95,6 +95,7 @@ import json
 import math
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -1482,7 +1483,7 @@ class Run:
 
         # the image the trainer's launch resolves, under the environment it starts with
         commands = commands_for_launch_argv([str(a) for a in self.cfg["trainer"]["argv"]], self.env)
-        shown = "; ".join("yeto " + " ".join(c) for c in commands)
+        shown = "; ".join("yeto " + shlex.join(c) for c in commands)  # quoted: runs as pasted
         if dry_run:
             if commands:
                 _log(f"dry run: before ordering, run up would run the trainer's cluster preflight: {shown}")
