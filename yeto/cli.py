@@ -955,7 +955,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(
         dest="command",
         metavar="{launch,shape,merge,rl,sample-diffusion,engine-sampler-modal,status,"
-        "dashboard,logs,down,stop-run,preflight,adapt,model}",
+        "dashboard,logs,down,stop-run,preflight,cluster,adapt,model}",
     )
 
     launch = sub.add_parser(
@@ -1162,6 +1162,10 @@ def build_parser() -> argparse.ArgumentParser:
     from .launch.preflight.cluster import add_parser as _add_preflight_parser
 
     _add_preflight_parser(sub)
+
+    from .cluster_cli import add_parser as _add_cluster_parser
+
+    _add_cluster_parser(sub)
 
     logs = sub.add_parser("logs", help="stream a run's launcher log (Ctrl-C detaches)")
     logs.add_argument("run", help="run name (its --cluster-prefix)")
@@ -2770,6 +2774,10 @@ def main(argv=None) -> int:
         from .launch.preflight.cluster import main as preflight_main
 
         return preflight_main(args)
+    if args.command == "cluster":
+        from .cluster_cli import main as cluster_main
+
+        return cluster_main(args)
     if args.command == "sandbox":
         from .sandbox.cli import main as sandbox_main
 

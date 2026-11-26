@@ -543,8 +543,25 @@ def rdma_island(nodes: Sequence[Node]) -> bool:
 
 
 # --------------------------------------------------------- inventory checks
-def inventory_checks(nodes: Sequence[Node], image: str | None) -> list[Check]:
-    out: list[Check] = []
+def fabric_check(nodes: Sequence[Node], inventory: Sequence[Node] | None = None) -> list[Check]:
+    """The nodes of a multi-node island in a grouped inventory (``fabric_group``,
+    :mod:`..fabric_groups`) are one group: a FAIL when not, the other checks still run
+    (the preflight diagnoses the nodes). Nothing for an inventory without groups."""
+    from .. import fabric_groups
+
+    every = list(nodes if inventory is None else inventory)
+    if len(nodes) < 2 or not fabric_groups.grouped(every):
+        return []
+    ok, message, _ = fabric_groups.check_placement(list(nodes), len(nodes), inventory=every)
+    if ok:
+        return [Check("inventory", "fabric_group", PASS, message)]
+    return [Check("inventory", "fabric_group", FAIL, message,
+                  "run `yeto cluster probe` on these nodes, or take trainer nodes of one fabric group")]
+
+
+def inventory_checks(nodes: Sequence[Node], image: str | None, *,
+                     inventory: Sequence[Node] | None = None) -> list[Check]:
+    out: list[Check] = fabric_check(nodes, inventory)
     rdma = rdma_island(nodes)
     for node in nodes:
         if node.runtime == "docker" and node.device_family == "cuda":
@@ -1041,6 +1058,9 @@ class Steps:
     nccl_sizes: str = "16M,128M,1G"
     nccl_iters: int = 20
     nccl_all: bool = True  # also run the collectives on every node at once
+    # the node pairs of the NCCL collectives: disjoint (0,1), (2,3), ...; or every pair,
+    # in rounds of disjoint pairs (``yeto cluster probe``: the transport of each pair)
+    nccl_pairs: str = "disjoint"  # disjoint | all
     master_port: int = 29611
     ib_port: int = 18515
 
@@ -1051,8 +1071,16 @@ class ClusterPreflight:
     def __init__(self, nodes: Sequence[Node], *, image: str | None = None, ops: SshOps | None = None,
                  req: Requirements | None = None, steps: Steps | None = None, out_dir: Path | None = None,
                  log: Callable[[str], None] = lambda m: print(m, file=sys.stderr, flush=True),
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, max_parallel: int = 32,
+                 inventory: Sequence[Node] | None = None) -> None:
         self.nodes = list(nodes)
+        self.inventory = list(inventory) if inventory is not None else None  # decides "grouped"
+        # nodes, or node pairs, at once. At least 2: the two ends of a pair (ib_write_bw
+        # server and client, the two NCCL ranks) must run together, or the server waits
+        # alone and the pair FAILs falsely. The all-node NCCL round (nccl_all) needs every
+        # node at once, so it holds only with max_parallel >= the node count (the default
+        # 32; ``yeto cluster probe`` runs nccl_all=False).
+        self.max_parallel = max(2, int(max_parallel))
         self.image = image
         self.ops = ops or SshOps()
         self.req = req or Requirements()
@@ -1084,7 +1112,7 @@ class ClusterPreflight:
     def _parallel(self, fn: Callable[[Any], Any], items: Sequence[Any]) -> list[Any]:
         if not items:
             return []
-        with ThreadPoolExecutor(max_workers=max(1, min(32, len(items)))) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, min(self.max_parallel, len(items)))) as pool:
             return list(pool.map(fn, items))
 
     def _env(self, node: Node, n: int, **extra: str) -> dict[str, str]:
@@ -1093,7 +1121,7 @@ class ClusterPreflight:
 
     # -- steps
     def run(self) -> Report:
-        checks = inventory_checks(self.nodes, self.image)
+        checks = inventory_checks(self.nodes, self.image, inventory=self.inventory)
         checks += self._reach()
         live = [s for s in self.states if s.reachable]
         checks += self._host(live)
@@ -1352,7 +1380,8 @@ class ClusterPreflight:
     def _nccl(self, ready: Sequence[NodeState]) -> list[Check]:
         if len(ready) < 2:
             return [Check("cluster", "nccl", SKIP, "fewer than two nodes can run the container")]
-        groups: list[list[list[NodeState]]] = [[[ready[i], ready[j]] for i, j in r] for r in disjoint_pairs(len(ready))]
+        rounds = round_robin(len(ready)) if self.steps.nccl_pairs == "all" else disjoint_pairs(len(ready))
+        groups: list[list[list[NodeState]]] = [[[ready[i], ready[j]] for i, j in r] for r in rounds]
         if self.steps.nccl_all and len(ready) > 2:
             groups.append([list(ready)])
         files = {BENCH_FILE: bench_source()}
@@ -1620,9 +1649,26 @@ def egress_preflight(nodes: Sequence[Node], endpoints: Sequence[Endpoint], *, op
 
 
 # --------------------------------------------------------------------- CLI
+class ResolvedNodes(list):
+    """The nodes :func:`resolve_nodes` returns; ``inventory``: the whole inventory they
+    come from (which decides whether it is grouped, :func:`fabric_check`)."""
+
+    inventory: list[Node] | None = None
+
+
 def resolve_nodes(gpu: str, inventory: str | None) -> list[Node]:
     """The trainer nodes of ``--gpu ssh:<NxMxCARD>`` with ``--rl-node-inventory``, or of
-    ``--gpu ssh:<inventory file>``."""
+    ``--gpu ssh:<inventory file>`` (a :class:`ResolvedNodes`)."""
+    nodes, every = resolve_inventory(gpu, inventory)
+    out = ResolvedNodes(nodes)
+    out.inventory = every
+    return out
+
+
+def resolve_inventory(gpu: str, inventory: str | None) -> tuple[list[Node], list[Node]]:
+    """:func:`resolve_nodes` and the whole inventory they come from. Nodes that are not
+    one fabric group of a grouped inventory are returned all the same: the preflight
+    reports it as a check (:func:`fabric_check`) and still checks the nodes."""
     if not gpu.startswith("ssh:"):
         raise InventoryError(f"--gpu {gpu!r}: preflight runs on ssh: nodes (ssh:NxMxCARD or ssh:<inventory>)")
     rest = gpu[4:]
@@ -1630,15 +1676,22 @@ def resolve_nodes(gpu: str, inventory: str | None) -> list[Node]:
     if rest.endswith((".yaml", ".yml", ".json")) or path.is_file():
         if inventory and Path(inventory).expanduser() != path:
             raise InventoryError("give the inventory once: --gpu ssh:<inventory> or --rl-node-inventory")
-        return island_nodes(load_inventory(path), "trainer")
+        from .. import fabric_groups
+
+        every = load_inventory(path)
+        nodes = island_nodes(every, "trainer")
+        if len(nodes) > 1 and not fabric_groups.grouped(every):
+            fabric_groups.placement_hint(fabric_groups.HINT, log_only=True)
+        return nodes, list(every)
     if not inventory:
         raise InventoryError(f"--gpu {gpu} needs --rl-node-inventory (the nodes to check)")
     from ...gpu_spec import parse_gpu_spec
 
     (island,) = parse_gpu_spec(gpu)
-    args = argparse.Namespace(rl_node_inventory_nodes=load_inventory(inventory))
+    every = load_inventory(inventory)
+    args = argparse.Namespace(rl_node_inventory_nodes=every)
     try:
-        return list(inventory_trainer_nodes(args, island))
+        return list(inventory_trainer_nodes(args, island, hint_to_log=True, refuse_split=False)), list(every)
     except SshIslandError as exc:
         raise InventoryError(str(exc)) from None
 
@@ -1688,6 +1741,7 @@ def trainer_image(image: str | None, nodes: Sequence[Node]) -> str | None:
 def main(args: argparse.Namespace, *, ops: SshOps | None = None) -> int:
     try:
         nodes = resolve_nodes(args.gpu, args.rl_node_inventory)
+        every = getattr(nodes, "inventory", None)
         image = trainer_image(args.image, nodes)
     except (InventoryError, SshIslandError, ValueError) as exc:
         print(f"[yeto] preflight: {exc}", file=sys.stderr)
@@ -1713,7 +1767,7 @@ def main(args: argparse.Namespace, *, ops: SshOps | None = None) -> int:
     req = Requirements(min_driver_major=args.min_driver,
                        min_host_memory_gib=env_req.min_host_memory_gib if memory is None else memory,
                        min_disk_free_gib=env_req.min_disk_free_gib if disk is None else disk)
-    pf = ClusterPreflight(nodes, image=image, ops=ops, req=req, steps=steps, out_dir=out_dir)
+    pf = ClusterPreflight(nodes, image=image, ops=ops, req=req, steps=steps, out_dir=out_dir, inventory=every)
     report = pf.run()
     print(json.dumps(report.to_json(), indent=2) if args.json else report.table(), end="" if not args.json else "\n")
     print(f"[yeto] preflight report: {out_dir}", file=sys.stderr)

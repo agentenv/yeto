@@ -69,6 +69,13 @@ like a Modal Secret, the key then never passes through the launcher; a docker
 trainer reads it with ``docker run --env-file``. Without it the launcher's store
 credential reaches the node in the start script on the SSH session's stdin
 (never in an argv or a file) and the container by name (``-e NAME``).
+``fabric_group`` names the set of nodes that reach each other at RDMA rate
+(``ib_write_bw`` at link rate and NCCL over ``NET/IB``); ``yeto cluster probe``
+measures it and writes it on request (:mod:`.fabric_groups`). Once any node of the
+file has the key (``null`` included), the nodes of a multi-node trainer island must
+share one group; a file without any ``fabric_group`` key places islands as before.
+``fabric_group: unavailable`` (reserved) marks a node the probe found without RDMA
+to the others: it never joins a multi-node island, a single-node one takes it.
 
 An NVIDIA (``cuda``) multi-node island over ``ib`` / ``roce``, e.g. 6 x 8 B300
 (with ``--model-store local:///data/models --model-store-source s3://...`` the
@@ -134,7 +141,7 @@ _REQUIRED = ("name", "host", "device_family", "cpu_arch", "card", "cards_per_nod
              "host_memory_gib")
 _KNOWN = _REQUIRED + ("proxy_jump", "fabric", "interface", "address", "mounts", "image", "runtime",
                       "docker_args", "env", "price_per_card_hour", "roles", "scratch", "scratch_min_free_gib",
-                      "store_env_file", "node_health")
+                      "store_env_file", "node_health", "fabric_group")
 NODE_HEALTH_MODES = ("auto", "off")
 # node profile keys (unified-sampler-pool): parse_profile reads them, parse_node accepts and ignores them
 _PROFILE_KEYS = ("card_arch", "container", "paths", "model_source", "reach")
@@ -142,6 +149,10 @@ _PROFILE_KEYS = ("card_arch", "container", "paths", "model_source", "reach")
 # into shell lines and `docker run` options
 _SCRATCH_FORBIDDEN = frozenset("$`\\\"' :,;&|<>*?\n\t")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# a fabric group name (``yeto cluster probe`` writes ``fg-<hash>``; a site may name its own)
+FABRIC_GROUP = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+FABRIC_UNAVAILABLE = "unavailable"  # reserved: no RDMA to the other nodes (single-node islands only)
+FABRIC_UNGROUPED = ""  # ``fabric_group: null``: the key is there (the file is grouped), the node in no group
 
 
 class InventoryError(ValueError):
@@ -222,6 +233,10 @@ class Node:
     # the running node's health check (yeto.hw.node_health): "auto" (on where the family has a
     # checker) or "off"; None: not declared (auto, and nothing about it is printed)
     node_health: str | None = None
+    # the nodes that reach each other at RDMA rate share a group (``yeto cluster probe``,
+    # :mod:`.fabric_groups`); None: no fabric_group key; FABRIC_UNGROUPED (""): the key is
+    # null; FABRIC_UNAVAILABLE: reserved, the node has no RDMA to the others
+    fabric_group: str | None = None
 
     @property
     def hbm_gib_per_node(self) -> float:
@@ -433,6 +448,15 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None,
         raise InventoryError(f"node {name}: roles must be a list of strings, got {roles!r}")
     scratch = _host_path(raw, name, "scratch")
     store_env_file = _host_path(raw, name, "store_env_file")
+    fabric_group = raw.get("fabric_group")
+    if "fabric_group" in raw and fabric_group is None:
+        fabric_group = FABRIC_UNGROUPED
+    elif fabric_group is not None and (not isinstance(fabric_group, str)
+                                       or not FABRIC_GROUP.fullmatch(fabric_group)):
+        raise InventoryError(f"node {name}: fabric_group must be a group name (letters, digits, '.', '_', "
+                             f"'-'; at most 64), got {fabric_group!r}")
+    elif fabric_group is not None and fabric_group.lower() == FABRIC_UNAVAILABLE:
+        fabric_group = FABRIC_UNAVAILABLE  # the reserved value, whatever its case
     min_free = raw.get("scratch_min_free_gib")
     if min_free is not None:
         if scratch is None:
@@ -464,6 +488,7 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None,
         scratch_min_free_gib=min_free,
         store_env_file=store_env_file,
         node_health=parse_node_health(raw["node_health"], f"node {name}") if "node_health" in raw else node_health,
+        fabric_group=fabric_group,
     )
     try:
         node.compat_group  # noqa: B018 - an unknown HBM variant fails here, not at launch

@@ -210,7 +210,7 @@ def declares_new_fields(nodes: Any) -> bool:
     ``fabric_group``): its trainer dry run then says the shared lease hint."""
     from .node_inventory import lease_store_of  # noqa: PLC0415
 
-    return lease_store_of(nodes) is not None or any(getattr(n, "fabric_group", None) for n in (nodes or ()))
+    return lease_store_of(nodes) is not None or any(getattr(n, "fabric_group", None) is not None for n in (nodes or ()))
 
 
 # -- the node probe before a takeover ----------------------------------------------------

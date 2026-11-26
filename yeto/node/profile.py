@@ -74,13 +74,18 @@ def container_mounts(profile: NodeProfile) -> dict[str, str]:
     return out
 
 
+# inventory fields the node runtime never reads: left out, so the assignment stays what it
+# was (and a node runtime of an older code pack reads it)
+_OMIT = frozenset({"fabric_group"})
+
+
 def profile_doc(profile: NodeProfile) -> dict[str, Any]:
     """The profile as JSON (every field; ``paths`` and ``reach`` as maps; ``node_health``
     only when the inventory declares it)."""
     doc: dict[str, Any] = {}
     for f in fields(profile):
         value = getattr(profile, f.name)
-        if f.name == "node_health" and value is None:
+        if f.name in _OMIT or (f.name == "node_health" and value is None):
             continue
         if isinstance(value, NodePaths):
             value = value.record()

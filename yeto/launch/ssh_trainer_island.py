@@ -87,6 +87,7 @@ leases nothing (the first nodes of the inventory are shown).
 from __future__ import annotations
 
 import base64
+import functools
 import ipaddress
 import json
 import re
@@ -1386,7 +1387,8 @@ def requant_argv(store: str, template: str, *, recipe: str | None = None, awq_sc
 
 
 def inventory_trainer_nodes(args: Any, island: Any, *, leases: Any = None, name: str | None = None,
-                            wait_s: float | None = None) -> tuple[Node, ...]:
+                            wait_s: float | None = None, hint_to_log: bool = False,
+                            refuse_split: bool = True) -> tuple[Node, ...]:
     """The inventory nodes of an ``ssh:`` trainer island (``island``: its
     ``gpu_spec.ClusterSpec``): the nodes with role ``trainer`` (or no roles),
     as many as the island has, with its card and card count. Raises before any SSH.
@@ -1396,7 +1398,14 @@ def inventory_trainer_nodes(args: Any, island: Any, *, leases: Any = None, name:
     island's nodes by their leases (:func:`lease_trainer_nodes`; ``name``: the island's
     cluster name, ``wait_s``: the wait for free nodes, default ``--rl-node-lease-wait-s``).
     Without ``leases`` (a dry run, a check of a dry run) the first ones are returned and
-    no store is read."""
+    no store is read.
+
+    A grouped inventory (:mod:`.fabric_groups`) places a multi-node island in one fabric
+    group (:func:`~.fabric_groups.pick_placement`, also as the lease pick's placement);
+    no group holds it: :class:`SshIslandError`, or with ``refuse_split`` False (the
+    preflight, which reports it as a check) the first nodes. An inventory without groups
+    places as before; the no-groups hint goes to the launcher log, to the logger only on
+    a dry run or with ``hint_to_log`` (the preflight)."""
     nodes = getattr(args, "rl_node_inventory_nodes", None)
     if not nodes:
         raise SshIslandError("an ssh: trainer island needs --rl-node-inventory (the nodes to start it on)")
@@ -1412,9 +1421,24 @@ def inventory_trainer_nodes(args: Any, island: Any, *, leases: Any = None, name:
     if wrong:
         raise SshIslandError(f"inventory trainer nodes {wrong} do not have {island.gpus_per_node} x {island.gpu} "
                              "as the ssh: island says")
+    from . import fabric_groups
+
+    every, need = list(nodes), island.num_nodes
+    grouped = need > 1 and fabric_groups.grouped(every)
+    if need > 1 and not grouped:
+        fabric_groups.placement_hint(fabric_groups.HINT,
+                                     log_only=hint_to_log or bool(getattr(args, "dry_run", False)))
     if not leased or leases is None:
-        return tuple(trainers[:island.num_nodes])
-    return lease_trainer_nodes(args, trainers, island.num_nodes, leases, name=name, wait_s=wait_s)
+        if not grouped:
+            return tuple(trainers[:need])
+        try:
+            return fabric_groups.pick_placement(trainers, need, inventory=every).nodes
+        except fabric_groups.PlacementError as error:
+            if not refuse_split:
+                return tuple(trainers[:need])
+            raise SshIslandError(f"the ssh: trainer island's nodes are not one fabric group: {error}") from None
+    place = functools.partial(fabric_groups.pick_placement, inventory=every) if grouped else None
+    return lease_trainer_nodes(args, trainers, need, leases, name=name, wait_s=wait_s, place=place)
 
 
 NODE_LEASE_FILE = "node-leases.json"  # in the run dir: the launch identity and each island's leased nodes
@@ -1471,7 +1495,7 @@ def _journal_incarnation(args: Any, name: str) -> bool:
 
 
 def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: Any, *, name: str | None = None,
-                        wait_s: float | None = None) -> tuple[Node, ...]:
+                        wait_s: float | None = None, place: Any = None) -> tuple[Node, ...]:
     """The ``need`` nodes of island ``name`` among ``trainers``, by their leases.
 
     * Picked already in this process (the launch gate's preflight, the checks, the
@@ -1484,7 +1508,9 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
       ``node_lease_waiting`` event, the run's STOP flag ends it) up to ``wait_s`` (default
       ``--rl-node-lease-wait-s``, 3600 s), then :class:`SshIslandError`.
 
-    The pick is recorded in the run dir (:data:`NODE_LEASE_FILE`)."""
+    ``place``: the placement of a grouped inventory (``fabric_groups.pick_placement``), given
+    to :func:`~.node_lease.pick_nodes`; None: in order, as on main. The pick is recorded in
+    the run dir (:data:`NODE_LEASE_FILE`)."""
     from yeto import runs
 
     from .node_lease import NodeLeased, pick_nodes
@@ -1519,7 +1545,7 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
 
         try:
             picked = pick_nodes(list(trainers), need, leases, wait_s=limit, prefer=recorded, stop=stop,
-                                excluded=leases.assigned)
+                                excluded=leases.assigned, place=place)
         except NodeLeased as error:
             raise SshIslandError(f"ssh: island {key}: {error}") from None
     leases.picks[key] = [n.name for n in picked]
