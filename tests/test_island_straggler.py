@@ -213,6 +213,14 @@ def test_an_island_back_running_as_the_same_incarnation_keeps_its_place_in_the_p
     tracker.check(RUN2)  # the same token back
     tracker.feed(_step(1, [0], fragments=1))
     assert [s.island for s in tracker.check(RUN2)] == [1]
+    again = st.StragglerTracker(cycles=2)  # counted from its return: what it missed before is not
+    again.feed(_join(1))
+    again.feed(_step(1, [0], fragments=1))
+    again.check(RUN2)
+    again.check({0: (0, 1)})
+    again.check(RUN2)
+    again.feed(_step(2, [0], fragments=1))
+    assert again.check(RUN2) == []
     fresh = st.StragglerTracker(cycles=1)  # never joined before it left: still not counted
     fresh.check(RUN2)
     fresh.check({0: (0, 1)})
