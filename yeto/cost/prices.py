@@ -244,6 +244,9 @@ def node_usd_h(provider: str, gpu: Any, gpus: Any, *, spot: bool | None = None, 
 
 
 CATALOG_FRESH_S = 24 * 3600  # an older local catalog file is still read, and its date said
+# clouds whose sky catalog prices a GPU apart from its host VM (a GPU row has no instance type
+# and its price is the card's only): a whole node's price is not read from those rows
+CATALOG_SPLIT_PRICES = {"gcp": "sky's GCP catalog lists GPU and host VM prices on separate rows; not combined here"}
 
 
 def catalog_node_usd_h(cloud: str, gpu: Any, gpus_per_node: Any, *, region: str | None = None,
@@ -257,10 +260,16 @@ def catalog_node_usd_h(cloud: str, gpu: Any, gpus_per_node: Any, *, region: str 
     Only the file already on disk is read, as CSV: sky's catalog functions are not called,
     because on a stale file they download a fresh one (no timeout) and AWS's look up zone
     mappings with the host's credentials; a launch must not wait on that. A file older than
-    :data:`CATALOG_FRESH_S` is still read, and the note gives its date. ``(None, why)`` when
-    there is no file, it is unreadable or lists nothing for the machine; never raises.
-    ``catalog_path``: the file (default: sky's path for ``cloud``)."""
+    :data:`CATALOG_FRESH_S` is still read, and the note gives its date. Only whole-machine rows
+    (with an instance type) count; a cloud that prices GPUs apart from their host VM
+    (:data:`CATALOG_SPLIT_PRICES`) is not priced here. ``(None, why)`` when there is no file, it
+    is unreadable or lists nothing for the machine; never raises. ``catalog_path``: the file
+    (default: sky's path for ``cloud``)."""
     import csv  # noqa: PLC0415
+
+    split = CATALOG_SPLIT_PRICES.get(str(cloud).lower())
+    if split is not None:  # a card's price alone would bill the node low
+        return None, split
 
     want = instance_type or f"{gpus_per_node}x{gpu}"
     where = f" in {region}" if region else ""
@@ -279,6 +288,8 @@ def catalog_node_usd_h(cloud: str, gpu: Any, gpus_per_node: Any, *, region: str 
         costs = []
         with open(catalog_path, newline="", encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
+                if not row["InstanceType"]:  # a GPU priced apart from its host VM: not a node's price
+                    continue
                 if region and row["Region"] != region:
                     continue
                 if instance_type:

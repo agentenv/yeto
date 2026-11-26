@@ -158,3 +158,36 @@ def test_an_unknown_instance_type_or_card_count_stays_unpriced(catalog):
         None, "sky catalog has no on-demand price for nope.large in us-west-2")
     assert prices.catalog_node_usd_h("aws", "B300", 8, region="us-west-2") == (
         None, "sky catalog has no 8xB300 instance on aws in us-west-2")
+
+
+GCP = (HEADER + "n1-standard-8,,,8.0,30.0,0.38,0.08,us-central1,us-central1-a\n"
+       ",T4,1.0,,,0.35,0.11,us-central1,us-central1-a\n"  # the card's price only, no instance
+       "g2-standard-8,L4,1.0,8.0,32.0,0.85,0.34,us-central1,us-central1-a\n")
+
+
+def test_gcp_is_not_priced_from_its_split_catalog_and_says_so(monkeypatch, tmp_path, capsys):
+    """sky's GCP catalog prices a GPU on its own row (no instance type, the card's price only)
+    apart from its host VM: no node price is read from it, not even a whole-machine row's."""
+    (tmp_path / "gcp").mkdir()
+    (tmp_path / "gcp" / "vms.csv").write_text(GCP)
+    _sky(monkeypatch, tmp_path)
+    why = "sky's GCP catalog lists GPU and host VM prices on separate rows; not combined here"
+    assert prices.catalog_node_usd_h("gcp", "T4", 1, region="us-central1") == (None, why)
+    assert prices.catalog_node_usd_h("gcp", "L4", 1, region="us-central1", instance_type="g2-standard-8") == (None, why)
+    attrs = _attrs(ClusterSpec("gcp", "us-central1", 1, 1, "T4"))
+    assert "catalog_usd_per_hour" not in attrs
+    assert f"no price table row and {why}: the cost guard reports it unpriced" in capsys.readouterr().out
+
+
+def test_a_row_without_an_instance_type_is_never_a_nodes_price(monkeypatch, tmp_path):
+    """Any other cloud: a GPU row without an instance type (a card priced apart from its VM)
+    is skipped; only whole-machine rows price a node."""
+    (tmp_path / "aws").mkdir()
+    (tmp_path / "aws" / "vms.csv").write_text(HEADER + ",A10G,1.0,,,0.30,0.10,us-west-2,usw2-az1\n"
+                                              + ROWS[0] + "\n")
+    _sky(monkeypatch, tmp_path)
+    assert prices.catalog_node_usd_h("aws", "A10G", 1, region="us-west-2") == (
+        1.006, "sky catalog on-demand price of the dearest 1xA10G instance (g5.xlarge) in us-west-2")
+    (tmp_path / "aws" / "vms.csv").write_text(HEADER + ",A10G,1.0,,,9.99,0.10,us-west-2,usw2-az1\n")
+    assert prices.catalog_node_usd_h("aws", "A10G", 1, region="us-west-2") == (
+        None, "sky catalog has no 1xA10G instance on aws in us-west-2")
