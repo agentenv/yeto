@@ -226,14 +226,114 @@ def test_the_launch_environ_is_restored_also_on_an_error(monkeypatch):
 
 def test_a_pinned_default_follows_the_registry_named_when_it_is_taken(monkeypatch):
     from yeto.rl.adapters.miles import pins
-    from yeto.rl.image_registry import IMPORT_REGISTRY, REGISTRY_ENV, current_registry
+    from yeto.rl.image_registry import REGISTRY_ENV, current_registry
 
     monkeypatch.delenv(REGISTRY_ENV, raising=False)
-    assert pins.default_rl_image() == pins.MILES_NEXT_IMAGE  # unchanged since import: the very string
+    assert pins.default_rl_image() == pins.MILES_NEXT_IMAGE  # unchanged since the pins were built: the very string
     monkeypatch.setenv(REGISTRY_ENV, MIRROR + "/")
     moved = pins.default_rl_image(recipe="kimi_k31", tuning="full")
-    assert moved == pins.MILES_K31_NEXT9_IMAGE.replace(f"docker:{IMPORT_REGISTRY}/", f"docker:{MIRROR}/")
-    assert current_registry("docker:quay.io/x/y@sha256:" + "0" * 64) == "docker:quay.io/x/y@sha256:" + "0" * 64
+    assert moved == pins.MILES_K31_NEXT9_IMAGE.replace(f"docker:{pins.PINS_REGISTRY}/", f"docker:{MIRROR}/")
+    ref = "docker:quay.io/x/y@sha256:" + "0" * 64
+    assert current_registry(ref, pins.PINS_REGISTRY) == ref
+
+
+def test_the_pins_registry_is_the_one_they_were_built_on_whatever_was_imported_first(tmp_path):
+    """The base registry is recorded when the pins are built, not when image_registry is
+    imported: image_registry imported first (by sampler_pins), the pins first imported
+    while a mirror is laid over the environment, then the overlay gone: the default is
+    on the registry named now (not stuck on the mirror)."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = f"""
+import os
+os.environ.pop("YETO_IMAGE_REGISTRY", None)
+import yeto.rl.sampler_pins  # noqa: F401 - imports yeto.rl.image_registry first
+from yeto.launch.preflight import gate
+with gate.launch_environ({{"YETO_IMAGE_REGISTRY": "{MIRROR}"}}):
+    from yeto.rl.adapters.miles import pins
+    inside = pins.default_rl_image()
+outside = pins.default_rl_image()
+print(pins.PINS_REGISTRY, inside, outside)
+"""
+    root = Path(__file__).resolve().parents[1]
+    env = {k: v for k, v in __import__("os").environ.items() if k != "YETO_IMAGE_REGISTRY"}
+    env.update(PYTHONPATH=str(root), HOME=str(tmp_path))
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, cwd=str(root),
+                          timeout=300)
+    assert done.returncode == 0, done.stderr[-2000:]
+    built, inside, outside = done.stdout.split()
+    assert built == MIRROR and inside.startswith(f"docker:{MIRROR}/yeto-miles-k31@sha256:")
+    assert outside == inside.replace(f"docker:{MIRROR}/", "docker:ghcr.io/agentenv/")
+
+
+# -- launch_environ: one env mechanism with the pools' (env_scope) ---------------------
+
+
+def test_launch_environ_nests_and_keeps_a_value_written_meanwhile(monkeypatch):
+    import os
+
+    monkeypatch.setenv("OC_Y_A", "shell")
+    with gate.launch_environ({"OC_Y_A": "run"}):
+        with gate.launch_environ({"OC_Y_A": "run"}):  # the same environment again: no deadlock, nothing changes
+            assert os.environ["OC_Y_A"] == "run"
+        assert os.environ["OC_Y_A"] == "run"
+        os.environ["OC_Y_A"] = "written"  # something else writes it meanwhile
+    assert os.environ["OC_Y_A"] == "written"  # kept, not put back to the shell's
+
+
+def test_launch_environ_inside_a_pool_scope_of_the_run_changes_nothing(monkeypatch):
+    """Run up's pools call providers under scoped_environ(Run.pool_environ()): this
+    process's env is then Run.env, so resolving under Run.env changes nothing, and the
+    pool scope's values stay in place after the resolution."""
+    import os
+
+    from yeto.launch.pool.env_scope import scoped_environ
+
+    monkeypatch.setenv("OC_Y_B", "shell")
+    run_env = {**os.environ, "OC_Y_B": "run", "OC_Y_C": "run"}
+    pool = {"OC_Y_B": "run", "OC_Y_C": "run"}
+    with scoped_environ(pool):
+        with gate.launch_environ(run_env):
+            assert os.environ["OC_Y_B"] == os.environ["OC_Y_C"] == "run"
+        assert os.environ["OC_Y_B"] == os.environ["OC_Y_C"] == "run"  # the pool call's values are not restored away
+    assert os.environ["OC_Y_B"] == "shell" and "OC_Y_C" not in os.environ
+
+
+def test_launch_environ_refuses_another_overlay_that_is_active(monkeypatch):
+    """Another overlay active (a pool of other values, or a second resolution on another
+    thread): EnvOverlayConflict, never a resolution with mixed values."""
+    import os
+    import threading
+
+    from yeto.launch.pool.env_scope import EnvOverlayConflict, scoped_environ
+
+    monkeypatch.setenv("OC_Y_D", "shell")
+    with scoped_environ({"OC_Y_D": "pool"}):
+        with pytest.raises(EnvOverlayConflict):
+            with gate.launch_environ({"OC_Y_D": "run"}):
+                pass
+        assert os.environ["OC_Y_D"] == "pool"
+    entered, release, seen = threading.Event(), threading.Event(), {}
+
+    def hold():
+        with gate.launch_environ({"OC_Y_D": "first"}):
+            entered.set()
+            release.wait(10)
+            seen["held"] = os.environ["OC_Y_D"]
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    assert entered.wait(10)
+    try:
+        with pytest.raises(EnvOverlayConflict):
+            with gate.launch_environ({"OC_Y_D": "second"}):
+                pass
+    finally:
+        release.set()
+        thread.join(10)
+    assert seen["held"] == "first" and os.environ["OC_Y_D"] == "shell"
 
 
 def test_the_dry_run_prints_the_resolved_image(kit, capsys, tmp_path):  # noqa: F811
@@ -383,6 +483,30 @@ def test_only_a_refusal_is_turned_into_no_image(monkeypatch):
         gate.commands_for_launch_argv(argv)
     with pytest.raises(RuntimeError, match="a bug"):
         gate.launch_endpoints(argv, {})
+
+
+def test_a_cloud_trainer_argv_never_resolves_an_image(monkeypatch):
+    from yeto.launch import rl_backend
+
+    def boom(args):
+        raise RuntimeError("resolved")
+
+    monkeypatch.setattr(rl_backend, "rl_image_choice", boom)
+    assert gate.commands_for_launch_argv(["--training-mode", "rl", "--gpu", "modal:1x8xb300", "--model",
+                                          "Qwen/Qwen3-4B", "--data", "prompts.jsonl"]) == []
+
+
+def test_the_egress_fallback_default_is_taken_under_the_launch_environment(monkeypatch):
+    """An argv the launch parser does not take (no --training-mode rl here): the egress
+    check falls back to the pinned default, on the registry the launch's env names."""
+    from yeto.rl.image_registry import REGISTRY_ENV
+
+    monkeypatch.delenv(REGISTRY_ENV, raising=False)
+    argv = ["--rl-checkpoint-store", "s3://b/runs/r", "--rl-object-store-endpoint", "https://e.example"]
+    (_, registry) = gate.launch_endpoints(argv, {REGISTRY_ENV: MIRROR})
+    assert registry.url == "https://mirror.example/" and registry.source.startswith(f"{MIRROR}/yeto-miles-k31@")
+    (_, registry) = gate.launch_endpoints(argv, {})
+    assert registry.url == "https://ghcr.io/"
 
 
 def test_the_customer_preflight_command_is_the_one_of_its_rl_image():

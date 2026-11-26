@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import NamedTuple
 
-from yeto.rl.image_registry import pinned_image
+from yeto.rl.image_registry import image_registry, pinned_image
 
 
 class MilesRevisionPins(NamedTuple):
@@ -685,6 +685,9 @@ MILES_NEXT_BASE_IMAGE = (
 # Tag 28bc6cc-2fa8801; Miles 28bc6cc24 = 970807006 merged with e99e2a168 (the
 # session server records Codex Responses calls); build record
 # tests/fixtures/openspec_evidence/ports-image-28bc6cc-2fa8801/. linux/amd64 only.
+# the registry the pinned images below are built on, read at the moment they are built (the
+# first import of this module, whenever that is): default_rl_image moves them from it
+PINS_REGISTRY = image_registry()
 MILES_PORTS_V1_IMAGE = pinned_image(
     "yeto-miles-ports", "7a52de2e783c462961daa3e92af76da31154dee81668d5fd1e4bc8555cf8eab2")
 # The k31 image: radixark/miles:kimi-k31 (CUDA 13.0.3, SGLang 35708f76) plus the
@@ -865,5 +868,5 @@ def default_rl_image(*, recipe: str | None = None, tuning: str | None = None) ->
 
     # the registry named when the default is taken (unchanged since import in a launch process)
     if recipe == "kimi_k31" and tuning == "full":
-        return current_registry(MILES_K31_NEXT9_IMAGE)
-    return current_registry(MILES_NEXT_IMAGE)
+        return current_registry(MILES_K31_NEXT9_IMAGE, PINS_REGISTRY)
+    return current_registry(MILES_NEXT_IMAGE, PINS_REGISTRY)

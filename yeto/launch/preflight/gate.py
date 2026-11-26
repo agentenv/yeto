@@ -15,7 +15,6 @@ import contextlib
 import os
 import shlex
 import sys
-import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
@@ -73,31 +72,22 @@ def preflight_commands(gpu: str | None, inventory: str | None, prefix: str | Non
     return out
 
 
-_ENVIRON_LOCK = threading.Lock()
-
-
 @contextlib.contextmanager
 def launch_environ(environ: Mapping[str, str] | None) -> Iterator[None]:
-    """``os.environ`` with ``environ`` laid over it (keys added or changed, none removed;
-    nothing for None), restored on exit, also on an error: the environment a launch child
-    of ``yeto run up`` starts with (``Run.env``: run up's own plus the run config's
-    ``env``), for resolving what that launch would. One resolution at a time (a lock);
-    run up resolves on its own thread before it starts anything."""
-    if not environ:
+    """``os.environ`` as ``environ`` has it (its keys added or changed, none removed;
+    nothing for None) inside the block: the environment a launch child of ``yeto run up``
+    starts with (``Run.env``: run up's own plus the run config's ``env``), for resolving
+    what that launch would. The overlay is the keys whose value differs from this
+    process's now, applied as a scope of :func:`yeto.launch.pool.env_scope.scoped_environ`
+    (the one mechanism of the process: it nests, raises ``EnvOverlayConflict`` when
+    another overlay is active, and keeps a value something else wrote meanwhile). Inside
+    a pool call of the same run (``Run.pool_environ`` applied: this process's env is
+    ``Run.env``) the overlay is empty and nothing changes."""
+    from ..pool.env_scope import scoped_environ
+
+    overlay = {k: str(v) for k, v in (environ or {}).items() if os.environ.get(k) != str(v)}
+    with scoped_environ(overlay):
         yield
-        return
-    with _ENVIRON_LOCK:
-        saved = {k: os.environ.get(k) for k, v in environ.items() if os.environ.get(k) != str(v)}
-        try:
-            for key in saved:
-                os.environ[key] = str(environ[key])
-            yield
-        finally:
-            for key, value in saved.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
 
 
 def launch_rl_image(argv: Sequence[str], environ: Mapping[str, str] | None = None) -> str | None:
