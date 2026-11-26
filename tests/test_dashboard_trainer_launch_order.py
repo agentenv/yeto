@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 
+import pytest
+
 from test_dashboard_diloco import D, diloco, lines
 
 from yeto.dashboard import store_tapes
@@ -75,6 +77,84 @@ def test_an_older_launchs_tail_read_in_a_later_poll_does_not_overwrite_the_newes
     _write(tmp_path, OLD, old)  # the old launch's records arrive a poll later
     assert tapes.pump(r) > 0
     assert _trainer0(r) == want
+
+
+def _with_metrics(r: Reducer) -> list[int]:
+    """Island 0's rounds the Trainer rounds table draws: those with a measured metric."""
+    return [x["round"] for x in r.round_records(r.islands["0"])
+            if any(x.get(k) is not None for k in ("reward", "kl_tr", "kl", "tok_s"))]
+
+
+class _Unpaged:
+    """An object API without paged listings (StoreTapes lists everything every poll)."""
+
+    def __init__(self, objects):
+        self._objects = objects
+
+    def __getattr__(self, name):
+        if name == "list_page":
+            raise AttributeError(name)
+        return getattr(self._objects, name)
+
+
+@pytest.mark.parametrize("paged", [True, False])
+def test_the_store_reads_the_older_launch_first_so_its_rounds_and_events_stay(tmp_path, paged):
+    """The ingest order itself: the reducer folds a superseded launch's late rounds into no
+    table (a stopped launch's late records are not the island's current state), so the old
+    launch must be read before the new one. Its rounds keep their metrics in the Trainer
+    rounds table, and the event stream ends with the newest launch's records."""
+    old, new = _split()
+    _write(tmp_path, OLD, old)
+    _write(tmp_path, NEW, new)
+    r = _others()
+    objects = DirectoryObjectStore(str(tmp_path))
+    StoreTapes(objects if paged else _Unpaged(objects)).pump(r)
+    want = Reducer(run="g5")
+    load_all(want, [str(G5 / "yeto-tape.jsonl"), str(G5 / "fleet.jsonl"), str(G5 / "events")])
+    rounds = _with_metrics(r)
+    old_rounds = sorted({x["rollout_id"] for x in old if x.get("event") == "rl_round_trained"})
+    assert old_rounds and set(old_rounds) <= set(rounds)  # the old launch's rounds are in the table
+    assert rounds == _with_metrics(want)  # as one launch read in time order
+    launches = [e["source"].rsplit("/", 1)[-1] for e in r.events if e["source"].endswith(("/" + OLD, "/" + NEW))]
+    assert launches[0] == OLD and launches[-1] == NEW
+    assert launches == [OLD] * launches.count(OLD) + [NEW] * launches.count(NEW)  # the stream ends with the newest launch
+
+
+def _ranked(launches: dict, events: list[dict]) -> list[str]:
+    from types import SimpleNamespace
+
+    from yeto.dashboard.topology_diloco import _launch_rank
+
+    rank = _launch_rank(SimpleNamespace(islands={"0": {"launches": launches}}), "0")
+    return [e["id"] for e in sorted(events, key=rank)]
+
+
+def _ev(eid: str, ts: float, launch: str | None = None) -> dict:
+    return {"id": eid, "ts": ts, "source": f"store:trainer/{launch}" if launch else "events/l0.jsonl"}
+
+
+def test_a_record_of_no_launch_goes_with_the_newest_launch_started_by_its_time():
+    """A launcher-side record (the echoed tape, no launch folder) between the two launches is
+    the old launch's; one after the new launch started is the new one's; one before any
+    launch goes with the first."""
+    t0, t1 = launch_started(OLD), launch_started(NEW)
+    launches = {OLD: {"first_ts": t0 + 5}, NEW: {"first_ts": t1 + 5}}
+    events = [_ev("new", t1 + 50, NEW), _ev("late", t1 + 60), _ev("mid", t0 + 60), _ev("old", t0 + 50, OLD),
+              _ev("early", t0 - 100)]
+    assert _ranked(launches, events) == ["mid", "old", "early", "new", "late"]
+
+
+def test_a_launch_is_ordered_by_its_folder_stamp_before_its_first_record():
+    """A restarted trainer uploads its whole local tape again under its new launch, so the new
+    folder's first record can be older than the old folder's: the folder stamp decides. A
+    folder without a stamp falls back to its first record."""
+    t0, t1 = launch_started(OLD), launch_started(NEW)
+    launches = {OLD: {"first_ts": t1 + 30}, NEW: {"first_ts": t0 - 30}}
+    events = [_ev("new", t1 + 50, NEW), _ev("old", t0 + 50, OLD)]
+    assert _ranked(launches, events) == ["old", "new"]
+    undated = "l0-x-host"
+    launches = {OLD: {"first_ts": t0 + 5}, undated: {"first_ts": t0 - 30}}
+    assert _ranked(launches, [_ev("old", t0 + 50, OLD), _ev("x", t1, undated)]) == ["x", "old"]
 
 
 def _keys(*paths: str) -> list[str]:
