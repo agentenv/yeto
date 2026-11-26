@@ -1,0 +1,80 @@
+"""A fleet launched island by island whose trainer island has no tape on the dashboard (a
+backend that does not upload its trainer tape, an island added or moved that never wrote one):
+its launch records still bill it in the cost table, as run.budget does, so "fleet spend" never
+reads "trainers $n/a"; when nothing bills a trainer, the reason is said."""
+
+from __future__ import annotations
+
+import re
+
+import pytest
+import test_dashboard_fleet_na as fleet_na
+from test_dashboard_fleet_islands import fleet_records, plan_doc
+from test_dashboard_trainer_islands import _store
+
+from yeto.dashboard import cost, fleet_islands
+from yeto.dashboard.reducer import Reducer
+from yeto.rl.engine.object_store import DirectoryObjectStore
+
+
+def _fleet(tmp_path, *, spend: dict | None, no_tape: tuple[int, ...] = (), per_island: bool = True) -> Reducer:
+    """The two-island fleet fixture (islands i0, i1, and i2 added then removed by the desired
+    state), without the trainer tape of the islands in ``no_tape``; ``spend``: each island's
+    (hours, usd, fallback) from its launch records."""
+    r = Reducer(run="fleet-qa")
+    for rec in fleet_records():
+        if rec.get("island_id") in no_tape:
+            continue
+        r.feed(rec)
+    plan = plan_doc()
+    assert r.load_fleet_plan(dict(plan, launch="per_island") if per_island else plan, "test")
+    r.load_fleet_state(fleet_islands.read_fleet_state(DirectoryObjectStore(str(_store(tmp_path)))))
+    if spend is not None:
+        r.trainer_spend = {"at": r.max_ts, "islands": spend}
+    return r
+
+
+def _rows(r: Reducer) -> tuple[dict, dict]:
+    view = cost.cost_view(r, r.max_ts + 30)
+    return {row["id"]: row for row in view["islands"]}, view
+
+
+SPEND = {0: (1.0, 3.0, False), 1: (0.5, 2.0, False), 2: (0.25, 0.7, True)}
+
+
+def test_a_trainer_island_without_a_tape_is_billed_by_its_launch_records(tmp_path):
+    r = _fleet(tmp_path, spend=SPEND, no_tape=(1,))
+    rows, view = _rows(r)
+    for k, (hours, usd, _fallback) in SPEND.items():
+        row = rows[str(k)]
+        assert row["kind"] == "trainer" and row["island"] == k and row["hours"] == hours
+        assert row["cost_usd"] == pytest.approx(usd) and row["priced"] and "launch records" in row["rate_source"]
+    assert "declared price" in rows["2"]["rate_source"]  # its hours without a price
+    assert view["fleet"]["trainers_usd"] == pytest.approx(5.7) and "trainers_note" not in view["fleet"]
+
+
+def test_record_only_trainer_rows_do_not_move_the_syncers_clock(tmp_path):
+    with_tape, _ = _rows(_fleet(tmp_path / "a", spend={0: SPEND[0]}, no_tape=(1,)))
+    added, _ = _rows(_fleet(tmp_path / "b", spend=SPEND, no_tape=(1,)))
+    assert added["syncer"]["hours"] == pytest.approx(with_tape["syncer"]["hours"])
+    assert added["syncer"]["cost_usd"] == pytest.approx(with_tape["syncer"]["cost_usd"])
+
+
+def test_no_tape_and_no_record_says_why_the_trainers_are_not_priced(tmp_path):
+    r = _fleet(tmp_path, spend={}, no_tape=(0, 1))
+    rows, view = _rows(r)
+    assert not [x for x in rows.values() if x.get("kind") == "trainer"]
+    assert view["fleet"]["trainers_usd"] is None
+    assert view["fleet"]["trainers_note"] == "island 0, 1, 2: no trainer tape or launch record here"
+    text = re.sub(r"<[^>]*>", " ", fleet_na._page(tmp_path, r)["costBox"])
+    assert "trainers not priced (island 0, 1, 2: no trainer tape or launch record here)" in text
+    assert "$n/a" not in text and not re.search(r"\bn/a\b", text.split("fleet spend")[1].split(".")[0])
+
+
+def test_a_fleet_whose_trainers_have_tapes_keeps_its_rows(tmp_path):
+    """Every trainer with a tape and no launch records (a fleet launched as one run): its row
+    priced by the plan, as before; an island the desired state added without a tape is named."""
+    r = _fleet(tmp_path, spend=None, per_island=False)
+    rows, view = _rows(r)
+    assert rows["0"]["kind"] == "trainer" and "fleet plan trainer_usd_per_h" in rows["0"]["rate_source"]
+    assert "2" not in rows and view["fleet"]["trainers_usd"] is not None and "trainers_note" not in view["fleet"]

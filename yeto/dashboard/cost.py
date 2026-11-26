@@ -414,9 +414,19 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
     machines = {m["shard"]: m for i in fleet["islands"] for p in i["pools"] for m in p.get("members") or ()}
     launched = (getattr(reducer, "trainer_spend", None) or {}).get("islands") \
         if (getattr(reducer, "fleet_plan", None) or {}).get("launch") == "per_island" else None
+    unbilled = []  # islands whose trainer neither a tape nor a launch record bills here
+    from_records = set()  # trainer rows only their launch records make (no tape row): not the syncer's clock
     for isl in fleet["islands"]:
         tid, price = isl.get("trainer"), isl.get("trainer_usd_per_h")
         row = by_id.get(tid) if tid is not None else None
+        if row is None and launched is not None and isl["learner"] in launched:
+            # no trainer tape here (an island whose trainer does not upload its tape, or one
+            # that never started): its launch records still bill it, as run.budget does
+            row = {"id": tid if tid is not None else str(isl["learner"]), "unit_usd_gpu_h": None, "cpus": None,
+                   "memory_gib": None, "running": False, "local": False, "estimate": False,
+                   "usd_per_1m_tok": None, "reward_per_usd": None, "ranked": False}
+            rows.append(row)
+            from_records.add(row["id"])
         if row is not None and launched is not None and isl["learner"] in launched:
             # a fleet launched island by island: its launch records, as run.budget bills them
             hours, usd, fallback = launched[isl["learner"]]
@@ -440,6 +450,8 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
                 if row["hours"] is not None:
                     row["cost_usd"] = price * row["hours"]
             trainer_rows.append(row)
+        else:
+            unbilled.append(isl["learner"])
         for pool in isl["pools"]:
             members = {m["shard"]: m for m in pool.get("members") or ()}
             for sid in pool["samplers"]:
@@ -505,7 +517,7 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
                        "usd_per_1m_tok": None, "reward_per_usd": None, "ranked": False}
                 rows.append(row)
                 pool_rows.append(row)
-    tr_recs = [reducer.islands[r["id"]] for r in trainer_rows if r["id"] in reducer.islands]
+    tr_recs = [reducer.islands[r["id"]] for r in trainer_rows if r["id"] in reducer.islands and r["id"] not in from_records]
     firsts = [x.get("first_ts") for x in tr_recs if x.get("first_ts") is not None]
     lasts = [x.get("last_event_ts") for x in tr_recs if x.get("last_event_ts") is not None]
     hours = (max(lasts) - min(firsts)) / 3600.0 if firsts and lasts and max(lasts) >= min(firsts) else None
@@ -548,8 +560,17 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
         vals = [r["cost_usd"] for r in rs if r.get("cost_usd") is not None]
         return sum(vals) if vals else None
 
-    return {"pools_usd": part(pool_rows), "trainers_usd": part(trainer_rows), "syncer_usd": srow["cost_usd"],
-            "basis": "pools (node hours on the sampler tapes) + each island's trainer + the syncer"}
+    out = {"pools_usd": part(pool_rows), "trainers_usd": part(trainer_rows), "syncer_usd": srow["cost_usd"],
+           "basis": "pools (node hours on the sampler tapes) + each island's trainer + the syncer"}
+    if out["trainers_usd"] is None:  # said, never a bare n/a
+        unpriced = [r["island"] for r in trainer_rows if r.get("cost_usd") is None]
+        why = []
+        if unpriced:
+            why.append("island " + ", ".join(map(str, unpriced)) + ": no price (fleet plan trainer_usd_per_h unset)")
+        if unbilled:
+            why.append("island " + ", ".join(map(str, unbilled)) + ": no trainer tape or launch record here")
+        out["trainers_note"] = "; ".join(why) or "no trainer island"
+    return out
 
 
 def run_up_view(path: str | None, now: float) -> dict | None:
