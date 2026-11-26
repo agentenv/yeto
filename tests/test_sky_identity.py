@@ -80,14 +80,18 @@ def test_an_s3_mount_on_a_node_that_may_land_off_aws_keeps_the_aws_file():
     assert lines and "/ckpt" in lines[0]
 
 
-def test_a_sourceless_mount_counts_as_s3_only_where_sky_may_pick_s3():
+def test_a_sourceless_mount_off_aws_keeps_the_aws_file():
+    """sky may place a mount without a source on S3 (when the node cloud's storage is
+    not enabled on the API server): the mount must not lose its credential."""
     spot_volume = SimpleNamespace(source=None, stores={})
-    assert "aws" in _config(_task("Nebius", mounts={"/v": spot_volume}))  # Nebius has its own store
-    lines: list[str] = []
-    assert "aws" not in _config(_task("Verda", mounts={"/v": spot_volume}), lines=lines)
-    assert lines and "/v" in lines[0]
+    for cloud in ("Nebius", "Verda"):
+        lines: list[str] = []
+        assert "aws" not in _config(_task(cloud, mounts={"/v": spot_volume}), lines=lines)
+        assert lines and "/v" in lines[0]
+    assert _config(_task("AWS", mounts={"/v": spot_volume})) == _no_upload(CLOUDS)
     other = SimpleNamespace(source="gs://b", stores={})
     assert "aws" in _config(_task("Nebius", mounts={"/g": other}))
+    assert "aws" in _config(_task("Nebius", mounts={"/n": SimpleNamespace(source=None, stores={"NEBIUS": 1})}))
 
 
 def test_the_opt_out_restores_sky_default_and_warns():

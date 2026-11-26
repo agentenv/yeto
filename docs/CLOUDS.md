@@ -55,8 +55,9 @@ watchdog, the syncer VM, the head, the diffusion sampler) sets
 `remote_identity: NO_UPLOAD` for each cloud sky's config accepts it for, except:
 
 - the node's own cloud when that is not AWS (sky's autodown there reads it);
-- AWS on a non-AWS node that mounts an AWS S3 bucket with sky Storage: the launch
-  keeps the upload and prints a warning naming the mounts. To avoid it, run the
+- AWS on a non-AWS node that mounts an AWS S3 bucket with sky Storage (or a sky
+  Storage volume without a source, which sky may place on S3): the launch keeps the
+  upload and prints a warning naming the mounts. To avoid it, run the
   island on AWS, or use a store on an S3-compatible endpoint with a bucket-scoped key;
 - a cloud whose `remote_identity` `~/.sky/config.yaml` already sets.
 

@@ -49,10 +49,6 @@ UPLOAD_ENV = "YETO_SKY_UPLOAD_CLOUD_CREDENTIALS"
 # skypilot-v1 profile (EC2 and S3 full access); see docs/CLOUDS.md for a minimal policy
 AWS_INSTANCE_PROFILE_ENV = "YETO_SKY_AWS_INSTANCE_PROFILE"
 _INSTANCE_PROFILE_NAME = re.compile(r"[\w+=,.@-]{1,128}")
-# clouds whose own object store sky Storage uses for a mount without a source
-# (sky.data.storage.STORE_ENABLED_CLOUDS); on any other cloud sky picks the first
-# enabled storage cloud, which may be AWS S3
-_STORE_CLOUDS = frozenset({"aws", "gcp", "azure", "ibm", "oci", "nebius"})
 
 
 @functools.lru_cache(maxsize=1)
@@ -83,9 +79,10 @@ def _store_value(store_type) -> str:
 
 
 def aws_s3_mounts(task, clouds: set[str] | None) -> list[str]:
-    """Mount paths of the task's sky Storage that read ``~/.aws/credentials`` on a
-    non-AWS node: an ``s3://`` source, an S3 store, or no source on a cloud without its
-    own sky store (sky may pick S3). [] on a node that can only be AWS."""
+    """Mount paths of the task's sky Storage that may read ``~/.aws/credentials`` on a
+    non-AWS node: an ``s3://`` source, an S3 store, or no source and no store (sky picks
+    the node cloud's store only when that cloud's storage is enabled on the API server,
+    else the first enabled one, which may be AWS S3). [] on a node that can only be AWS."""
     if clouds == {AWS}:
         return []
     found = []
@@ -95,7 +92,7 @@ def aws_s3_mounts(task, clouds: set[str] | None) -> list[str]:
         stores = getattr(storage, "stores", None) or {}
         if (any(isinstance(s, str) and s.startswith("s3://") for s in sources)
                 or any(_store_value(t) == "S3" for t in stores)
-                or (source is None and not stores and (clouds is None or not clouds <= _STORE_CLOUDS))):
+                or (source is None and not stores)):
             found.append(str(mount))
     return found
 
