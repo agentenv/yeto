@@ -50,6 +50,18 @@ The dry run orders nothing and contacts no node. It runs:
   routed experts), and, in a fleet, the release form each pool's engine loads
   (weight format, reload mode) and the trainer shape of every island.
 
+The trainer image is the one the launch runs: the trainer's `--rl-image`;
+without one, for an all-`ssh:` trainer whose inventory names no image, the
+site image catalog's verified record for the model on the trainer nodes, else
+the pinned default. The dry run prints the cluster preflight command with that
+image (`yeto preflight ... --image <image> --no-bench ...`); the preflight
+pulls and probes it and the egress check below probes its registry. An
+inventory `image:` / `images:` is not a source of its own: it turns the site
+catalog off and must name the same image as the run (its `--rl-image`, else
+the pinned default), or the launch and the preflight refuse it ("the run's
+image decides"). A preflight that has no image for a docker node refuses
+(`no trainer image resolved`) and pulls nothing.
+
 The real `yeto run up` then runs the trainer's cluster preflight and the
 **egress check of your nodes** before it orders anything (any pool: National
 Compute, sky, Modal). `--dry-run --check-nodes` runs the same egress check in
@@ -93,7 +105,8 @@ The store endpoint is the one the launch's store client takes
 else `--rl-object-store-endpoint` / `AWS_ENDPOINT_URL`, else the endpoint of
 the store profile (`--rl-object-store-profile`), else AWS S3 in the store's
 region. The registry is the one of `--rl-image` (else the inventory's image,
-else the pinned default; Docker Hub is `registry-1.docker.io`).
+else the image the launch fills in: the site catalog's or the pinned default;
+Docker Hub is `registry-1.docker.io`).
 `--skip-egress-check` skips this check only; `--skip-preflight` skips every
 preflight, this one included.
 

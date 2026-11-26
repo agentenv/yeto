@@ -70,10 +70,39 @@ def preflight_commands(gpu: str | None, inventory: str | None, prefix: str | Non
     return out
 
 
+def launch_rl_image(argv: Sequence[str]) -> str | None:
+    """The ``--rl-image`` a ``yeto launch`` of ``argv`` runs with: the argv's own, else
+    the image the launch fills in (``rl_backend.rl_image_choice``, the function the launch
+    itself calls: the site image catalog for an ssh: trainer whose inventory names no
+    image, else the engine's pinned default). The argv's own ``--rl-image`` (None without
+    one) when the argv is not an RL launch the parser takes; raises ``ValueError`` where
+    the launch refuses to fill one in (an unknown backend, a broken catalog)."""
+    given = argv_value(argv, "--rl-image")
+    if given:
+        return given
+    from ...rl.up_consistency import trainer_args
+    from ..rl_backend import rl_image_choice
+
+    args = trainer_args(list(argv))
+    if args is None:
+        return given
+    return rl_image_choice(args)[0]
+
+
 def commands_for_launch_argv(argv: Sequence[str]) -> list[list[str]]:
-    """The preflight commands of a ``yeto launch`` argv (``yeto run up``'s trainer)."""
-    return preflight_commands(argv_value(argv, "--gpu"), argv_value(argv, "--rl-node-inventory"),
-                              argv_value(argv, "--cluster-prefix"), argv_value(argv, "--rl-image"))
+    """The preflight commands of a ``yeto launch`` argv (``yeto run up``'s trainer), with
+    ``--image`` the image the launch runs (:func:`launch_rl_image`). A launch that refuses
+    to fill in an image gets none: the preflight FAILs (no trainer image resolved), and the
+    launch names why."""
+    gpu = argv_value(argv, "--gpu")
+    if not ssh_entries(gpu):
+        return []
+    try:
+        image = launch_rl_image(argv)
+    except ValueError:
+        image = argv_value(argv, "--rl-image")
+    return preflight_commands(gpu, argv_value(argv, "--rl-node-inventory"), argv_value(argv, "--cluster-prefix"),
+                              image)
 
 
 DOCKER_HUB = "registry-1.docker.io"
@@ -127,7 +156,8 @@ def launch_endpoints(argv: Sequence[str], environ: Mapping[str, str], nodes: Seq
     ``store_client_environ`` of ``--rl-object-store-endpoint`` / ``--rl-object-store-profile``
     and the environment) and, when a node of ``nodes`` (or none given) runs
     ``runtime: docker``, the registry of the trainer image (``--rl-image``, else the
-    inventory's, else the pinned default). :func:`node_endpoints` keeps a node's own."""
+    inventory's, else the image the launch fills in: :func:`launch_rl_image`).
+    :func:`node_endpoints` keeps a node's own."""
     from types import SimpleNamespace
 
     from ..store_env import store_client_environ
@@ -139,6 +169,11 @@ def launch_endpoints(argv: Sequence[str], environ: Mapping[str, str], nodes: Seq
     docker = [n for n in nodes if getattr(n, "runtime", "docker") == "docker"]
     if docker or not nodes:  # a rootfs node pulls no image
         image = argv_value(argv, "--rl-image") or next((n.image for n in docker if getattr(n, "image", None)), None)
+        if not image:
+            try:  # the image the launch fills in (the site image catalog's, else the pinned default)
+                image = launch_rl_image(argv)
+            except ValueError:  # the launch refuses it and names why
+                image = None
         if not image:
             from ...rl import default_rl_image
 
