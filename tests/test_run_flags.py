@@ -269,6 +269,7 @@ _NON_RL_LITERALS = frozenset({
     "--inventory", "--engine", "--catalog", "--min-image-free-gib", "--model-config", "--model-path",
     "--smoke-store", "--smoke-layers", "--smoke-arg", "--sampler-spec", "--layers", "--flag",
     "--keep-smoke-artifacts", "--cache-dir", "--missing-ok", "--no-trust-remote-code",
+    "--container-sudo", "--pool-config",
     # podman / docker CLI flags of the own-SSH-node sampler pool (yeto.launch.ssh_sampler_pool)
     "--security-opt", "--signal", "--tail", "--type",
     # the AgentENV-side regctl setting the task image check names (yeto.launch.agentic_setup)

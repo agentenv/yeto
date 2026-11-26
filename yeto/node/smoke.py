@@ -87,6 +87,12 @@ def run_smoke(engine: Any, *, release: str | None, prompt: str = "Say hello.", m
                     _emit(STEP_MARK, {"step": name, "ok": False, "seconds": times[name], "error": record["error"]},
                           out)
                     return record
+            elif name == "reload" and getattr(value, "reload_mode", None) is None:
+                record.update(step=name, error=(
+                    f"the engine's load returned {type(value).__name__}, not a LoadReport with a reload_mode: the "
+                    f"smoke cannot tell an in-place reload from a restart"))
+                _emit(STEP_MARK, {"step": name, "ok": False, "seconds": times[name], "error": record["error"]}, out)
+                return record
             elif value is not None and hasattr(value, "reload_mode"):
                 detail["reload_mode"] = value.reload_mode
                 record[f"{name}_mode"] = value.reload_mode

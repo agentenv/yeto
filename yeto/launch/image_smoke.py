@@ -87,8 +87,10 @@ SMOKE_MODEL_ORG = "yeto-local"
 REVISION_MARK = "YETO_SMOKE_REVISION"
 SPACE_MARK = "YETO_SMOKE_SPACE"
 TRAINER_BACKENDS = ("miles",)  # backends with a train-only replay (Miles' debug-rollout replay)
-# backends whose launch refuses to start without --trust-remote-code, whatever the model (yeto.launch.rl_args)
-TRUST_REQUIRED = {"miles": "pinned Miles' Megatron and SGLang loaders always allow remote model code"}
+# A global rule, not a backend's: yeto.launch.rl_args refuses every RL launch (any --rl-backend) without
+# --trust-remote-code, whatever the model, so the smoke's launch always passes it
+TRUST_REQUIRED = ("yeto launch refuses every RL launch without it (the pinned trainer's loaders always allow "
+                  "remote model code, so the launch states it)")
 TRAIN_TIMEOUT_S = 3 * 3600.0
 PRUNE_TIMEOUT_S = 2 * 3600.0
 SAMPLER_TIMEOUT_S = 2 * 3600.0
@@ -322,8 +324,11 @@ def trainer_plan(node: Node, *, model: str, config: Mapping[str, Any], engine: s
     missing: a backend without a train-only replay, a node without ``scratch``, no
     store for the checkpoint, a registry placeholder no ``--smoke-arg`` fills.
     ``keep``: the cleanup leaves the artifacts and prints where they are."""
-    if node.runtime != "docker":
-        raise SmokeError(f"node {node.name} runs {node.runtime}: the trainer smoke runs the image (runtime docker)")
+    engine_name = profile_of(node).container
+    if node.runtime != "docker" or engine_name != "docker":
+        raise SmokeError(f"node {node.name} runs {node.runtime} (container {engine_name}): the trainer smoke runs "
+                         "the image as an ssh: trainer island, which starts docker containers only (inventory "
+                         "runtime: docker); podman and rootfs nodes take sampler images (--role sampler)")
     if not node.scratch:
         raise SmokeError(f"node {node.name} has no scratch: the cut model is written under the node's scratch "
                          "(inventory scratch: <local NVMe path>)")
@@ -335,7 +340,7 @@ def trainer_plan(node: Node, *, model: str, config: Mapping[str, Any], engine: s
     if engine not in TRAINER_BACKENDS:
         raise SmokeError(f"no trainer smoke for backend {engine} yet (smoke recipes: {list(TRAINER_BACKENDS)}): "
                          "its train-only replay is not wired")
-    trust, trust_notes = remote_code(config, layout["recommendation"].family, engine, extra_args)
+    trust, trust_notes = remote_code(config, layout["recommendation"].family, extra_args)
     extra_args = [a for a in extra_args if a not in (TRUST, NO_TRUST)]
     n = layout["layers"]
     slug = f"{_slug(model)}-{n}layer"
@@ -447,7 +452,7 @@ def trainer_plan(node: Node, *, model: str, config: Mapping[str, Any], engine: s
                      cleanup=tuple(cleanup), artifacts=artifacts)
 
 
-def remote_code(config: Mapping[str, Any], family: str | None, engine: str,
+def remote_code(config: Mapping[str, Any], family: str | None,
                 extra_args: Sequence[str] = ()) -> tuple[bool, list[str]]:
     """``(on, notes)``: whether the smoke's launch passes ``--trust-remote-code``.
 
@@ -459,9 +464,9 @@ def remote_code(config: Mapping[str, Any], family: str | None, engine: str,
     to need it: the smoke cannot tell. ``--smoke-arg=--trust-remote-code`` /
     ``--smoke-arg=--no-trust-remote-code`` decide instead (the last one given wins).
 
-    The backend: a backend of :data:`TRUST_REQUIRED` refuses a launch without the
-    flag whatever the model (pinned Miles' loaders always allow remote code:
-    :func:`yeto.launch.rl_args` states it), so it is on there, and
+    The launch: every RL launch refuses to start without the flag whatever the model
+    and backend (:data:`TRUST_REQUIRED`, a global rule of :mod:`yeto.launch.rl_args`),
+    so the result is always on: the note says what the model alone needs, and
     ``--no-trust-remote-code`` is a :class:`SmokeError`."""
     from ..rl.model_registry.families import FAMILIES  # noqa: PLC0415
 
@@ -478,14 +483,11 @@ def remote_code(config: Mapping[str, Any], family: str | None, engine: str,
     else:
         model, why = False, (f"the model: {TRUST} off (the registry's family {family} has no auto_map in "
                              "config.json)")
-    if engine in TRUST_REQUIRED:
-        if given and not model:
-            raise SmokeError(f"--smoke-arg={NO_TRUST}: the {engine} launch refuses to start without {TRUST} "
-                             f"({TRUST_REQUIRED[engine]})")
-        if not model:
-            why += f"; the launch passes it anyway: {TRUST_REQUIRED[engine]}"
-        return True, [why]
-    return model, [why]
+    if given and not model:
+        raise SmokeError(f"--smoke-arg={NO_TRUST}: the launch refuses to start without {TRUST} ({TRUST_REQUIRED})")
+    if not model:
+        why += f"; the launch passes it anyway: {TRUST_REQUIRED}"
+    return True, [why]
 
 
 def _mtp_layers(config: Mapping[str, Any]) -> int:
@@ -497,11 +499,12 @@ def _mtp_layers(config: Mapping[str, Any]) -> int:
 
 
 def sampler_plan(node: Node, *, spec: Mapping[str, Any], run_id: str, release: str | None = None,
-                 code: tuple[str, bytes] | None = None, keep: bool = False) -> SmokePlan:
+                 code: tuple[str, bytes] | None = None, keep: bool = False, sudo: bool = False) -> SmokePlan:
     """The sampler smoke's steps: put the yeto tree and the spec on the node, then the
     node runtime's container start of :mod:`yeto.node.smoke` on the image. The reload
     loads ``release``, else the spec's ``engine.server.base_dir``: a spec with neither
-    is refused here. ``keep``: the cleanup leaves the run's directory on the node."""
+    is refused here. ``keep``: the cleanup leaves the run's directory on the node;
+    ``sudo``: the engine runs as ``sudo -n <engine>`` (the pool's ``container.sudo``)."""
     from yeto.node import launch as node_launch  # noqa: PLC0415
     from yeto.node.code import tree_code_tar  # noqa: PLC0415
     from yeto.node.profile import CONTAINER_WORK, node_dirs  # noqa: PLC0415
@@ -530,7 +533,7 @@ def sampler_plan(node: Node, *, spec: Mapping[str, Any], run_id: str, release: s
     env = {"PYTHONPATH": tree_in, "PYTHONUNBUFFERED": "1", **profile.family_env()}
     name = container_name(run_id)
     argv = node_launch.container_argv(profile, name=name, image=REF, env=env, python=PYTHON_SH,
-                                      spec_path=spec_in, module="yeto.node.smoke",
+                                      spec_path=spec_in, sudo=sudo, module="yeto.node.smoke",
                                       module_args=["--spec", spec_in, *(["--release", release] if release else [])])
     steps = (SmokeStep("upload", "node", script=put, timeout_s=600.0,
                        show=f"put the yeto tree {sha} at {tree_host} and the spec at {spec_host}"),
@@ -539,7 +542,7 @@ def sampler_plan(node: Node, *, spec: Mapping[str, Any], run_id: str, release: s
     notes = (f"engine {engine.get('adapter') or engine.get('factory')}: start, generate, reload "
              f"({'release ' + release if release else 'the base weights'} as version 1), generate; the reload "
              "exercises the engine's hot-reload endpoint, not the format of a trainer release",)
-    ce = shlex.quote(profile.container)
+    ce = ("sudo -n " if sudo else "") + shlex.quote(profile.container)
     cleanup = [SmokeStep("container", "node", script=f"{ce} rm -f {shlex.quote(name)} >/dev/null 2>&1 || true",
                          timeout_s=300.0)]
     cleanup.append(SmokeStep("keep", "node", script=f"du -sh {shlex.quote(base)} 2>/dev/null || true", timeout_s=300.0)

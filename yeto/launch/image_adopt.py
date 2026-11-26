@@ -824,6 +824,11 @@ def add_parser(sub: Any) -> Any:
     a.add_argument("--strict-arch", action="store_true",
                    help="the image must carry a cubin of exactly the node's card architecture (no CUDA "
                         "minor-version or PTX compatibility)")
+    a.add_argument("--container-sudo", action="store_true",
+                   help="run the container engine as sudo -n <engine> (an ssh sampler pool's container.sudo: its "
+                        "rootful store); default: --pool-config's container.sudo, else off")
+    a.add_argument("--pool-config", default=None,
+                   help="the ssh sampler pool's config: its provider.container.sudo decides --container-sudo")
     a.add_argument("--allow-busy", action="store_true",
                    help="probe and smoke a node whose cards run processes or that runs yeto containers (a warning)")
     a.add_argument("--keep-smoke-artifacts", action="store_true",
@@ -871,6 +876,9 @@ def _plan(args: Any, request: AdoptRequest, run_id: str) -> Any:
 
     workdir = Path(site_images.default_path()).parent / "image-adopt" / run_id
     if request.role == "trainer":
+        if request.container_sudo:
+            raise image_smoke.SmokeError("--container-sudo / a pool config's container.sudo is for sampler pool "
+                                         "nodes: the ssh: trainer island runs docker as the ssh user")
         plan = image_smoke.trainer_plan(
             request.probe_node, model=request.model, config=_model_config(args), engine=request.engine,
             store=args.smoke_store, run_id=run_id, workdir=workdir, model_revision=args.model_revision,
@@ -879,7 +887,34 @@ def _plan(args: Any, request: AdoptRequest, run_id: str) -> Any:
         return plan
     spec = _sampler_spec(args)
     return image_smoke.sampler_plan(request.probe_node, spec=spec, run_id=run_id, release=args.release,
-                                    keep=args.keep_smoke_artifacts)
+                                    keep=args.keep_smoke_artifacts, sudo=request.container_sudo)
+
+
+def container_sudo(args: Any) -> bool:
+    """``--container-sudo``, else the pool config's ``provider.container.sudo`` (the
+    inventory has no such key), else off."""
+    if getattr(args, "container_sudo", False):
+        return True
+    path = getattr(args, "pool_config", None)
+    if not path:
+        return False
+    import yaml  # noqa: PLC0415
+
+    cfg = yaml.safe_load(Path(path).expanduser().read_text()) or {}
+    container = ((cfg.get("provider") or {}) if isinstance(cfg, Mapping) else {}).get("container") or {}
+    if not isinstance(container, Mapping):
+        raise ValueError(f"--pool-config {path}: provider.container is not a mapping")
+    return bool(container.get("sudo", False))
+
+
+def _by_engine(nodes: Sequence[Node]) -> dict[str, list[str]]:
+    """The node names per container engine (docker / podman; a node of none is left out)."""
+    out: dict[str, list[str]] = {}
+    for n in nodes:
+        engine = engine_of(n)
+        if engine:
+            out.setdefault(engine, []).append(n.name)
+    return dict(sorted(out.items()))
 
 
 def _sampler_spec(args: Any) -> dict[str, Any]:
@@ -893,18 +928,22 @@ def _sampler_spec(args: Any) -> dict[str, Any]:
 def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
     """``yeto image adopt``: 0 recorded (or a dry run), 1 a step failed, 2 a bad request."""
     from . import image_smoke  # noqa: PLC0415
-    from .node_inventory import InventoryError, load_inventory  # noqa: PLC0415
+    from .node_inventory import InventoryError, load_profiles  # noqa: PLC0415
+    from .preflight.cluster import engine_command  # noqa: PLC0415
 
     out = out or sys.stdout
     try:
-        nodes = role_nodes(load_inventory(args.inventory), args.role)
+        # profiles: an inventory's container (podman) and the other node profile keys count here
+        nodes = role_nodes(load_profiles(args.inventory), args.role)
+        sudo = container_sudo(args)
         catalog = args.catalog or str(site_images.inventory_catalog_path(args.inventory))
         spec_engine = engine_images.spec_needs(_sampler_spec(args))["engine_pref"] if args.role == "sampler" \
             and args.sampler_spec else None
         request = AdoptRequest(ref=args.ref, model=args.model, role=args.role, nodes=tuple(nodes),
                                engine=args.engine, node=args.node, catalog=catalog,
                                min_image_free_gib=args.min_image_free_gib, attention_backend=args.attention_backend,
-                               strict_arch=args.strict_arch, allow_busy=args.allow_busy, spec_engine=spec_engine)
+                               strict_arch=args.strict_arch, allow_busy=args.allow_busy, spec_engine=spec_engine,
+                               container_sudo=sudo)
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
         slug = re.sub(r"[^a-z0-9]+", "-", args.model.rsplit("/", 1)[-1].lower()).strip("-")[:24] or "model"
         run_id = f"adopt-{slug}-{args.role}-{stamp}"
@@ -922,10 +961,12 @@ def main(args: Any, *, ops: Any = None, out: Any = None) -> int:
                  f"{role}",
                  f"1. manifest: HEAD of {args.ref} in its registry; a tag is pinned to its digest "
                  f"(below: {image_smoke.REF})",
-                 f"2. probe on {node.name}: {probe_script(image_smoke.REF, node)[:200]} ...",
+                 f"2. probe on {node.name}: {probe_script(image_smoke.REF, node, sudo=sudo)[:200]} ...",
                  f"3. fit: CPU, device runtime, built card architectures and the {args.role} engine on {role}",
-                 f"4. pull: ssh + host probe (image root >= {args.min_image_free_gib:g} GiB free), then docker pull "
-                 f"{image_smoke.REF} on {role} in parallel",
+                 f"4. pull: ssh + host probe (image root >= {args.min_image_free_gib:g} GiB free), then "
+                 + "; ".join(f"{engine_command(engine, sudo)} pull {image_smoke.REF} on {names}"
+                             for engine, names in _by_engine(request.nodes).items())
+                 + " in parallel",
                  "5. " + "\n".join(plan.lines()),
                  f"then: a verified-smoke record in {catalog}"]
         print("\n".join(lines), file=out)

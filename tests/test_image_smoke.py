@@ -845,16 +845,17 @@ def _with(config, **over):
     (QWEN, None, True, "does not know this model"),
 ])
 def test_the_smoke_trusts_remote_code_as_the_model_needs(config, family, model, why):
-    on, notes = sm.remote_code(config, family, "verl")  # a backend that leaves it to the model
-    assert on is model and why in notes[0]
-    on, notes = sm.remote_code(config, family, "miles")  # pinned Miles refuses a launch without it
+    on, notes = sm.remote_code(config, family)  # every RL launch refuses to start without it: a global rule
     assert on is True and why in notes[0] and ("launch passes it anyway" in notes[0]) is (not model)
+    assert notes[0].startswith(f"the model: {sm.TRUST} {'on' if model else 'off'}")
 
 
-def test_the_smoke_arg_decides_the_remote_code_and_miles_refuses_it_off(tmp_path):
-    assert sm.remote_code(QWEN, "qwen3-moe", "verl", [sm.TRUST]) == (True, [
+def test_the_smoke_arg_decides_the_remote_code_and_the_launch_refuses_it_off(tmp_path):
+    assert sm.remote_code(QWEN, "qwen3-moe", [sm.TRUST]) == (True, [
         f"the model: {sm.TRUST} on (--smoke-arg={sm.TRUST})"])
-    assert sm.remote_code(_with(QWEN, auto_map={"A": "b.C"}), "generic-moe", "verl", [sm.TRUST, sm.NO_TRUST])[0] is False
+    with pytest.raises(sm.SmokeError, match=r"--smoke-arg=--no-trust-remote-code: the launch refuses"):
+        sm.remote_code(_with(QWEN, auto_map={"A": "b.C"}), "generic-moe", [sm.TRUST, sm.NO_TRUST])  # the last wins
+    assert sm.remote_code(QWEN, "qwen3-moe", [sm.NO_TRUST, sm.TRUST])[0] is True
     with pytest.raises(sm.SmokeError, match="launch refuses to start without --trust-remote-code"):
         _trainer_plan(tmp_path, extra_args=[sm.NO_TRUST])
     plan = _trainer_plan(tmp_path, config=_with(QWEN, architectures=["SomethingNewForCausalLM"],
@@ -873,3 +874,134 @@ def test_the_remote_code_note_reaches_the_evidence(tmp_path):
     (rec,) = si.load(tmp_path / "site-images.yaml")
     assert any(n.startswith(f"the model: {sm.TRUST} off") and "launch passes it anyway" in n
                for n in rec.evidence["notes"])
+
+
+# -- the CLI reads node profiles: an inventory's container (podman), the pool's sudo --------------
+
+
+def _podman_inventory(tmp_path, *, runtime="docker", n=2):
+    entries = [{"name": f"b300-{i}", "host": f"ops@b300-{i}", "device_family": "cuda", "cpu_arch": "x86_64",
+                "card": "B300", "cards_per_node": 8, "hbm_gib": 288, "host_memory_gib": 2048, "runtime": runtime,
+                "container": "podman", "scratch": "/mnt/nvme/yeto"} for i in range(n)]
+    path = tmp_path / "cluster.yaml"
+    path.write_text(yaml.safe_dump({"nodes": entries}))
+    return path
+
+
+@pytest.mark.parametrize("runtime", ["docker", "rootfs"])
+@pytest.mark.parametrize("sudo", [False, True])
+def test_the_cli_probes_and_pulls_a_podman_inventory_with_podman(tmp_path, monkeypatch, runtime, sudo):
+    """``container: podman`` in the inventory file reaches every step (``load_profiles``),
+    also on a ``runtime: rootfs`` node (an ssh sampler pool starts its containers
+    whatever the trainer runtime says); ``container.sudo`` of the pool config runs the
+    engine through ``sudo -n``."""
+    import warnings
+
+    from tests.test_image_adopt import _graphroot
+    from yeto.launch import image_manifest as im
+    from yeto.launch.node_inventory import load_profiles
+
+    monkeypatch.setenv(im.CHECK_ENV, "off")  # a digest: pinned without a registry
+    inv = _podman_inventory(tmp_path, runtime=runtime)
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(FAKE_SPEC))
+    pool = tmp_path / "pool.yaml"
+    pool.write_text(yaml.safe_dump({"provider": {"kind": "ssh", "runtime": "container",
+                                                 "container": {"engine": "podman", "sudo": sudo}}}))
+    nodes = list(load_profiles(inv))
+
+    class Raw(FakeNodes):
+        def run(self, node, script, *, timeout=300.0):
+            self.raw = [*getattr(self, "raw", []), (node.name, script)]
+            return super().run(node, script, timeout=timeout)
+
+    ops = Raw(nodes, **{n.name: _graphroot() for n in nodes})
+    ops.NOW = __import__("time").time()  # main() reads the head clock
+    ops.probe = probe_out(packages={"torch": "2.9.1+cu130", "vllm": "0.11.0"})  # a sampler image
+    smoked = []
+    monkeypatch.setattr(sm, "run_plan", lambda plan, **kw: smoked.append(plan) or sm.StepResult(
+        "smoke", True, "engine started, generated, reloaded, generated", 1.0, {"reload_mode": "in_place"}))
+    args = _cli(PINNED, "--model", "org/m", "--role", "sampler", "--inventory", inv, "--sampler-spec", spec,
+                "--release", RELEASE, "--pool-config", pool)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no "ignored here": the profile keys are read
+        assert ia.main(args, ops=ops) == 0
+    ce = "sudo -n podman" if sudo else "podman"
+    probes = [s for _, s in ops.raw if ia.FACT in s]
+    assert probes and all(s.startswith(f"{ce} run --rm ") for s in probes)
+    assert sorted(n for n, s in ops.raw if s.startswith(f"{ce} pull -q ")) == ["b300-0", "b300-1"]
+    assert not any(s.startswith(("docker pull", "docker run")) for _, s in ops.raw)
+    assert all(f"{ce} info --format '{{{{.Store.GraphRoot}}}}'" in s for _, s in ops.raw if "@@yeto-section" in s)
+    engine_step = smoked[0].steps[1].render({sm.REF: PINNED, sm.PYTHON: PY}).script
+    assert shlex.split(engine_step)[:3] == (["sudo", "-n", "podman"] if sudo else ["podman", "run", "--rm"])
+    assert smoked[0].cleanup[0].script.startswith(f"{ce} rm -f ")
+    (rec,) = si.load(tmp_path / "home" / ".yeto" / "site-images.yaml")
+    assert rec.evidence["pulled"] == ["b300-0", "b300-1"]
+
+
+def test_the_dry_run_names_each_node_s_engine_and_the_sudo(tmp_path, capsys):
+    inv = _podman_inventory(tmp_path, n=1)
+    doc = yaml.safe_load(inv.read_text())
+    doc["nodes"].append({**doc["nodes"][0], "name": "b300-1", "host": "ops@b300-1", "container": "docker"})
+    inv.write_text(yaml.safe_dump(doc))
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(FAKE_SPEC))
+    base = (TAGGED, "--model", "org/m", "--role", "sampler", "--inventory", inv, "--sampler-spec", spec,
+            "--release", RELEASE, "--dry-run")
+    assert ia.main(_cli(*base)) == 0
+    out = capsys.readouterr().out
+    assert f"2. probe on b300-0: podman run --rm" in out
+    assert f"then docker pull {sm.REF} on ['b300-1']; podman pull {sm.REF} on ['b300-0'] in parallel" in out
+    assert ia.main(_cli(*base, "--container-sudo")) == 0
+    out = capsys.readouterr().out
+    assert "2. probe on b300-0: sudo -n podman run --rm" in out
+    assert f"sudo -n docker pull {sm.REF} on ['b300-1']; sudo -n podman pull {sm.REF} on ['b300-0']" in out
+
+
+@pytest.mark.parametrize("runtime, container, sudo", [("docker", "podman", False), ("rootfs", "podman", False),
+                                                      ("docker", "docker", True)])
+def test_a_trainer_smoke_off_the_docker_island_path_is_refused_with_why(tmp_path, capsys, runtime, container, sudo):
+    inv = _podman_inventory(tmp_path, runtime=runtime, n=1)
+    doc = yaml.safe_load(inv.read_text())
+    doc["nodes"][0]["container"] = container
+    inv.write_text(yaml.safe_dump(doc))
+    args = _cli(TAGGED, "--model", "Qwen/Qwen3-30B-A3B", "--role", "trainer", "--inventory", inv,
+                "--model-config", REGISTRY_CONFIGS / "qwen3_30b_a3b.json", "--smoke-store", "s3://b/s", "--dry-run",
+                *(["--container-sudo"] if sudo else []))
+    assert ia.main(args) == 2
+    err = capsys.readouterr().err
+    if sudo:
+        assert "--container-sudo / a pool config's container.sudo is for sampler pool nodes" in err
+    else:
+        assert (f"node b300-0 runs {runtime} (container {container}): the trainer smoke runs the image as an ssh: "
+                "trainer island, which starts docker containers only") in err
+
+
+def test_the_pool_config_decides_the_sudo_unless_the_flag_says_so(tmp_path):
+    pool = tmp_path / "pool.yaml"
+    ns = argparse.Namespace
+    assert ia.container_sudo(ns(container_sudo=False, pool_config=None)) is False
+    pool.write_text(yaml.safe_dump({"provider": {"container": {"sudo": True}}}))
+    assert ia.container_sudo(ns(container_sudo=False, pool_config=str(pool))) is True
+    pool.write_text(yaml.safe_dump({"provider": {"runtime": "venv"}}))
+    assert ia.container_sudo(ns(container_sudo=False, pool_config=str(pool))) is False
+    assert ia.container_sudo(ns(container_sudo=True, pool_config=str(pool))) is True
+    pool.write_text(yaml.safe_dump({"provider": {"container": "podman"}}))
+    with pytest.raises(ValueError, match="provider.container is not a mapping"):
+        ia.container_sudo(ns(container_sudo=False, pool_config=str(pool)))
+
+
+@pytest.mark.parametrize("returned", [None, "loaded", {"reload_mode": "in_place"}])
+def test_a_reload_without_a_load_report_fails(returned, capsys):
+    class NoReport(FakeEngine):
+        def load(self, release_dir, version):
+            super().load(release_dir, version)
+            return returned
+
+    engine = NoReport()
+    record = node_smoke.run_smoke(engine, release=None)
+    assert (record["ok"], record["step"]) == (False, "reload") and engine.stopped
+    assert f"the engine's load returned {type(returned).__name__}, not a LoadReport with a reload_mode" \
+        in record["error"]
+    last = json.loads(capsys.readouterr().out.splitlines()[-1].split(" ", 1)[1])
+    assert (last["step"], last["ok"]) == ("reload", False)

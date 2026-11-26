@@ -757,10 +757,23 @@ to adopt the image. The steps, in order:
    rule and the node's card.
 4. **pull**: every node of the role (spares included, `roles: [trainer-spare]`)
    is checked over SSH, and its image root (the docker data root, or
-   `/var/lib/containerd` with the containerd image store) must have
-   `--min-image-free-gib` free (default 120). Only when every node passes does the
-   pull run, on all docker nodes in parallel. A node that fails is named with the
-   preflight's finding or docker's error line.
+   `/var/lib/containerd` with the containerd image store, or podman's storage
+   graphroot) must have `--min-image-free-gib` free (default 120). A podman node
+   whose graphroot `podman info` does not print, or that the disk probe does not
+   find, fails: the image store's disk cannot be confirmed. Only when every node
+   passes does the pull run, on every node in parallel with its own container
+   engine. A node that fails is named with the preflight's finding or the
+   engine's error line.
+
+   Each node's container engine is its inventory `container:` (`docker` or
+   `podman`; default: `docker` for `runtime: docker`). An ssh sampler pool node
+   with `container: podman` is adopted with podman also when its `runtime:` is
+   `rootfs` (the pool starts its containers whatever the trainer runtime says).
+   A pool whose `container.sudo: true` runs `sudo -n podman` uses podman's
+   rootful store: pass the pool's config with `--pool-config` (its
+   `provider.container.sudo` is read), or `--container-sudo`, and the host
+   checks, the pull, the probe and the smoke all run the engine through
+   `sudo -n`, so the image lands in the store the pool starts from.
 5. **smoke**, on the probe node, after its cards are checked idle again:
    - **trainer**: the model is cut to its first N layers (all their experts, the
      embeddings and the head, `scripts/prune_layers.py`; MTP layers are dropped,
@@ -781,13 +794,17 @@ to adopt the image. The steps, in order:
      reads, never on a command line and never printed. The model needs
      `--trust-remote-code` when its `config.json` has an `auto_map`, or when the
      model registry does not know it; `--smoke-arg=--trust-remote-code` or
-     `--smoke-arg=--no-trust-remote-code` decides it instead. The Miles launch
-     requires the flag for every model (its loaders always allow remote code),
-     so the Miles smoke always passes it; the evidence notes say both. When the registry's flags for the model need
+     `--smoke-arg=--no-trust-remote-code` decides it instead. Every RL launch
+     requires the flag, whatever the model and backend (the pinned trainer's
+     loaders always allow remote code), so the smoke always passes it and refuses
+     `--no-trust-remote-code`; the evidence notes say what the model alone needs.
+     When the registry's flags for the model need
      a file (for example `--rl-expert-selection` for Kimi K3.1), pass it with
      `--smoke-arg=--rl-expert-selection=/path/selection.json`; any other
      `yeto launch` flag the run needs goes the same way. Only the Miles backend
-     has a trainer smoke so far.
+     has a trainer smoke so far, and only on `runtime: docker` nodes (the `ssh:`
+     trainer island starts docker containers as the SSH user: a podman or
+     `rootfs` node, or `--container-sudo`, is refused for `--role trainer`).
    - **sampler**: the engine of `--sampler-spec` (the pool's sampler spec) starts
      in the image the way the node runtime starts a sampler (the node's device
      flags and directories), generates once, reloads (the weights of `--release`,
@@ -795,7 +812,8 @@ to adopt the image. The steps, in order:
      is required) and generates again. The reload checks the engine's hot-reload
      endpoint only, not the format of a trainer release, and it must reload in
      place: an engine whose reload falls back to a restart fails the smoke, and
-     the error names its `reload_mode`. A failing step is named, for example
+     the error names its `reload_mode`; so does a load that returns no report of
+     its reload mode. A failing step is named, for example
      `smoke failed: engine: reload failed: ...`.
 
    Whatever the smoke's outcome, a failure or a timeout, its containers are
