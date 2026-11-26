@@ -87,6 +87,11 @@ def layout(reducer) -> dict:
     return topology_diloco.layout(reducer)
 
 
+def _natural(name: str) -> tuple:
+    """``trainer2`` before ``trainer10``: the digit runs compare as numbers."""
+    return tuple(int(p) if p.isdigit() else p for p in re.split(r"(\d+)", str(name)))
+
+
 def view(reducer, cards: list[dict], now: float) -> dict | None:
     """The topology panel's data; None for a run without samplers and without a syncer.
     ``cards``: the island cards of the same page view (hardware, step, policy version, leave
@@ -247,6 +252,9 @@ def view(reducer, cards: list[dict], now: float) -> dict | None:
         "store": (reducer.store_status() or {}).get("uri") if callable(reducer.store_status) else None,
         "flows": flows,
     }
+    lanes = getattr(reducer, "lane_releases", None)
+    if lanes:  # a fleet: each island lane's newest release (fleet_islands.PlanFile.pump_lane_releases)
+        out["lanes"] = {k: lanes[k] for k in sorted(lanes, key=_natural)}  # trainer2 before trainer10
     if diloco is not None:
         out["kind"] = diloco["kind"]
         out["diloco"] = diloco

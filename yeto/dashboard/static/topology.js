@@ -101,6 +101,9 @@ function build(host){
     el("text",{x:mx,y:y0-12,"text-anchor":"middle","class":"tpc tptraj"},labels,"Trajectories + log-probs →");
     el("text",{x:mx,y:Math.max(R2.cy,TRS[0].y+TRS[0].h/2)+22,"text-anchor":"middle","class":"tpc tpwtc"},labels,"← New weights")}
   var r2=store(nd,R2,narrow),trc=TRS.map(function(B,k){return trainer(nd,B,trs[k])});
+  // the store's info lines are centred under it: between the sampler cards and the trainer side
+  var leftEdge=n?Math.max.apply(null,xs)+cw:0,rightEdge=narrow?VW:(TRS.length?TRS[0].x+14:VW);
+  r2.infoW=Math.max(60,2*Math.min(R2.cx-leftEdge,rightEdge-R2.cx)-16);
   var stats=[];
   if(!narrow&&TRS.length===1){var sg=el("g",{transform:"translate("+(TRS[0].x+14)+","+(TRS[0].y+TRS[0].h+28)+")"},nd);
     el("text",{x:0,y:0,"class":"tpt"},sg,"Last 5 min");for(var q=0;q<3;q++)stats.push(el("text",{x:0,y:18+q*16,"class":"tpm"},sg,""))}
@@ -131,6 +134,17 @@ function card(parent,x,y,w,h,c){
   var flash=el("rect",{width:w,height:h,rx:9,fill:"none","stroke-width":1.5,opacity:0},g);
   return{g:g,box:box,ver:ver,dot:dot,st:st,rate:rate,flash:flash,c:c,compact:compact,w:w}}
 
+// each lane's newest release beside the store when the line fits there, else the range and the
+// lane count; the whole "lane=version" list on hover (<title>)
+function laneLine(r2,lk,ln,range){var e=r2.info[2],key=lk.map(function(k){return k+"="+ln[k]}).join(", ")+"|"+r2.infoW;
+  if(e._lanes===key)return;e._lanes=key;
+  e.textContent=lk.map(function(k){return k+"/ v"+ln[k]}).join(" · ");
+  var w=null;try{if(typeof e.getComputedTextLength==="function")w=e.getComputedTextLength()}catch(_){w=null}
+  if(!fin(w)||w<=0)w=e.textContent.length*6.3;
+  if(w>r2.infoW)e.textContent=(range.indexOf("LATEST")===0?range.slice(7):range)+" · "+lk.length+" lanes";
+  e._tip=null;e._tipEl=null;tipOf(e,lk.map(function(k){return k+"=v"+ln[k]}).join(", "))}
+function tipOf(e,s){if(e._tip===s)return;e._tip=s;var old=e._tipEl;if(old&&old.parentNode)old.parentNode.removeChild(old);e._tipEl=null;
+  if(s&&typeof document!=="undefined"&&document.createElementNS&&e.namespaceURI){var t=document.createElementNS(e.namespaceURI,"title");t.textContent=s;e.appendChild(t);e._tipEl=t}}
 function store(parent,R,narrow){
   var g=el("g",{},parent),cx=R.cx,cy=R.cy,r=R.r;
   el("circle",{cx:cx,cy:cy,r:r+7,fill:"none","class":"tpring"},g);
@@ -185,10 +199,15 @@ function paint(){
     if(red){var g5=t.flows.filter(function(f){return f.k==="g"&&L.idx[f.s]===k&&f.t>t.now-300}).reduce(function(a,f){return a+(f.m||1)},0);cn.textContent=g5+" groups / 5 min"}});
   var b=t.buffer||{},rl=t.last_release,f=fin(b.backlog)?Math.min(1,b.backlog/Math.max(24,b.backlog)):0;
   L.r2.ring.style.stroke=C.traj;L.r2.ring.setAttribute("stroke-dasharray",(L.r2.C2*f).toFixed(1)+" "+L.r2.C2.toFixed(1));
-  L.r2.lat.textContent=fin(t.latest)?"LATEST v"+t.latest:"no release";
+  // a fleet whose releases live on its island lanes (trainer<k>/policy-releases/): each lane's newest
+  // (their LATEST.json wins over the release events on the tapes, which miss a lane whose tape is not here)
+  var ln=t.lanes||{},lk=Object.keys(ln),lv=lk.map(function(k){return ln[k]}),lanes=lk.length>0,
+    lo=lanes?Math.min.apply(null,lv):null,hi=lanes?Math.max.apply(null,lv):null,range=lo===hi?"LATEST v"+hi:"v"+lo+"–v"+hi;
+  L.r2.lat.textContent=lanes?range:fin(t.latest)?"LATEST v"+t.latest:"no release";
   L.r2.info[0].textContent=fin(b.backlog)?"buffer "+Math.round(b.backlog)+" groups":"buffer n/a";
   L.r2.info[1].textContent=fin(b.written)?"written "+Math.round(b.written)+(fin(b.read)?" − read "+Math.round(b.read):""):"";
-  L.r2.info[2].textContent=rl?(L.r2.narrow?"":"last release ")+(rl.kind||"")+" "+bytes(rl.bytes)+" · "+dur(tn-rl.ts)+" ago":"no release yet";
+  if(lanes)laneLine(L.r2,lk,ln,range);
+  else{tipOf(L.r2.info[2],"");L.r2.info[2].textContent=rl?(L.r2.narrow?"":"last release ")+(rl.kind||"")+" "+bytes(rl.bytes)+" · "+dur(tn-rl.ts)+" ago":"no release yet"}
   L.trc.forEach(function(o,k){var tr=L.trs[k];
     // the round the "Islands now" table shows: the trainer's last round record
     var rr=(((V||{}).islands||{})[tr.id]||{}).rounds||[],lr=null;for(var i=rr.length-1;i>=0;i--)if(fin(rr[i].ts)&&rr[i].round!=null){lr=rr[i].round;break}
