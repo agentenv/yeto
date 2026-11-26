@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -35,3 +36,49 @@ def test_a_write_under_the_real_root_is_refused_and_recorded(tmp_path, monkeypat
     assert (real / "runs").is_dir() and not list((real / "runs").iterdir())
     assert [event for _test, event, _path in guard._state["violations"]] == ["os.mkdir", "open"]
     assert (tmp_path / "elsewhere.json").write_text("{}") == 2  # outside the root: untouched
+
+
+def test_the_real_yeto_output_is_guarded_in_this_process(tmp_path, monkeypatch):
+    output = tmp_path / "home" / guard.OUTPUT_DIR
+    output.mkdir(parents=True)
+    monkeypatch.setitem(guard._state, "guarded", (str(tmp_path / "home" / ".yeto"), str(output)))
+    monkeypatch.setitem(guard._state, "violations", [])
+    with pytest.raises(PermissionError, match="real ~/yeto-output"):
+        (output / "rl-island-0.jsonl").write_text("{}")
+    assert [event for _test, event, _path in guard._state["violations"]] == ["open"]
+    homes = {os.environ.get("HOME") or "", guard.pwd.getpwuid(os.getuid()).pw_dir} - {""}
+    assert {os.path.join(os.path.abspath(home), guard.OUTPUT_DIR) for home in homes} <= set(guard._real_roots())
+
+
+def test_a_child_that_names_the_real_yeto_output_is_refused(tmp_path, monkeypatch):
+    import subprocess
+
+    home = tmp_path / "home"
+    output = home / guard.OUTPUT_DIR
+    monkeypatch.setitem(guard._state, "guarded", (str(home / ".yeto"), str(output)))
+    monkeypatch.setitem(guard._state, "violations", [])
+    monkeypatch.setenv("HOME", str(home))
+    command = "yeto-syncer --dispense --dispense-log ~/yeto-output/task-dispense.jsonl"
+    with pytest.raises(PermissionError, match="real ~/yeto-output"):
+        subprocess.run(["bash", "-c", f"echo {command}"], check=True)
+    with pytest.raises(PermissionError):
+        subprocess.Popen([sys.executable, "-c", "pass", f"--event-tape={output}/rl-island-0.jsonl"])
+    with pytest.raises(PermissionError):
+        subprocess.run("echo $HOME/yeto-output/x ${HOME}/yeto-output/y", shell=True, check=True)
+    assert [event for _test, event, _path in guard._state["violations"]] == ["subprocess"] * 3
+    assert not output.exists()
+    # paths of another home, or under tmp_path, are the test's own
+    elsewhere = {**os.environ, "HOME": str(tmp_path / "node-home")}
+    subprocess.run(["bash", "-c", f"echo {command}"], env=elsewhere, check=True, capture_output=True)
+    subprocess.run(["echo", str(tmp_path / guard.OUTPUT_DIR), "~/yeto-outputs", "node:yeto-output/"],
+                   check=True, capture_output=True)
+    # another machine's ~/yeto-output: an rsync or ssh argument, or a remote spec in a shell line
+    subprocess.run(["true", "node:~/yeto-output/task-dispense.jsonl"], check=True)
+    subprocess.run(["bash", "-c", "true node:~/yeto-output/rl-island-0.jsonl"], check=True)
+    ssh = tmp_path / "ssh"  # runs its command line on the node, not here
+    ssh.write_text("#!/bin/sh\nexit 0\n")
+    ssh.chmod(0o755)
+    subprocess.run([str(ssh), "node", "mkdir -p ~/yeto-output && cat ~/yeto-output/yeto-tape.jsonl"], check=True)
+    assert len(guard._state["violations"]) == 3
+    with pytest.raises(PermissionError):  # past a wrapper, the shell still runs it here
+        subprocess.run(["timeout", "60", "bash", "-c", f"echo {command}"], check=True)

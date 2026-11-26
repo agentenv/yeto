@@ -25,6 +25,7 @@ from process_groups import group_popen, kill_group
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
 from test_verl_full_parameter_sync import needs_cargo, syncer_binary  # noqa: F401 - fixture
 from verl_island_fakes import ISLAND_ARGV, drive_trainer, modules, run_island_entry, stub_verl_and_ray
+from yeto.launch.dispense_evidence import DISPENSE_LOG
 from yeto.rl.adapters.verl import decoupled_session as ds
 from yeto.rl.adapters.verl import island_entry
 from yeto.rl.adapters.verl.publish import lora_checksum
@@ -296,7 +297,8 @@ def test_two_launcher_built_verl_islands_run_decoupled_fragments_through_the_rea
     command = (launcher.role_syncer_commands(args, 2, binary=str(syncer_binary))["actor"]
                .replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
-               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
+               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl"))
+               .replace(DISPENSE_LOG, str(tmp_path / "task-dispense.jsonl")))
     plans = []
     for learner_id in range(2):
         parsed, _ignored = island_entry.parse_args(_island_argv(args, learner_id, f"127.0.0.1:{port}"))

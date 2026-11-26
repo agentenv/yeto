@@ -43,6 +43,7 @@ from free_ports import free_port
 from process_groups import group_popen, kill_group
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
 from test_rl_k31_e2e_cpu import EP, MOE_LAYERS, NUM_EXPERTS, NUM_TRAINABLE, Bucket, _hf_config
+from yeto.launch.dispense_evidence import DISPENSE_LOG
 from yeto.rl.adapters.miles import island_entry, pins
 from yeto.rl.adapters.miles.models.kimi_k31 import release as k31_release
 from yeto.rl.adapters.miles.models.partial_experts import selection as sel
@@ -500,7 +501,8 @@ def _start_syncer(binary: Path, tmp_path: Path, learners: int):
     port = free_port()
     command = (command.replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
-               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
+               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl"))
+               .replace(DISPENSE_LOG, str(tmp_path / "task-dispense.jsonl")))
     assert f"--learners {learners} --quorum 1" in command and "--outer-lr 1.0 --outer-momentum 0.0" in command
     log_file = tmp_path / "syncer.log"
     with log_file.open("w") as out:

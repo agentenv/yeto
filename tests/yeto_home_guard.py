@@ -1,4 +1,4 @@
-"""Keep the test session out of the developer's real ``~/.yeto``.
+"""Keep the test session out of the developer's real ``~/.yeto`` and ``~/yeto-output``.
 
 The run registry, the resource and cost ledgers, the ``run up`` state, the NC pool
 state and the ssh control sockets all live under ``~/.yeto``, and most of them are
@@ -11,13 +11,20 @@ every state directory at one temporary root through the override each path alrea
 reads. HOME itself is left alone: the syncer tests build with the caller's own
 rustup/cargo (tests/syncer_build.py).
 
-:func:`install_guard` then watches the real ``~/.yeto`` two ways:
+:func:`install_guard` then watches the real ``~/.yeto`` and ``~/yeto-output`` (where
+the launcher's commands put a node's syncer tape, checkpoint and dispenser log, and an
+island its event tape: ``~`` is the node's home) three ways:
 
 * in this process, an audit hook refuses (``PermissionError``) every write, create,
-  rename or delete under it and records the test that tried; any such attempt fails
+  rename or delete under them and records the test that tried; any such attempt fails
   the session (:func:`session_report`), also when the code under test swallowed the
   error;
-* for child processes, a snapshot of every entry's mtime and size at the start is
+* a child process (``subprocess.Popen``) whose command line names the real
+  ``~/yeto-output`` (its absolute path, or ``~/``, ``$HOME/`` or ``${HOME}/`` with the
+  child's ``HOME`` the real one) is refused the same way: a launcher-built syncer
+  command whose ``--dispense-log`` a test did not point at ``tmp_path`` appended to the
+  host's ``~/yeto-output/task-dispense.jsonl`` in every session;
+* for other child processes, a snapshot of every entry's mtime and size at the start is
   compared at the end. New or changed entries are reported as a warning only: another
   process on this machine (a real run, another checkout's test session) may have
   written them.
@@ -27,7 +34,9 @@ from __future__ import annotations
 
 import os
 import pwd
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -55,6 +64,12 @@ _WRITE_EVENTS = frozenset({"open", "os.mkdir", "os.rename", "os.remove", "os.rmd
                            "os.utime", "os.chmod", "os.symlink", "os.link", "shutil.rmtree"})
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
 WARN_LIST_MAX = 30
+OUTPUT_DIR = "yeto-output"  # a node's ~/yeto-output (yeto.launch.syncer, rl_island_task)
+# ~/yeto-output in a command line, as the child's shell resolves it (a word of its own or
+# an option's value; ``node:~/yeto-output`` is another machine's)
+_HOME_OUTPUT = re.compile(r"(?:^|(?<=[\s='\"]))(?:~|\$HOME|\$\{HOME\})/" + OUTPUT_DIR + r"(?![\w.-])")
+# the children that run a command line on this machine: a shell, Python, the syncer
+_LOCAL_RUNNERS = re.compile(r"^(?:ba|z|da|k)?sh$|^python[\d.]*$|^yeto-syncer")
 
 _state: dict = {"root": None, "owned": False, "guarded": (), "snapshot": {}, "violations": [],
                 "test": "<collection>", "installed": False}
@@ -84,11 +99,19 @@ def _real_roots() -> tuple[str, ...]:
     homes = {os.environ.get("HOME") or "", pwd.getpwuid(os.getuid()).pw_dir}
     roots = []
     for home in sorted(h for h in homes if h):
-        root = os.path.join(os.path.abspath(home), ".yeto")
-        if _state["root"] is not None and os.path.abspath(str(_state["root"])).startswith(root + os.sep):
-            continue  # an isolated root under it (TMPDIR in HOME) is ours to write
-        roots.append(root)
+        for name in (".yeto", OUTPUT_DIR):
+            root = os.path.join(os.path.abspath(home), name)
+            if _state["root"] is not None and os.path.abspath(str(_state["root"])).startswith(root + os.sep):
+                continue  # an isolated root under it (TMPDIR in HOME) is ours to write
+            roots.append(root)
     return tuple(roots)
+
+
+def _label(path: str) -> str:
+    for root in _state["guarded"]:
+        if path == root or path.startswith(root + os.sep):
+            return f"~/{os.path.basename(root)}"
+    return "~/.yeto"
 
 
 def _snapshot(roots) -> dict[str, tuple[int, int]]:
@@ -140,18 +163,83 @@ def _audit(event: str, args: tuple) -> None:
         if event == "os.mkdir" and os.path.isdir(path):
             continue  # mkdir(exist_ok=True) of what is there writes nothing
         _state["violations"].append((_state["test"], event, path))
-        raise PermissionError(f"test isolation: {event} under the real ~/.yeto refused: {path} "
+        raise PermissionError(f"test isolation: {event} under the real {_label(path)} refused: {path} "
                               f"(tests/yeto_home_guard.py; point the path at tmp_path or its env override)")
 
 
+_WRAPPERS = {"timeout", "env", "nice", "stdbuf", "setsid", "exec"}
+
+
+def _program(words: list[str]) -> str:
+    """The program a command line runs, past ``timeout 60``, ``env A=1`` and the like."""
+    for word in words:
+        name = os.path.basename(word)
+        if name in _WRAPPERS or word.startswith("-") or "=" in word or word.replace(".", "").isdigit():
+            continue
+        return name
+    return ""
+
+
+def child_output(args, env, *, shell: bool = False) -> str | None:
+    """The real ~/yeto-output that a child's command line names (``args``, ``env`` and
+    ``shell`` as given to ``subprocess.Popen``; ``env`` None: this process's), or None.
+    Only a child that runs it here counts (a shell, Python, the syncer): an ``ssh`` or
+    ``rsync`` argument names a path of another machine."""
+    outputs = [root for root in _state["guarded"] if os.path.basename(root) == OUTPUT_DIR]
+    if not outputs:
+        return None
+    if isinstance(args, (str, bytes, os.PathLike)):
+        text = os.fsdecode(args)
+        words = text.split()
+    else:
+        try:
+            words = [os.fsdecode(arg) for arg in args]
+        except TypeError:
+            return None
+        text = " ".join(words)
+    if not shell and not _LOCAL_RUNNERS.search(_program(words)):
+        return None
+    for root in outputs:
+        if re.search(re.escape(root) + r"(?![\w.-])", text):
+            return root
+    home = (os.environ if env is None else env).get("HOME")
+    if home and os.path.join(os.path.abspath(home), OUTPUT_DIR) in outputs:
+        found = _HOME_OUTPUT.search(text)
+        if found:
+            return found.group(0)
+    return None
+
+
+def _guard_popen() -> None:
+    real_init = subprocess.Popen.__init__
+
+    def __init__(self, args, *a, **kw):
+        # env is Popen's 11th positional parameter (the 10th after args); by keyword otherwise
+        named = child_output(args, a[9] if len(a) >= 10 else kw.get("env"),
+                             shell=bool(a[7] if len(a) >= 8 else kw.get("shell")))
+        if named is not None:
+            _state["violations"].append((_state["test"], "subprocess", named))
+            raise PermissionError(
+                f"test isolation: a child process would write the real ~/yeto-output ({named} in its "
+                "command line): point that path at tmp_path (a launcher-built syncer command: replace "
+                "its --dispense-log, --event-tape and --checkpoint-path) or give the child its own HOME "
+                "(tests/yeto_home_guard.py)")
+        real_init(self, args, *a, **kw)
+
+    __init__.yeto_home_guard = True
+    subprocess.Popen.__init__ = __init__
+
+
 def install_guard() -> None:
-    """Snapshot the real ~/.yeto and start refusing in-process writes to it (once per process)."""
+    """Snapshot the real ~/.yeto and ~/yeto-output and start refusing in-process writes to
+    them and child processes that name ~/yeto-output (once per process)."""
     if _state["installed"]:
         return
     _state["installed"] = True
     _state["guarded"] = _real_roots()
     _state["snapshot"] = _snapshot(_state["guarded"])
     sys.addaudithook(_audit)
+    _guard_popen()
 
 
 def set_current_test(nodeid: str) -> None:

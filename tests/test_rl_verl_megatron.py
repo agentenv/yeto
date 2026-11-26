@@ -715,7 +715,11 @@ def test_hf_export_on_the_trainer_ranks_leaves_the_marker_and_reaches_the_store(
 
     worker = SimpleNamespace(actor=SimpleNamespace(engine=SimpleNamespace(module=[object()], bridge=_Bridge())))
     store = tmp_path / "store"
-    config = {"rounds": "1,final", "store": str(store)}
+    # the driver names the island's staging directory; every rank gets the name
+    drivers = [mp.MegatronHfExports(SimpleNamespace(), {"rounds": "1,final", "store": str(store)}) for _ in range(2)]
+    names = [driver.config["staging"] for driver in drivers]
+    assert names[0] != names[1] and all(name.startswith(f"{mp.HF_STAGING}-") for name in names)
+    config = drivers[0].config
     record = mp.remote_hf_export(worker, config, 0, 1, True, str(model))
     assert record["ok"] and record["round"] == 1 and record["files"] == 3, record
     out = store / "round-1"
@@ -723,13 +727,13 @@ def test_hf_export_on_the_trainer_ranks_leaves_the_marker_and_reaches_the_store(
     assert (out / "model-00001-of-00001.safetensors").read_bytes() == b"w" * 8
     assert not (out / "model-00001-of-00013.safetensors").exists()
     assert json.loads((store / "final.json").read_text())["path"] == "round-1"
-    assert not (staging_root / mp.HF_STAGING / "round-1").exists()  # the staging copy is deleted
+    assert (staging_root / names[0]).is_dir() and not (staging_root / names[0] / "round-1").exists()  # deleted
 
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 3)
     monkeypatch.setattr(torch.distributed, "barrier", lambda: None)
     assert mp.remote_hf_export(worker, config, 1, 2, False, str(model)) is None
-    joined = staging_root / mp.HF_STAGING / "round-2"
+    joined = staging_root / names[0] / "round-2"
     assert (joined / "model-00001-of-00001.safetensors").is_file()
     assert not (joined / ".complete").exists() and not (joined / "config.json").exists()
 

@@ -42,6 +42,7 @@ from miles.backends.megatron_utils.full_parameter_state import (
 )
 
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
+from yeto.launch.dispense_evidence import DISPENSE_LOG
 from yeto.fragments import MERGE_AVG, MERGE_RDA
 from yeto.protocol import DTYPE_F32, DTYPE_F32_PUSH_I8, DTYPE_FLAG_TENSOR_BLOCKS, SyncerClient
 from yeto.rl.adapters.miles.models.chunked_full_parameter import (
@@ -233,7 +234,8 @@ def _start_syncer(binary: Path, tmp_path: Path, fragments: int, *extra: str):
     command = (command
                .replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
-               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
+               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl"))
+               .replace(DISPENSE_LOG, str(tmp_path / "task-dispense.jsonl")))
     process = group_popen(["bash", "-c", command], stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True)
     return process, port, launcher.rl_syncer_profile(args, LEARNERS).sha256

@@ -22,6 +22,7 @@ import torch
 from free_ports import free_port
 from process_groups import group_popen, kill_group
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
+from yeto.launch.dispense_evidence import DISPENSE_LOG
 from yeto.fragments import MERGE_RDA, Fragment, FragmentLayout
 from yeto.protocol import (
     DTYPE_F32,
@@ -74,7 +75,8 @@ def _start_syncer(binary: Path, tmp_path: Path, *extra: str,
     command = (command
                .replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
-               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
+               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl"))
+               .replace(DISPENSE_LOG, str(tmp_path / "task-dispense.jsonl")))
     assert "--policy-sweep-fragments 2" in command and "--require-profile-binding" in command
     process = group_popen(["bash", "-c", command], stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True)

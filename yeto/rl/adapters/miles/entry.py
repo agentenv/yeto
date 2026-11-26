@@ -24,7 +24,6 @@ from pathlib import Path
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, NamedTuple
@@ -735,9 +734,6 @@ def data_position_log_for(miles_args: Any, sync: Any, *, learner_id: int) -> Any
                              slot=getattr(miles_args, "yeto_rl_data_slot", None))
 
 
-HF_EXPORT_STAGING = "yeto-hf-export"  # under the system temp dir (local disk)
-
-
 def hf_exports_for(miles_args: Any, *, actor_model: Any, runner: Any,
                    environ: Mapping[str, str] | None = None) -> Any:
     """``--rl-export-hf-rounds`` (``yeto.rl.engine.hf_export``): the island's
@@ -747,7 +743,7 @@ def hf_exports_for(miles_args: Any, *, actor_model: Any, runner: Any,
     config = getattr(miles_args, "yeto_rl_hf_exports", None)
     if not config:
         return None
-    from yeto.rl.engine.hf_export import EXPORT_HF_FLAG, ExportRounds, HfRoundExports
+    from yeto.rl.engine.hf_export import EXPORT_HF_FLAG, ExportRounds, HfRoundExports, private_staging
     from yeto.rl.engine.resume import store_for
 
     from .publish import lora_mode
@@ -759,7 +755,7 @@ def hf_exports_for(miles_args: Any, *, actor_model: Any, runner: Any,
     return HfRoundExports(ExportRounds.parse(config["rounds"]), store_for(config["store"], environ=environ),
                           full_checkpoint_writer(actor_model, runner, all_ranks=one_node,
                                                  base_dir=_hf_dir(miles_args)),
-                          staging=Path(tempfile.gettempdir()) / HF_EXPORT_STAGING)
+                          staging=private_staging())
 
 
 def _hf_dir(miles_args: Any) -> Path | None:

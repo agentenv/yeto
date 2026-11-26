@@ -171,23 +171,24 @@ class _YetoHomeGuard:
 
 
 def _report_yeto_home(session) -> None:
-    """End of the outermost session: a refused write to the real ~/.yeto fails it; an entry
-    there that is new or changed since the start (a child process, or another process on
-    this machine) is a warning."""
+    """End of the outermost session: a refused write to the real ~/.yeto or ~/yeto-output
+    (in this process, or a child named it) fails it; an entry there that is new or changed
+    since the start (a child process, or another process on this machine) is a warning."""
     errors, warnings = _home_guard.session_report()
     tr = session.config.pluginmanager.get_plugin("terminalreporter")
     write = (lambda line: tr.write_line(line)) if tr is not None else print
     if tr is not None and (errors or warnings):
         tr.ensure_newline()
     if warnings:
-        write(f"WARNING real ~/.yeto changed during the session ({len(warnings)} entries; not from this "
-              "process: a child process, or another run / test session on this machine):")
+        write(f"WARNING real ~/.yeto or ~/yeto-output changed during the session ({len(warnings)} entries; "
+              "not from this process: a child process, or another run / test session on this machine):")
         for line in warnings[:_home_guard.WARN_LIST_MAX]:
             write(f"  {line}")
         if len(warnings) > _home_guard.WARN_LIST_MAX:
             write(f"  ... {len(warnings) - _home_guard.WARN_LIST_MAX} more")
     if errors:
-        write(f"ERROR tests tried to write the real ~/.yeto ({len(errors)} refused; tests/yeto_home_guard.py):")
+        write(f"ERROR tests tried to write the real ~/.yeto or ~/yeto-output ({len(errors)} refused; "
+              "tests/yeto_home_guard.py):")
         for line in errors[:_home_guard.WARN_LIST_MAX]:
             write(f"  {line}")
         if len(errors) > _home_guard.WARN_LIST_MAX:

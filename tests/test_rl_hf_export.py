@@ -332,7 +332,9 @@ def test_driver_exports_at_the_boundary_of_the_chosen_and_the_final_round(tmp_pa
 
 
 # ---------------------------------------------------------------- Miles wiring
-def test_miles_island_writes_with_every_rank_on_one_node_else_rank0(tmp_path):
+def test_miles_island_writes_with_every_rank_on_one_node_else_rank0(tmp_path, monkeypatch):
+    import tempfile
+
     from yeto.rl.adapters.miles.entry import hf_exports_for
     from yeto.rl.adapters.miles.release_plugin import WRITE_FULL_CHECKPOINT
 
@@ -341,6 +343,9 @@ def test_miles_island_writes_with_every_rank_on_one_node_else_rank0(tmp_path):
                             export_hf=lambda rollout_id, path: calls.append(("export_hf", rollout_id, path)))
     runner = SimpleNamespace(run=lambda value: value)
     config = {"rounds": "2,final", "store": str(tmp_path / "hf")}
+    system_tmp = tmp_path / "system-tmp"
+    system_tmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(system_tmp))
     assert hf_exports_for(SimpleNamespace(), actor_model=actor, runner=runner) is None
     exports = hf_exports_for(SimpleNamespace(yeto_rl_hf_exports=config, actor_num_nodes=1, lora_rank=0),
                              actor_model=actor, runner=runner, environ={})
@@ -352,6 +357,9 @@ def test_miles_island_writes_with_every_rank_on_one_node_else_rank0(tmp_path):
                             actor_model=actor, runner=runner, environ={})
     across.write(1, tmp_path / "d")
     assert calls == [("export_hf", 1, str(tmp_path / "d"))]
+    # each island process stages in a directory of its own under the system temp dir
+    assert exports.staging != across.staging and {exports.staging.parent, across.staging.parent} == {system_tmp}
+    assert exports.staging.name.startswith("yeto-hf-export-") and exports.staging.is_dir()
     with pytest.raises(ValueError, match="full weights"):
         hf_exports_for(SimpleNamespace(yeto_rl_hf_exports=config, lora_rank=8), actor_model=actor, runner=runner)
 

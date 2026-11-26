@@ -27,6 +27,12 @@ Plain rules:
   directory with the marker is complete and committed: readers (another
   container's mount) read only directories with the marker. The staging copy
   is deleted.
+* Staging: each island process stages in a directory of its own under the
+  system temp dir (:func:`private_staging`, ``yeto-hf-export-<random>``). Two
+  island processes on one host (two islands, or two test sessions) export the
+  same round at the same time without removing each other's files: a fixed
+  directory there would be shared, and one export's cleanup ran inside the
+  other's write.
 * Upload failures: removing a directory that is not there is no error (a
   first export). A failed upload (remove, put, marker) runs again after
   :data:`UPLOAD_RETRY_S` seconds, :data:`UPLOAD_ATTEMPTS` attempts in all.
@@ -52,6 +58,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -66,6 +73,7 @@ FINAL = "final"
 # marker in the staging directory, and the reader's marker in the store
 COMPLETE_MARKER = ".complete"
 FINAL_POINTER = "final.json"
+STAGING_PREFIX = "yeto-hf-export"  # private_staging: <system temp dir>/yeto-hf-export-<random>
 UPLOAD_ATTEMPTS = 3  # one upload and two retries
 UPLOAD_RETRY_S = (10.0, 30.0)  # the waits before the second and the third attempt
 KEEP_FAILED = 2  # staging copies kept after failed uploads, per island process
@@ -125,6 +133,13 @@ def _directory_bytes(directory: Path) -> tuple[int, int]:
 
 def _json(fields: dict[str, Any]) -> bytes:
     return json.dumps(fields, sort_keys=True).encode("utf-8")
+
+
+def private_staging(prefix: str = STAGING_PREFIX) -> Path:
+    """A new staging directory under the system temp dir that only this process uses
+    (module doc, Staging): ``<prefix>-<random>``, made atomically, never one another
+    process on the host made."""
+    return Path(tempfile.mkdtemp(prefix=f"{prefix}-"))
 
 
 class HfRoundExports:

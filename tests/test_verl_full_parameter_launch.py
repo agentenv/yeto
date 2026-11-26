@@ -24,6 +24,7 @@ from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_li
 from test_verl_full_parameter_sync import (  # noqa: F401 - syncer_binary is a fixture
     MAX_FRAGMENT_BYTES, SHAPES, _run_dict, _run_island, needs_cargo, syncer_binary,
 )
+from yeto.launch.dispense_evidence import DISPENSE_LOG
 from yeto.rl.adapters.verl import full_parameter as fp
 from yeto.rl.adapters.verl import full_parameter_stream as vfs
 from yeto.rl.adapters.verl import island_entry
@@ -226,7 +227,8 @@ def test_two_launcher_built_verl_islands_run_async_rounds_through_the_real_synce
     command = (launcher.role_syncer_commands(args, 2, binary=str(syncer_binary))["actor"]
                .replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
-               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
+               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl"))
+               .replace(DISPENSE_LOG, str(tmp_path / "task-dispense.jsonl")))
     assert "--final-cut-payload manifest" in command and "--quorum 1" in command
     plans = []
     for learner_id in range(2):
