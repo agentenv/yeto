@@ -565,6 +565,11 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
                 rate = prices.node_usd_h(str(r.attrs["cloud"]), r.attrs["gpu"], r.attrs.get("gpus"),
                                          spot=r.attrs.get("use_spot"), region=r.attrs.get("region"))
                 note = "" if rate is None else "unified price table (list price)"
+            if rate is None and r.attrs.get("catalog_usd_per_hour") is not None:
+                # a machine without a table row: the sky catalog's on-demand price the launcher
+                # recorded, after an operator's price table (YETO_DASHBOARD_PRICES) and the unified one
+                rate = float(r.attrs["catalog_usd_per_hour"])
+                note = str(r.attrs.get("price_note") or "sky catalog on-demand price")
             if rate is None and r.attrs.get("role") == "syncer":
                 # a syncer VM recorded without a price (a ledger written before it carried one):
                 # its cloud's syncer row, else the dearest one (never 0)

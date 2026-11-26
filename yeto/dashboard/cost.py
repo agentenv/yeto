@@ -419,8 +419,10 @@ def fleet_rows(reducer, rows: list[dict], now: float) -> dict | None:
     from_records = set()  # trainer rows only their launch records make (no tape row): not the syncer's clock
     for isl in fleet["islands"]:
         tid, price = isl.get("trainer"), isl.get("trainer_usd_per_h")
-        # its tape's island (one the tape does not name a trainer yet, e.g. island_ready only: its learner id)
-        row = by_id.get(tid if tid is not None else str(isl["learner"]))
+        # its tape's island (one the tape does not name a trainer yet, e.g. island_ready only: its
+        # learner id; never a sampler's row that happens to carry that id)
+        key = tid if tid is not None else str(isl["learner"])
+        row = by_id.get(key) if tid is not None or asy.roles.get(key) != "sampler" else None
         if row is None and launched is not None and isl["learner"] in launched:
             # no trainer tape here (an island whose trainer does not upload its tape, or one
             # that never started): its launch records still bill it, as run.budget does

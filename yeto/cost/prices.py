@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -242,39 +243,63 @@ def node_usd_h(provider: str, gpu: Any, gpus: Any, *, spot: bool | None = None, 
     return None if row is None else row.node_usd_h(float(gpus))
 
 
-def catalog_node_usd_h(cloud: str, gpu: Any, gpus_per_node: Any, *, region: str | None = None,
-                       instance_type: str | None = None) -> tuple[float | None, str]:
-    """USD per hour of one node from the local sky catalog, at its ON-DEMAND list price (a spot
-    node bills no more than that): ``instance_type``'s when named, else the dearest instance
-    the catalog has for ``gpus_per_node`` x ``gpu`` (sky picks among them by the task's CPU and
-    memory, which a price recorded before the launch does not know: never under). For a
-    machine without a billing row in the price table. ``(None, why)`` when the catalog is not
-    installed or has nothing for it; never raises."""
-    try:
-        from sky import catalog  # noqa: PLC0415 - optional; read only where sky launches
-        from sky.catalog import common  # noqa: PLC0415
+CATALOG_FRESH_S = 24 * 3600  # an older local catalog file is still read, and its date said
 
-        local = os.path.exists(common.get_catalog_path(f"{str(cloud).lower()}/vms.csv"))
-    except Exception as error:  # noqa: BLE001
-        return None, f"no sky catalog ({type(error).__name__})"
-    if not local:  # never fetched here (sky check / sky launch fetch it): not downloaded for a price
-        return None, f"no local sky catalog for {cloud}"
+
+def catalog_node_usd_h(cloud: str, gpu: Any, gpus_per_node: Any, *, region: str | None = None,
+                       instance_type: str | None = None, catalog_path: str | None = None) -> tuple[float | None, str]:
+    """USD per hour of one node from the local sky catalog file (``<cloud>/vms.csv``), at its
+    ON-DEMAND list price (a spot node bills no more than that): ``instance_type``'s when
+    named, else the dearest instance the file lists for ``gpus_per_node`` x ``gpu`` (sky picks
+    among them by the task's CPU and memory, which a price recorded before the launch does
+    not know: never under). For a machine without a billing row in the price table.
+
+    Only the file already on disk is read, as CSV: sky's catalog functions are not called,
+    because on a stale file they download a fresh one (no timeout) and AWS's look up zone
+    mappings with the host's credentials; a launch must not wait on that. A file older than
+    :data:`CATALOG_FRESH_S` is still read, and the note gives its date. ``(None, why)`` when
+    there is no file, it is unreadable or lists nothing for the machine; never raises.
+    ``catalog_path``: the file (default: sky's path for ``cloud``)."""
+    import csv  # noqa: PLC0415
+
+    want = instance_type or f"{gpus_per_node}x{gpu}"
     where = f" in {region}" if region else ""
     try:
-        if instance_type:
-            usd = catalog.get_hourly_cost(instance_type, use_spot=False, region=region, zone=None, clouds=cloud)
-            return float(usd), f"sky catalog on-demand price of {instance_type}{where}"
-        names, _fuzzy = catalog.get_instance_type_for_accelerator(str(gpu), int(gpus_per_node), use_spot=False,
-                                                                 region=region, zone=None, clouds=cloud)
-        costs = [(float(catalog.get_hourly_cost(n, use_spot=False, region=region, zone=None, clouds=cloud)), n)
-                 for n in names or ()]
-    except Exception as error:  # noqa: BLE001 - an unknown type or region: unpriced, said
-        return None, f"sky catalog has no on-demand price for {instance_type or f'{gpus_per_node}x{gpu}'}{where} " \
-                     f"({type(error).__name__})"
+        if catalog_path is None:
+            from sky.catalog import common  # noqa: PLC0415 - optional; only its path rule (no fetch)
+
+            catalog_path = common.get_catalog_path(f"{str(cloud).lower()}/vms.csv")
+        mtime = os.stat(catalog_path).st_mtime
+    except OSError:
+        return None, f"no local sky catalog for {cloud}"
+    except Exception as error:  # noqa: BLE001 - sky not installed or its path rule failed
+        return None, f"no sky catalog ({type(error).__name__})"
+    try:
+        count = None if instance_type else float(gpus_per_node)
+        costs = []
+        with open(catalog_path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if region and row["Region"] != region:
+                    continue
+                if instance_type:
+                    if row["InstanceType"] != instance_type:
+                        continue
+                elif (str(row["AcceleratorName"]).lower() != str(gpu).lower()
+                      or not row["AcceleratorCount"] or float(row["AcceleratorCount"]) != count):
+                    continue
+                if row["Price"]:
+                    costs.append((float(row["Price"]), row["InstanceType"]))
+    except Exception as error:  # noqa: BLE001 - a malformed file (columns, numbers): unpriced, said
+        return None, f"unreadable sky catalog for {cloud} ({type(error).__name__})"
     if not costs:
-        return None, f"sky catalog has no {gpus_per_node}x{gpu} instance on {cloud}{where}"
+        return None, (f"sky catalog has no on-demand price for {instance_type}{where}" if instance_type
+                      else f"sky catalog has no {want} instance on {cloud}{where}")
     usd, name = max(costs)
-    return usd, f"sky catalog on-demand price of the dearest {gpus_per_node}x{gpu} instance ({name}){where}"
+    note = (f"sky catalog on-demand price of {instance_type}{where}" if instance_type
+            else f"sky catalog on-demand price of the dearest {want} instance ({name}){where}")
+    if time.time() - mtime > CATALOG_FRESH_S:
+        note += f"; local catalog file of {time.strftime('%Y-%m-%d', time.gmtime(mtime))}, not refreshed here"
+    return usd, note
 
 
 def host(provider: str, *, path: str | None = None) -> HostPrice | None:

@@ -113,6 +113,40 @@ def test_a_trainer_tape_without_hours_says_no_hours_and_the_total_says_it_is_low
     assert "no trainer tape or launch record here; the total is low)" in text
 
 
+def _launch_not_ready(rec):
+    """Island 1 launched (``island_launch``: its cloud and card) and never ready: a priced
+    trainer row with no billed hours."""
+    if rec.get("island_id") == 1 and rec["event"] == "island_ready":
+        return dict(rec, event="island_launch")
+    return rec
+
+
+def test_a_priced_trainer_row_without_hours_says_no_hours(tmp_path):
+    rows, view = _rows(_fleet(tmp_path, spend=None, per_island=False, edit=_launch_not_ready))
+    assert rows["1"]["kind"] == "trainer" and rows["1"]["hours"] is None and rows["1"]["cost_usd"] is None
+    assert rows["1"]["rate_usd_h"] is not None  # priced by the plan
+    fl = view["fleet"]
+    assert fl["trainers_usd"] == pytest.approx(rows["0"]["cost_usd"]) and fl["trainers_uncounted"] == 2
+    assert fl["trainers_note"].startswith("island 1: no hours yet")
+
+
+def test_a_sampler_row_is_never_taken_for_a_trainer_island(tmp_path):
+    """The fallback to the learner id (a trainer the tape does not name yet) skips a row whose
+    island is a sampler that happens to carry that id."""
+    def sampler_one(rec):
+        rec = _ready_only(rec)
+        if rec is not None and rec.get("sampler_id") == "qa-a-i1-0":
+            rec = dict(rec, sampler_id="1")
+        return rec
+
+    r = _fleet(tmp_path, spend=None, per_island=False, edit=sampler_one)
+    r.feed({"event": "island_ready", "time_unix": r.max_ts, "island": "sampler-one", "island_id": 1,
+            "cloud": "modal", "gpu": "L40S", "gpus": 1})
+    assert r.async_.roles.get("1") == "sampler"
+    rows, view = _rows(r)
+    assert rows["1"].get("kind") != "trainer" and view["fleet"]["trainers_uncounted"] == 2
+
+
 def test_no_tape_and_no_record_says_why_the_trainers_are_not_priced(tmp_path):
     r = _fleet(tmp_path, spend={}, no_tape=(0, 1))
     rows, view = _rows(r)
