@@ -38,7 +38,10 @@ the fleet controller's relaunches, sampler pools), so two overlapping overrides 
 leave one of them in the process config for every later launch, or let one submit
 carry another's override. :data:`SUBMIT_LOCK` is held from before an override is
 entered until its ``sky.launch`` has returned, by every submit, with an override or
-without one.
+without one. ``sky.launch`` returns a request id once the client has uploaded the task's
+workdir and file mounts to the API server and posted the request (a few seconds for a
+local server); waiting for the machines (``sky.get`` / ``stream_and_get``) is outside
+the lock, so a fleet's islands still come up in parallel.
 """
 
 from __future__ import annotations

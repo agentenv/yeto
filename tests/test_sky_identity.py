@@ -249,3 +249,52 @@ def test_every_client_config_override_in_yeto_is_taken_under_the_submit_lock():
             block = head[head.rfind("\ndef "):]
             assert "with SUBMIT_LOCK:" in block, f"{path.relative_to(REPO)}: override outside SUBMIT_LOCK"
     assert sorted(sites) == ["yeto/launch/sky_identity.py", "yeto/launch/sky_ops.py"]
+
+
+def _lock_free_elsewhere() -> bool:
+    """Whether another thread can take SUBMIT_LOCK right now."""
+    import threading
+
+    got: list[bool] = []
+
+    def probe():
+        ok = si.SUBMIT_LOCK.acquire(blocking=False)
+        if ok:
+            si.SUBMIT_LOCK.release()
+        got.append(ok)
+
+    t = threading.Thread(target=probe)
+    t.start()
+    t.join(5)
+    return got[0]
+
+
+def test_the_lock_covers_the_submit_and_not_the_wait_for_the_machines(monkeypatch):
+    """sky.launch returns a request id once the task is uploaded and posted; waiting for
+    the machines (sky.get / stream_and_get) runs outside the lock, so islands of a fleet
+    still come up in parallel."""
+    import sys
+    import types
+
+    from yeto.launch import sky_ops
+
+    seen = {}
+    fake = types.ModuleType("sky")
+
+    def launch(task, cluster_name, **_):
+        seen["during_submit"] = _lock_free_elsewhere()
+        return "rid"
+
+    def get(request):
+        seen["during_wait"] = _lock_free_elsewhere()
+        return 3, None
+
+    fake.launch, fake.get = launch, get
+    monkeypatch.setitem(sys.modules, "sky", fake)
+    assert sky_ops.SkySDKOps().relaunch(_task("AWS"), "c1") == 3
+    assert seen == {"during_submit": False, "during_wait": True}
+    seen.clear()
+    args = SimpleNamespace(training_mode="sft", retry_until_up=False)
+    assert sky_ops.submit_island_launch(fake, args, SimpleNamespace(cloud="aws", region=None),
+                                        _task("AWS"), "c1") == "rid"
+    assert seen == {"during_submit": False} and _lock_free_elsewhere()
