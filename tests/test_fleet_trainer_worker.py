@@ -188,6 +188,48 @@ def test_a_launch_gone_without_a_run_record_is_torn_down_before_the_move(tmp_pat
     assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
 
 
+@pytest.mark.parametrize("ledger, torn", [
+    ([{"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0"}], True),  # an INIT cluster left behind
+    ([], False),  # all released: its own teardown did it
+    (OSError("disk"), True),  # unread: not known
+])
+def test_a_failed_launch_with_open_ledger_rows_is_torn_down_before_the_move(tmp_path, ledger, torn):
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    asked = []
+
+    def open_resources(prefix):
+        asked.append(prefix)
+        if isinstance(ledger, Exception):
+            raise ledger
+        return ledger
+
+    launches.open_resources = open_resources
+    w = worker(objects, store, launches)
+    w.step()
+    launches.end("run-i0", 1, log="sky: no capacity in any zone")
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    assert asked == ["run-i0"]
+    assert getattr(launches, "torn_down", []) == (["run-i0"] if torn else [])
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+
+
+def test_local_launch_ops_read_the_open_rows_of_a_launch_ledger(tmp_path, monkeypatch):
+    from yeto import runs
+    from yeto.cost.ledger import ResourceLedger
+
+    monkeypatch.setattr(runs, "run_dir", lambda name: tmp_path / name)
+    ops = tw.LocalLaunchOps()
+    assert ops.open_resources("run-i0") == []  # no ledger
+    (tmp_path / "run-i0").mkdir()
+    ledger = ResourceLedger.for_run("run-i0")
+    ledger.created("sky_cluster", "run-i0-0", "run-i0-0")
+    ledger.created("sky_storage", "bucket-a", "bucket-a")
+    ledger.released("sky_storage", "bucket-a", "bucket-a")
+    assert ops.open_resources("run-i0") == [{"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0"}]
+
+
 def test_a_hand_off_while_the_target_changes_is_started_again_as_it_was(tmp_path):
     """Exit 12/13: the launch ordered nothing but its machine may still run under another
     launcher: started again under its own prefix and argv (it moves once it runs)."""

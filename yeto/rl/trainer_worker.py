@@ -481,11 +481,12 @@ class TrainerWorker:
             # as it was and moves once it runs.)
             self._event(k, "moving: its launch had ended, the next incarnation starts on the new machines",
                         to=member.get("gpu"), ended=ended.get("detail"))
-            if ended.get("exit_code") is None:  # gone without a run record: its teardown is not known
-                self.log(f"fleet: WARNING: trainer island {k}: its launch {prefix} ended without a run record; "
-                         f"torn down (`yeto down {prefix}`) before the next incarnation starts")
+            left = self._left_open(prefix, ended)
+            if left:  # what the old incarnation ordered is not all released: torn down first
+                self.log(f"fleet: WARNING: trainer island {k}: its launch {prefix} ended with {left}; torn down "
+                         f"(`yeto down {prefix}`) before the next incarnation starts")
                 try:
-                    self.ops.tear_down(prefix, f"moving to {member.get('gpu')}: ended without a run record")
+                    self.ops.tear_down(prefix, f"moving to {member.get('gpu')}: {left}")
                 except Exception as error:  # noqa: BLE001 - reported; the move goes on
                     self.log(f"fleet: ERROR: trainer island {k}: tearing {prefix} down failed ({error!r}); "
                              f"run `yeto down {prefix}` on this host")
@@ -514,6 +515,24 @@ class TrainerWorker:
                 self.log(f"fleet: CRITICAL: trainer island {k}: given up ({final}) but its pools "
                          f"{list(member.get('pools') or ())} were not asked to stop ({error!r}); they bill until "
                          "`yeto run down` (or `yeto fleet island remove` it)"[:500])
+
+    def _left_open(self, prefix: str, ended: dict[str, Any]) -> str | None:
+        """What an ended launch ``prefix`` may have left ordered (None: nothing): no run
+        record (its teardown is not known), resource ledger rows still open (an INIT sky
+        cluster, a sky storage bucket, a Modal app...), or a ledger that does not read."""
+        if ended.get("exit_code") is None:
+            return "no run record"
+        reader = getattr(self.ops, "open_resources", None)
+        if reader is None:
+            return None  # launch ops without a ledger (tests, remote ops): its own teardown is trusted
+        try:
+            rows = reader(prefix)
+        except Exception as error:  # noqa: BLE001 - not known: torn down
+            return f"its resource ledger unread ({type(error).__name__}: {error})"
+        if not rows:
+            return None
+        names = ", ".join(sorted({f"{r.get('kind')} {r.get('id') or r.get('name')}" for r in rows})[:5])
+        return f"{len(rows)} resource ledger row(s) still open ({names})"
 
     def _hand_back(self, k: int, record: dict[str, Any], ended: dict[str, Any]) -> None:
         """The launch handed off (:data:`HANDS_OFF_EXITS`): another launcher holds island
@@ -777,6 +796,16 @@ class LocalLaunchOps:
         from yeto import runs  # noqa: PLC0415
 
         runs.request_stop(prefix)
+
+    def open_resources(self, prefix: str) -> list[dict[str, Any]]:
+        """The rows of launch ``prefix``'s resource ledger that are not released (none
+        when it has no ledger: it ordered nothing it recorded)."""
+        from yeto.cost.ledger import ResourceLedger  # noqa: PLC0415
+
+        ledger = ResourceLedger.for_run(prefix)
+        if not ledger.path.exists():
+            return []
+        return [{"kind": r.kind, "id": r.id, "name": r.name} for r in ledger.open_resources()]
 
     def tear_down(self, prefix: str, why: str) -> None:
         """The launch torn down now, without waiting for it to read a STOP: ``yeto down
