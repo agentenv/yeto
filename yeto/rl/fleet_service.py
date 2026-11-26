@@ -433,6 +433,7 @@ class Onsite:
         self.env = dict(os.environ)
         self.env.update({str(k): os.path.expanduser(str(v)) for k, v in (cfg.get("env") or {}).items()})
         self._objects = objects
+        self._built = False  # the store client is this object's own (built from the environment)
 
     @classmethod
     def open(cls, config: str, role: str, *, objects: Any = None) -> Onsite:
@@ -453,6 +454,7 @@ class Onsite:
             from yeto.cloud.s3_store import head_objects  # noqa: PLC0415
 
             self._objects = head_objects(self.cfg["store"], environ=self.env)
+            self._built = True
         return self._objects
 
     @property
@@ -497,9 +499,11 @@ class Onsite:
                 raw = self.objects.read(self.ended_key)
                 break
             except Exception as error:  # noqa: BLE001 - asked again until it answers
-                if _credential_error(error):  # no store will answer this host: not a store that is down
+                if _credential_error(error, self.env):  # no store will answer this host: not one that is down
                     raise ServiceError(f"the run store refuses this host's credentials ({type(error).__name__}: "
                                        f"{error})") from error
+                if type(error).__name__ == "NoCredentialsError" and self._built:
+                    self._objects = None  # a dynamic source may give one later: the next try's client asks again
                 tries += 1
                 log(f"[{self.role} service] the run store does not answer ({type(error).__name__}: {error}); its ended "
                     f"marker is read again in {delay:.0f}s (try {tries}), nothing is started meanwhile")
@@ -514,19 +518,17 @@ class Onsite:
         return doc if isinstance(doc, dict) else {"reason": f"marker {self.ended_key} in the run store (unreadable)"}
 
     def write_ended(self, code: int, reason: str, log: Callable[[str], None] = print) -> dict[str, Any]:
-        """The ended marker, in the run store first (every host's unit reads it), then on this
-        host. Neither write raises: a failure is said, and the service's exit stays its own."""
+        """The ended marker, on this host first, then in the run store through a store client
+        of its own with the heartbeat's short timeouts, the call cut off after
+        :data:`~yeto.launch.fleet_syncer.HEARTBEAT_CALL_S` (the unit's stop budget). Neither
+        write raises: a failure is said, and the service's exit stays its own."""
+        from yeto.launch.fleet_syncer import HEARTBEAT_CALL_S  # noqa: PLC0415
+
         doc = {"schema": ENDED_SCHEMA, "run": self.run, "role": self.role, "exit_code": int(code),
                "reason": reason, "at": round(time.time(), 3), "node": socket.gethostname()}
         data = json.dumps(doc, sort_keys=True)
         path = self.ended_path
         stored = here = True
-        try:
-            self.objects.write(self.ended_key, data.encode())
-        except Exception as error:  # noqa: BLE001 - this host's marker then holds alone; said
-            stored = False
-            log(f"[{self.role} service] WARNING: the ended marker is not in the run store ({type(error).__name__}: "
-                f"{error}); only this host's ({path}) keeps the run from starting again")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(path.name + ".tmp")
@@ -535,8 +537,17 @@ class Onsite:
         except Exception as error:  # noqa: BLE001 - the run store's marker then holds alone; said
             here = False
             log(f"[{self.role} service] WARNING: this host's ended marker {path} is not written "
-                f"({type(error).__name__}: {error})" + ("; the run store's keeps the run from starting again"
-                                                         if stored else "; NOTHING keeps the run from starting again"))
+                f"({type(error).__name__}: {error}); the run store's keeps the run from starting again")
+        try:
+            objects = self._objects
+            if objects is None:
+                objects = heartbeat_objects(self.cfg.get("store"), self.env) or self.objects
+            CallChannel(HEARTBEAT_CALL_S).call("ended marker", lambda: objects.write(self.ended_key, data.encode()))
+        except Exception as error:  # noqa: BLE001 - this host's marker then holds alone; said
+            stored = False
+            log(f"[{self.role} service] WARNING: the ended marker is not in the run store ({type(error).__name__}: "
+                f"{error})" + (f"; only this host's ({path}) keeps the run from starting again" if here
+                               else "; NOTHING keeps the run from starting again"))
         where = " and ".join(([str(path)] if here else []) + ([f"{self.ended_key} in the run store"] if stored else []))
         log(f"[{self.role} service] run {self.run} ended (exit {code}: {reason}): ended marker "
             f"{where or 'not written'}; the unit does not start it again until `clear-ended`")
@@ -588,12 +599,17 @@ class Onsite:
         return 0
 
 
-_CREDENTIAL_ERRORS = ("NoCredentialsError", "PartialCredentialsError", "ProfileNotFound")
+_CREDENTIAL_ERRORS = ("PartialCredentialsError", "ProfileNotFound")
 
 
-def _credential_error(error: BaseException) -> bool:
-    """A store client error that says this host has no usable credential (botocore's names, or
-    the store's own refusal of a profile that is not configured here): a configuration error."""
+def _credential_error(error: BaseException, environ: Any) -> bool:
+    """A store client error that says this host has no usable credential: a configuration
+    error. ``NoCredentialsError`` only when no dynamic source (a container endpoint, a web
+    identity, the instance metadata) could still give one (those may come up later: asked
+    again, as a store that does not answer); botocore's partial key and missing profile; the
+    store's own refusal of a profile that is not configured here."""
+    if type(error).__name__ == "NoCredentialsError":
+        return not credential_sources(environ)["dynamic"]
     if type(error).__name__ in _CREDENTIAL_ERRORS:
         return True
     from yeto.rl.engine.object_store import ObjectStoreError  # noqa: PLC0415
@@ -696,7 +712,8 @@ def run_control(config: str, *, log: Callable[[str], None] = print) -> int:
 def launch_args(argv: list[str], environ: dict[str, str] | None = None) -> Any:
     """``yeto launch <argv>`` parsed and prepared as the launch does (the syncer's profile and
     command are built from these). ``environ``: the environment its store clients read (run
-    up's; ``args._store_environ``), never written to this process's."""
+    up's; ``store_env.bind_environ``, never an attribute of the args), never written to this
+    process's."""
     from yeto import cli  # noqa: PLC0415
     from yeto.launch.data_mix import materialize_data_mix  # noqa: PLC0415
     from yeto.launcher import prepare_launch_args  # noqa: PLC0415
@@ -710,7 +727,9 @@ def launch_args(argv: list[str], environ: dict[str, str] | None = None) -> Any:
         args = parser.parse_args(["launch", *launch_argv])
         args._breakers_resolved = resolved
     if environ is not None:
-        args._store_environ = dict(environ)
+        from yeto.launch.store_env import bind_environ  # noqa: PLC0415
+
+        bind_environ(args, environ)
     materialize_data_mix(args)
     prepare_launch_args(args)
     return args
@@ -761,17 +780,72 @@ def service_lock_ttl_s(stop_grace_s: float | None, beat_s: float | None = None, 
     return max(fleet_syncer.SERVICE_LOCK_TTL_S, rest + min(60.0, rest / 9))
 
 
+# the files of a profile that hold, or lead to, a credential (botocore's names)
+_PROFILE_CREDENTIAL_KEYS = ("aws_access_key_id", "credential_process", "role_arn", "web_identity_token_file",
+                            "sso_start_url", "sso_session", "credential_source")
+
+
+def credential_sources(environ: Any) -> dict[str, list[str]]:
+    """Where an S3 client of ``environ`` may find a credential, from the environment and the
+    local AWS files only (no request, no instance metadata asked): ``static`` (the store's key
+    pair, the ``AWS_*`` keys, a profile's keys, ``credential_process``, a role or SSO in its
+    config) and ``dynamic`` (a container credential endpoint, a web identity token, the
+    instance metadata unless ``AWS_EC2_METADATA_DISABLED``)."""
+    from yeto.cloud import s3_store  # noqa: PLC0415
+
+    static: list[str] = []
+    dynamic: list[str] = []
+    if s3_store.store_credentials(environ) is not None:
+        static.append("the store's key pair")
+    if environ.get("AWS_ACCESS_KEY_ID") and environ.get("AWS_SECRET_ACCESS_KEY"):
+        static.append("AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY")
+    for name in ("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI"):
+        if environ.get(name):
+            dynamic.append(name)
+    if environ.get("AWS_WEB_IDENTITY_TOKEN_FILE"):
+        dynamic.append("AWS_WEB_IDENTITY_TOKEN_FILE")
+    if str(environ.get("AWS_EC2_METADATA_DISABLED") or "").lower() != "true":
+        dynamic.append("the instance metadata service")
+    profile = s3_store.store_profile(environ) or "default"
+    home = environ.get("HOME") or os.path.expanduser("~")
+
+    def path(name: str, default: str) -> str:
+        value = environ.get(name) or os.path.join(home, ".aws", default)
+        return os.path.expanduser(value.replace("~", home, 1) if value.startswith("~") else value)
+
+    try:
+        from botocore import configloader  # noqa: PLC0415
+
+        files = [(path("AWS_SHARED_CREDENTIALS_FILE", "credentials"), profile),
+                 (path("AWS_CONFIG_FILE", "config"), profile if profile == "default" else f"profile {profile}")]
+        for file, section in files:
+            if not os.path.isfile(file):
+                continue
+            config = configloader.raw_config_parse(file, parse_subsections=False)
+            entry = config.get(section) or (config.get(profile) if file == files[1][0] else None) or {}
+            keys = [k for k in _PROFILE_CREDENTIAL_KEYS if entry.get(k)]
+            if keys:
+                static.append(f"profile {profile!r} in {file} ({', '.join(keys)})")
+    except Exception as error:  # noqa: BLE001 - a file botocore cannot parse: the read decides
+        static.append(f"the AWS files (not parsed here: {type(error).__name__})")
+    return {"static": static, "dynamic": dynamic}
+
+
 def store_credential_problem(uri: str | None, environ: Any) -> str | None:
-    """Why a client of the run store ``uri`` has no credential here, read from ``environ`` and
-    the local AWS files only (no request): an ``s3://`` / ``r2://`` store without the store's
-    key pair, or with an AWS profile that is not configured here; an ``oss://``
-    store without its endpoint or credentials. None when it has one (or for a directory)."""
+    """Why a client of the run store ``uri`` can have no credential on this host, decided
+    locally (the environment and the AWS files, no request, never the instance metadata):
+    the store's AWS profile (``YETO_RL_STORE_S3_PROFILE``) is not configured here, or no
+    credential source exists at all, static or dynamic (:func:`credential_sources`); an
+    ``oss://`` store without its endpoint or key (and no relay). None otherwise: a source
+    that yields nothing shows at the first read, where only a static one is refused."""
     from yeto.cloud import s3_store  # noqa: PLC0415
 
     text = str(uri or "")
     if text.startswith("oss://"):
-        from yeto.cloud import oss_store  # noqa: PLC0415
+        from yeto.cloud import oss_relay, oss_store  # noqa: PLC0415
 
+        if oss_relay.relay_from_env(environ) is not None:
+            return None
         try:
             oss_store.island_envs(text, environ)
         except ValueError as error:
@@ -779,15 +853,14 @@ def store_credential_problem(uri: str | None, environ: Any) -> str | None:
         return None
     if not text.startswith(("s3://", "r2://")):
         return None
-    if s3_store.store_credentials(environ) is not None:
-        return None
-    profile = s3_store.store_profile(environ)
-    if not profile:
-        return s3_store.missing_credentials_message()
-    if s3_store.profile_config(environ).get("_missing"):
-        return (f"s3 store: AWS profile {profile!r} is not configured on this host (~/.aws/config, "
-                "~/.aws/credentials)")
-    return None  # a profile configured here: a key it lacks shows at the first call (no request made here)
+    named = environ.get(s3_store.PROFILE_ENV)
+    if named and s3_store.store_credentials(environ) is None and s3_store.profile_config(environ).get("_missing"):
+        return (f"s3 store: AWS profile {named!r} ({s3_store.PROFILE_ENV}) is not configured on this host "
+                "(~/.aws/config, ~/.aws/credentials)")
+    sources = credential_sources(environ)
+    if not sources["static"] and not sources["dynamic"]:
+        return s3_store.missing_credentials_message() + " (and no AWS credential source here at all)"
+    return None
 
 
 def heartbeat_objects(uri: str | None, environ: dict[str, str]) -> Any:
@@ -863,13 +936,75 @@ class CallChannel:
         return not self.busy()
 
 
+class RecordRefused(RuntimeError):
+    """The syncer record was not written: the service is fenced, or the record in the run store
+    is a newer service's."""
+
+
 class BoundedStore:
     """An object store whose every call goes through a :class:`CallChannel` (the syncer
     service's main path after it started: its record writes and its STOP reads never hold the
-    service past the channel's ``call_s``)."""
+    service past the channel's ``call_s``). With ``token``, the syncer record is written only
+    by :meth:`write_record`: never once ``lost()`` says the service is fenced, and only over a
+    record whose ``service_generation`` is at most ``token`` (a conditional write)."""
 
-    def __init__(self, objects: Any, channel: CallChannel) -> None:
+    def __init__(self, objects: Any, channel: CallChannel, *, token: int | None = None,
+                 lost: Callable[[], str | None] | None = None) -> None:
         self._objects, self._channel = objects, channel
+        self._token, self._lost = token, lost or (lambda: None)
+
+    def write(self, key: str, data: bytes) -> None:
+        if self._token is not None and key == _syncer_record_key():
+            return self.write_record(data)
+        return self._channel.call("store write", lambda: self._objects.write(key, data))
+
+    def write_exclusive(self, key: str, data: bytes) -> None:
+        if self._token is not None and key == _syncer_record_key():
+            return self.write_record(data)
+        exclusive = getattr(self._objects, "write_exclusive", None)
+        call = (lambda: exclusive(key, data)) if exclusive is not None else (lambda: self._objects.write(key, data))
+        return self._channel.call("store write", call)
+
+    def write_record(self, data: bytes) -> None:
+        """The syncer record, conditionally: read it, refuse a newer service's
+        (``service_generation`` above this service's token), and replace it only while it still
+        holds the bytes read (``replace_if``: S3 ``If-Match``, a directory under its lock; a
+        missing record by an exclusive create). A store with neither is read again right before
+        a plain write (the window ``fleet_syncer._rerecord`` documents). Refused once fenced,
+        before and inside the call."""
+        key = _syncer_record_key()
+
+        def check() -> None:
+            why = self._lost()
+            if why:
+                raise RecordRefused(f"the syncer record is not written: {why}")
+
+        def write() -> None:
+            for _ in range(3):
+                check()
+                raw = self._objects.read(key)
+                generation = _record_generation(raw)
+                if generation is not None and generation > int(self._token):
+                    raise RecordRefused(f"the syncer record is service generation {generation}'s, newer than this "
+                                        f"service's ({self._token}): not overwritten")
+                check()
+                if raw is None:
+                    if self._objects.create(key, data):
+                        return
+                    continue
+                replace = getattr(self._objects, "replace_if", None)
+                done = replace(key, data, raw) if replace is not None else None
+                if done is None:  # no conditional write here: read again right before a plain write
+                    if self._objects.read(key) != raw:
+                        continue
+                    self._objects.write(key, data)
+                    return
+                if done:
+                    return
+            raise RecordRefused("the syncer record changed under every try: not written")
+
+        check()
+        self._channel.call("syncer record", write)
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._objects, name)
@@ -880,6 +1015,22 @@ class BoundedStore:
             return self._channel.call(f"store {name}", lambda: attr(*args, **kwargs))
 
         return bounded
+
+
+def _syncer_record_key() -> str:
+    from yeto.rl.island_launches import SYNCER_RECORD  # noqa: PLC0415
+
+    return SYNCER_RECORD
+
+
+def _record_generation(raw: bytes | None) -> int | None:
+    if raw is None:
+        return None
+    try:
+        generation = json.loads(raw).get("service_generation")
+        return None if generation is None else int(generation)
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 class Heartbeat:
@@ -908,6 +1059,7 @@ class Heartbeat:
         self.stop_grace_s = float(stop_grace_s or 0.0)
         self.every_s = SERVICE_BEAT_S if every_s is None else float(every_s)
         self.channel = CallChannel(self.call_s)
+        self.final_wait_s = 2 * self.call_s  # how long a final heartbeat waits behind a late call (finish)
         self.on_fence = on_fence
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="syncer-service-beat", daemon=True)
@@ -948,14 +1100,20 @@ class Heartbeat:
         a beat, the next renewal: ``every_s + 3 * call_s``)."""
         return float(self.lock.margin_s) + self.every_s + self.poll_s + self.stop_grace_s + 3 * self.call_s
 
+    def _say(self, message: str) -> None:
+        try:
+            self.log(message)
+        except Exception:  # noqa: BLE001 - a log that cannot be written (a closed pipe) changes nothing
+            pass
+
     def _fenced(self) -> None:
         if self.on_fence is None:
             return
         try:
             self.on_fence()
         except Exception as error:  # noqa: BLE001 - the main thread stops it again at its end
-            self.log(f"[syncer service] ERROR: the syncer was not stopped at the fence "
-                     f"({type(error).__name__}: {error})")
+            self._say(f"[syncer service] ERROR: the syncer was not stopped at the fence ({type(error).__name__}: "
+                      f"{error})")
 
     def renew(self) -> None:
         """Renew the service lock (cut off after :attr:`call_s`). Another holder's token
@@ -974,8 +1132,8 @@ class Heartbeat:
             return
         except LockLost as error:
             self.lost, self.lost_code = f"the syncer service lock is no longer this service's ({error})", LOCK_LOST_EXIT
-            self.log(f"[syncer service] ERROR: {self.lost}: ending this syncer")
             self._fenced()
+            self._say(f"[syncer service] ERROR: {self.lost}: ending this syncer")
             return
         except Exception as error:  # noqa: BLE001 - a store blip: renewed at the next beat
             self.log(f"[syncer service] WARNING: lock not renewed ({type(error).__name__}: {error})")
@@ -983,8 +1141,8 @@ class Heartbeat:
             self.lost = (f"the syncer service lock was not renewed and its lease had {left:.0f}s left before this "
                          f"renewal (the syncer's stop needs up to {self.fence_s:.0f}s of it): fenced by itself")
             self.lost_code = SELF_FENCED_EXIT
-            self.log(f"[syncer service] ERROR: {self.lost}: ending this syncer (exit {SELF_FENCED_EXIT}: restarted)")
             self._fenced()
+            self._say(f"[syncer service] ERROR: {self.lost}: ending this syncer (exit {SELF_FENCED_EXIT}: restarted)")
 
     def start(self) -> None:
         self.beat()
@@ -999,7 +1157,8 @@ class Heartbeat:
         and then the lock's release (if ``release``), each through the channel. With a call
         still in flight (a late heartbeat or renewal could land after them), the lock is not
         released (its lease runs out), and the final heartbeat is written after that call, if
-        it ends within ``2 * call_s`` more (a thread the interpreter waits for)."""
+        it ends within :attr:`final_wait_s` more (``2 * call_s``; a thread the interpreter
+        waits for)."""
         if self._thread.is_alive():
             self._thread.join(self.call_s)
         if self.channel.drain(self.call_s):
@@ -1019,17 +1178,29 @@ class Heartbeat:
             return
 
         def after() -> None:
-            if self.channel.drain(2 * self.call_s):
+            if self.channel.drain(self.final_wait_s):
                 self.beat(final, reason, wait=True)
 
         threading.Thread(target=after, name="syncer-service-final", daemon=False).start()
 
+    def fence_here(self, why: str) -> None:
+        """Fence the service now (exit :data:`SELF_FENCED_EXIT`) and stop the syncer: the beat
+        thread failed, or the main thread found the lease short."""
+        if self.lost is not None:
+            return
+        self.lost, self.lost_code = why, SELF_FENCED_EXIT
+        self._fenced()
+        self._say(f"[syncer service] ERROR: {why}: ending this syncer (exit {SELF_FENCED_EXIT}: restarted)")
+
     def _loop(self) -> None:
-        while not self._stop.wait(self.every_s):
-            self.renew()
-            if self._stop.is_set():
-                return
-            self.beat()
+        try:
+            while not self._stop.wait(self.every_s):
+                self.renew()
+                if self._stop.is_set():
+                    return
+                self.beat()
+        except BaseException as error:  # noqa: BLE001 - the beat thread never ends without fencing
+            self.fence_here(f"the heartbeat thread failed ({type(error).__name__}: {error})")
 
 
 def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
@@ -1155,22 +1326,30 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
             "time. Stop that unit first (or wait for its lease to run out if its host is gone)")
         return 2
     lock.objects = heartbeat_store if heartbeat_store is not None else objects  # renewed by the heartbeat only
-    guard, running = threading.Lock(), {"syncer": None, "fenced": False}
+    fenced, running = threading.Event(), {"syncer": None}
 
-    def fence() -> None:  # the beat thread, at once: never waits for the main thread
-        with guard:
-            running["fenced"] = True
-            fenced_syncer = running["syncer"]
-        if fenced_syncer is not None:
-            log("[syncer service] the lock is no longer this service's: stopping the syncer now (SIGTERM, SIGKILL "
-                "after the grace)")
-            (getattr(fenced_syncer, "terminate", None) or fenced_syncer.stop)()
+    def halt(target: Any) -> None:
+        (getattr(target, "terminate", None) or target.stop)()  # its process group: SIGTERM, SIGKILL after the grace
+
+    def fence() -> None:  # the beat thread (or a lease the main thread found short): never waits for anything
+        fenced.set()
+        target = running["syncer"]
+        if target is not None:
+            halt(target)  # before any log line: a log that hangs (a full journal pipe) never holds it up
+            try:
+                log("[syncer service] the lock is no longer this service's: the syncer is stopped (SIGTERM, "
+                    "SIGKILL after the grace)")
+            except Exception:  # noqa: BLE001 - a log that cannot be written changes nothing
+                pass
 
     beat = Heartbeat(lock.objects, host, kid, lock=lock, generation=lock.token, node=node, every_s=beat_s, log=log,
                      stop_grace_s=stop_grace_s, poll_s=poll_s, call_s=call_s, on_fence=fence)
     # the main path from the start of the syncer on (its records, the STOP reads): the heartbeat's
     # client through a channel of its own, so no store call holds it past call_s after a fence
-    main_store = BoundedStore(lock.objects, CallChannel(beat.call_s))
+    def lost_now() -> str | None:
+        return beat.lost if beat.lost is not None else ("the service is fenced" if fenced.is_set() else None)
+
+    main_store = BoundedStore(lock.objects, CallChannel(beat.call_s), token=lock.token, lost=lost_now)
     syncer, code, reason, final = None, 1, None, None
     try:
         stop = fleet_syncer.read_onsite_stop(objects)
@@ -1202,18 +1381,30 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         else:
             syncer = make_syncer(args, num_learners)
         restart = getattr(syncer, "restart", None)
-        if restart is not None:
-            def guarded_restart() -> None:  # never a syncer again once the service is fenced
-                with guard:
-                    if running["fenced"]:
-                        raise RuntimeError("the syncer service is fenced: its syncer is not started again")
+        if restart is not None or getattr(syncer, "terminate", None) is not None:
+            def guarded_restart() -> None:
+                """The restart in two steps, the fence checked around each: once fenced, no syncer
+                is started again, and one started meanwhile is stopped at once (the fence itself
+                never waits for this)."""
+                if fenced.is_set():
+                    raise RuntimeError("the syncer service is fenced: its syncer is not started again")
+                if getattr(syncer, "terminate", None) is None:
                     restart()
+                else:
+                    syncer.terminate()
+                    if fenced.is_set():
+                        raise RuntimeError("the syncer service is fenced: its syncer is not started again")
+                    syncer.start()
+                if fenced.is_set():  # fenced while it started: the fence may have stopped the old one only
+                    halt(syncer)
+                    raise RuntimeError("the syncer service was fenced while its syncer started: stopped again")
 
             syncer.restart = guarded_restart
-        with guard:
-            running["syncer"] = syncer
+        running["syncer"] = syncer
         beat.start()  # starting: no island dials it until its record is written
         syncer.start()
+        if fenced.is_set():  # fenced before the syncer was up: never left running
+            halt(syncer)
         for hook in ("start_log_forwarder", "start_store_upload"):
             method = getattr(syncer, hook, None)
             if method is not None:  # the tape upload: this service's store client, run up's environment
@@ -1229,6 +1420,10 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
 
         def stopped() -> str | None:
             if beat.lost is not None:
+                return beat.lost
+            if lock.lease_left() <= lock.margin_s:  # the beat thread is gone or stuck: the main thread fences
+                beat.fence_here(f"the service lock's lease has {lock.lease_left():.0f}s left (its margin is "
+                                f"{lock.margin_s:.0f}s) and the heartbeat did not fence: fenced by the main thread")
                 return beat.lost
             try:
                 doc = fleet_syncer.read_onsite_stop(main_store)

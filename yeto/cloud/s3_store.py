@@ -339,6 +339,15 @@ def _warn_part_checksums_off(uri: str, error: Exception) -> None:
           file=sys.stderr, flush=True)
 
 
+def _replace_forbidden(error: BaseException) -> bool:
+    """A 403: the key may not write there (a key limited to another prefix)."""
+    if error_code(error) in ("AccessDenied", "Forbidden", "403"):
+        return True
+    response = getattr(error, "response", None)
+    meta = response.get("ResponseMetadata") if isinstance(response, Mapping) else None
+    return isinstance(meta, Mapping) and meta.get("HTTPStatusCode") == 403
+
+
 def _replace_unsupported(error: BaseException) -> bool:
     """A conditional PutObject the endpoint does not take (by code, or an HTTP 501)."""
     if error_code(error) in _REPLACE_UNSUPPORTED:
@@ -959,9 +968,10 @@ class S3ObjectStore:
         applied; a write that goes through (the endpoint ignored it) or an "unsupported"
         answer (501, ``NotImplemented``, ``InvalidArgument``, ``InvalidRequest``) marks it
         unusable, and :meth:`replace_if` then answers None (the caller's fallback). The
-        probe object (``.yeto/replace-if-probe/<uuid>`` at the bucket's root, outside any run's
-        prefix) is deleted afterwards; a delete that fails leaves it behind (a few bytes, safe
-        to remove). Another error is raised and nothing is cached."""
+        probe object (``<prefix>/.yeto/replace-if-probe/<uuid>``, under the store's own prefix)
+        is deleted afterwards; a delete that fails leaves it behind (a few bytes, safe to
+        remove). A probe the key may not write (403: ``AccessDenied``, ``Forbidden``) is the
+        fallback too, with a warning. Another error is raised and nothing is cached."""
         cache_key = self._replace_if_key()
         with _REPLACE_IF_LOCK:
             known = _REPLACE_IF_USABLE.get(cache_key)
@@ -969,17 +979,27 @@ class S3ObjectStore:
             return known
         import uuid  # noqa: PLC0415
 
-        # at the bucket's root, never under a run's prefix; a delete that fails leaves it there
-        probe = check_key(f"{REPLACE_IF_PROBE_PREFIX}/{uuid.uuid4().hex}")
+        # under the store's prefix (a key limited to it may write there); a delete that fails leaves it
+        probe = self._key(f"{REPLACE_IF_PROBE_PREFIX}/{uuid.uuid4().hex}")
         try:
-            self.client.put_object(Bucket=self.bucket, Key=probe, Body=b"probe")
+            try:
+                self.client.put_object(Bucket=self.bucket, Key=probe, Body=b"probe")
+            except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
+                if not _replace_forbidden(error):
+                    raise
+                print(f"[store] WARNING: {self.uri}: the conditional write probe may not write {probe} "
+                      f"({self._code(error) or error}): the syncer record is rewritten by read-then-write",
+                      file=sys.stderr, flush=True)
+                with _REPLACE_IF_LOCK:
+                    _REPLACE_IF_USABLE[cache_key] = False
+                return False
             try:
                 self.client.put_object(Bucket=self.bucket, Key=probe, Body=b"ignored", IfMatch=_WRONG_ETAG)
                 usable = False  # written over a wrong ETag: the endpoint ignores If-Match
             except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
                 if self._code(error) == "PreconditionFailed":
                     usable = True
-                elif _replace_unsupported(error):
+                elif _replace_unsupported(error) or _replace_forbidden(error):
                     usable = False
                 else:
                     raise

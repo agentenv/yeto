@@ -1310,7 +1310,7 @@ def test_a_store_that_hangs_never_keeps_the_syncer_running_past_the_lease(tmp_pa
     assert times["stopped"] < times["lease"]() - margin / 2, (times, logs)  # stopped before the lease ends
     assert times["returned"] - times["seen"] < 2 * grace + 2 * call_s + 1.0, times  # the main thread ends too
     assert any("fenced by itself" in m for m in logs)
-    assert any("stopping the syncer now" in m for m in logs)
+    assert any("the syncer is stopped (SIGTERM" in m for m in logs)
 
 
 class GateStore:
@@ -1321,27 +1321,28 @@ class GateStore:
         import threading
 
         self.inner, self.match, self.armed = inner, match, False
-        self.gate, self.writes = threading.Event(), []
+        self.gate, self.entered, self.writes = threading.Event(), threading.Event(), []
 
     def __getattr__(self, name):
         return getattr(self.inner, name)
 
     def write(self, key, data):
-        if self.armed and self.match in key:
+        if self.armed and self.match in key and not self.gate.is_set():
+            self.entered.set()
             self.gate.wait(10)
         self.inner.write(key, data)
         self.writes.append((key, json.loads(data)))
 
 
 @pytest.mark.parametrize("slow", ["heartbeat", "lease"])
-@pytest.mark.parametrize("late_s", [0.05, 0.6])  # within 2 x call_s, and after it (inside 4 x call_s)
-def test_the_end_waits_for_a_call_in_flight_before_its_final_heartbeat_and_release(tmp_path, slow, late_s):
+@pytest.mark.parametrize("late", [False, True])
+def test_the_end_waits_for_a_call_in_flight_before_its_final_heartbeat_and_release(tmp_path, slow, late):
     """M-a: a heartbeat (E) or a lease renewal (D) still in flight at the end lands before the
     final heartbeat, never over it; a renewal in flight is never followed by a release it would
-    undo (late: the lock is left to its lease). Within call_s: waited for, then final, then
-    release; later: no release, the final heartbeat after the late call."""
+    undo. Event-driven: the call is held at a gate. Not late: the gate opens while the end
+    waits (call_s 5 s), then final, then release. Late: the end's waits run out first (call_s
+    0.05 s), no release, and the final heartbeat comes after the call (the gate opened later)."""
     import threading
-    import time
 
     from yeto.launch.pool.store_lock import StoreLock
 
@@ -1349,27 +1350,83 @@ def test_the_end_waits_for_a_call_in_flight_before_its_final_heartbeat_and_relea
     gated = GateStore(directory, "island_syncer_service" if slow == "heartbeat" else ".lease")
     lock = StoreLock.acquire(gated, fleet_syncer.SERVICE_LOCK, holder="h", ttl_s=60)
     logs: list[str] = []
-    beat_ = fs.Heartbeat(gated, "h", "kid", lock=lock, generation=lock.token, every_s=0.05, call_s=0.2,
-                         log=logs.append)
+    beat_ = fs.Heartbeat(gated, "h", "kid", lock=lock, generation=lock.token, every_s=0.01,
+                         call_s=0.05 if late else 5.0, log=logs.append)
+    beat_.final_wait_s = 10.0  # the late final heartbeat waits for the gate, however slow the host
     beat_.set(fleet_syncer.SERVICE_RUNNING)
     gated.armed = True
     beat_._thread.start()
-    time.sleep(0.12)  # the beat thread is in its call now, held at the gate
+    assert gated.entered.wait(10)  # the beat thread's call is in flight now, held at the gate
     beat_.stop()
-    threading.Timer(late_s, gated.gate.set).start()  # the call lands after late_s
-    beat_.finish(fleet_syncer.SERVICE_FINISHED, None, release=True)
-    for thread in threading.enumerate():
-        if thread.name == "syncer-service-final":
-            thread.join(5)
-    beat_.channel.drain(5)
+    if late:
+        beat_.finish(fleet_syncer.SERVICE_FINISHED, None, release=True)  # its waits run out: the gate is shut
+        finals = [t for t in threading.enumerate() if t.name == "syncer-service-final"]
+        assert finals and all(not t.daemon for t in finals)  # the interpreter waits for the final heartbeat
+        gated.gate.set()
+        for thread in finals:
+            thread.join(15)
+    else:
+        ending = threading.Thread(target=beat_.finish, args=(fleet_syncer.SERVICE_FINISHED, None),
+                                  kwargs={"release": True})
+        ending.start()
+        gated.gate.set()  # the call lands while the end waits for it
+        ending.join(15)
     status = [d for k, d in gated.writes if "island_syncer_service" in k]
     leases = [d for k, d in gated.writes if k.endswith(".lease")]
     assert status[-1]["state"] == "finished"  # never a late "running" over it
-    if late_s < 2 * 0.2:  # waited for: then the release
-        assert leases[-1]["released"] is True
-    else:  # still in flight after 2 x call_s: no release a late renewal could undo
+    if late:  # no release a late renewal could undo; the lease runs out
         assert all(not d["released"] for d in leases) and any("not released" in m for m in logs)
-    assert StoreLock.holder_of(directory, fleet_syncer.SERVICE_LOCK) is None or late_s >= 0.4
+    else:
+        assert leases[-1]["released"] is True and StoreLock.holder_of(directory, fleet_syncer.SERVICE_LOCK) is None
+
+
+def test_the_end_waits_for_a_beat_thread_that_is_about_to_renew(tmp_path):
+    """M-a: the beat thread past its wait but not yet in its store call (the lease read before
+    the renewal) is joined first: its renewal lands before the release, never after it."""
+    import threading
+    import time
+
+    from yeto.launch.pool.store_lock import StoreLock
+
+    directory = DirectoryObjectStore(tmp_path / "store")
+    lock = StoreLock.acquire(directory, fleet_syncer.SERVICE_LOCK, holder="h", ttl_s=60)
+    leases: list = []
+    real_write = directory.write
+
+    def write(key, data):
+        real_write(key, data)
+        if key.endswith(".lease"):
+            leases.append(json.loads(data))
+
+    directory.write = write
+    beat_ = fs.Heartbeat(directory, "h", "kid", lock=lock, generation=lock.token, every_s=0.01, call_s=5.0,
+                         log=lambda m: None)
+    entered, go = threading.Event(), threading.Event()
+    real_left = lock.lease_left
+
+    def lease_left():
+        if threading.current_thread().name == "syncer-service-beat" and not go.is_set():
+            entered.set()
+            go.wait(10)
+        return real_left()
+
+    lock.lease_left = lease_left
+    calls: list[str] = []
+    for name in ("renew", "release"):
+        def called(real=getattr(lock, name), name=name):
+            calls.append(name)
+            return real()
+        setattr(lock, name, called)
+    beat_._thread.start()
+    assert entered.wait(10)
+    beat_.stop()
+    ending = threading.Thread(target=beat_.finish, args=(None, None), kwargs={"release": True})
+    ending.start()
+    ending.join(0.3)  # the end waits for the beat thread (a scheduling wait, not a measured bound)
+    go.set()
+    ending.join(15)
+    assert calls == ["renew", "release"]  # the renewal came first, the release last
+    assert leases[-1]["released"] is True
 
 
 def test_a_self_fenced_service_exits_1_and_stops_its_syncer_before_its_lease_ends(tmp_path, monkeypatch):
@@ -2098,9 +2155,12 @@ def test_the_credential_check_needs_no_request(tmp_path, monkeypatch):
 
     s3_store._profile_config_cached.cache_clear()
     monkeypatch.setattr(s3_store, "_client", lambda *a, **kw: pytest.fail("a client was built"))
-    env = {"YETO_RL_STORE_S3_PROFILE": "not-here", "AWS_CONFIG_FILE": str(tmp_path / "aws-config")}
-    assert "AWS profile 'not-here' is not configured on this host" in fs.store_credential_problem("s3://b/r", env)
-    assert "no store credentials" in fs.store_credential_problem("r2://b/r", {})
+    none = {"HOME": str(tmp_path), "AWS_CONFIG_FILE": str(tmp_path / "aws-config"),
+            "AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "aws-credentials"), "AWS_EC2_METADATA_DISABLED": "true"}
+    env = {**none, "YETO_RL_STORE_S3_PROFILE": "not-here"}
+    assert "AWS profile 'not-here' (YETO_RL_STORE_S3_PROFILE) is not configured" in fs.store_credential_problem(
+        "s3://b/r", env)
+    assert "no store credentials" in fs.store_credential_problem("r2://b/r", none)
     assert fs.store_credential_problem("s3://b/r", {"YETO_RL_STORE_S3_ACCESS_KEY_ID": "k",
                                                     "YETO_RL_STORE_S3_SECRET_ACCESS_KEY": "s"}) is None
     assert fs.store_credential_problem(str(tmp_path / "dir-store"), {}) is None
@@ -2144,9 +2204,38 @@ def test_a_control_unit_restarted_after_the_syncer_ended_the_run_ends_with_it(tm
     assert clock.sleeps > 0
 
 
+def test_the_ended_marker_is_on_this_host_before_a_store_that_hangs_is_cut_off(tmp_path, monkeypatch):
+    """The ended marker is written on this host first, then in the run store with the
+    heartbeat's cutoff: a store that hangs neither holds the end up nor loses the marker."""
+    import threading
+    import time as _time
+
+    monkeypatch.setattr(fleet_syncer, "HEARTBEAT_CALL_S", 0.3)
+    release, seen = threading.Event(), []
+
+    class Hangs(DirectoryObjectStore):
+        def write(self, key, data):
+            seen.append(onsite.ended_path.exists())
+            release.wait(5)
+            return super().write(key, data)
+
+    objects, logs = Hangs(tmp_path / "store"), []
+    onsite = fs.Onsite(up.load_config(str(onsite_config(tmp_path))), "syncer", objects=objects)
+    begun = _time.monotonic()
+    try:
+        onsite.write_ended(2, "the lock is lost", log=logs.append)
+        took = _time.monotonic() - begun
+    finally:
+        release.set()
+    assert seen == [True] and took < 2
+    assert json.loads(onsite.ended_path.read_text())["exit_code"] == 2
+    assert any("the ended marker is not in the run store" in m for m in logs)
+
+
 @pytest.mark.usefixtures("replace_probe")
-def test_the_probe_object_is_at_the_bucket_s_root_not_under_the_run(tmp_path):
-    """L2: the probe object goes to ``.yeto/replace-if-probe/<uuid>`` at the bucket's root."""
+def test_the_probe_object_is_under_the_store_s_prefix(tmp_path):
+    """M2: the probe object is ``<prefix>/.yeto/replace-if-probe/<uuid>``, where a key limited
+    to the store's prefix may write."""
     from yeto.cloud import s3_store
 
     fake = etag_s3()
@@ -2155,8 +2244,31 @@ def test_the_probe_object_is_at_the_bucket_s_root_not_under_the_run(tmp_path):
     fake.before("put-if", lambda key: True, keys.append, times=5)
     store.write("k", b"a")
     assert store.replace_if("k", b"b", b"a") is True
-    assert keys[0].startswith(s3_store.REPLACE_IF_PROBE_PREFIX + "/") and not keys[0].startswith("runs/")
-    assert keys[1] == "runs/r/k" and not any(k.startswith(".yeto") for k in fake.objects)
+    assert keys[0].startswith("runs/r/" + s3_store.REPLACE_IF_PROBE_PREFIX + "/")
+    assert keys[1] == "runs/r/k" and not any(".yeto" in k for k in fake.objects)
+
+
+@pytest.mark.usefixtures("replace_probe")
+@pytest.mark.parametrize("code, at", [("AccessDenied", "put"), ("Forbidden", "put"), ("AccessDenied", "put-if")])
+def test_a_probe_the_key_may_not_write_takes_the_fallback(tmp_path, capsys, code, at):
+    """M2: a 403 on the probe (a key limited to another prefix) is "no conditional write": the
+    fallback, with a warning, never an error that keeps the syncer launch waiting."""
+    from store_fault_fakes import client_error
+
+    from yeto.cloud import s3_store
+
+    fake = etag_s3()
+    store = s3_store.S3ObjectStore("s3://bkt/runs/r", client=fake)
+    store.write("k", b"a")
+    fake.fail(at, s3_store.REPLACE_IF_PROBE_PREFIX, client_error(code, "PutObject"))
+    assert store.replace_if("k", b"b", b"a") is None and store.read("k") == b"a"
+    assert store.replace_if_usable() is False and not any(".yeto" in k for k in fake.objects)
+    if at == "put":
+        assert "may not write" in capsys.readouterr().err
+    status = {"generation": 7}  # the watcher's rewrite: re-read, then a plain write
+    island_launches.write_syncer_record(store, addr="10.0.0.5:29400", syncer_epoch=3, learners=2, max_learners=4,
+                                        run="r", extra={"service": "10.0.0.5", "service_generation": 7})
+    assert fleet_syncer._rerecord(store, status, types.SimpleNamespace(cluster_prefix="r")) is not None
 
 
 def test_the_heartbeat_client_s_retry_mode_is_always_standard(monkeypatch):
@@ -2208,7 +2320,9 @@ def test_the_service_s_records_go_to_its_store_client_from_run_up_s_environment(
         from yeto.launcher import _prepare_rl_args
 
         args = parse_args(argv)
-        args._store_environ = up.open_run(str(path)).env
+        from yeto.launch.store_env import bind_environ
+
+        bind_environ(args, up.open_run(str(path)).env)
         args.model_revision, args.data_revision = "a" * 40, "b" * 40
         args.source_sha256, args.reward_sha256 = "c" * 64, "d" * 64
         _prepare_rl_args(args)
@@ -2311,3 +2425,567 @@ def test_the_beat_thread_stops_the_syncer_itself_when_the_lock_is_lost(tmp_path,
                        log=lambda m: None)
     assert rc == (fs.LOCK_LOST_EXIT if cause == "taken" else fs.SELF_FENCED_EXIT)
     assert stops[0] == "syncer-service-beat" and restarts == []
+
+
+@pytest.mark.parametrize("after_read", [1, 2])
+def test_a_newer_record_landing_after_any_read_is_never_overwritten(tmp_path, after_read):
+    """H1: another service's newer record (generation 2) lands right after the conditional
+    write's first or second read of the record. It is never overwritten: the replace holds
+    only while the record is still the one read."""
+    objects = DirectoryObjectStore(tmp_path / "store")
+    key = fs._syncer_record_key()
+    island_launches.write_syncer_record(objects, addr="a:1", syncer_epoch=1, learners=1, max_learners=4, run="r",
+                                        extra={"service_generation": 1})
+    newer = json.dumps({"addr": "b:2", "service_generation": 2}).encode()
+    reads = {"n": 0, "landed": False}
+    real_read = objects.read
+
+    def read(name):
+        raw = real_read(name)
+        if name == key:
+            reads["n"] += 1
+            if reads["n"] == after_read:
+                objects.write(key, newer)
+                reads["landed"] = True
+        return raw
+
+    objects.read = read
+    store = fs.BoundedStore(objects, fs.CallChannel(5.0), token=1, lost=lambda: None)
+    mine = json.dumps({"addr": "a:1", "service_generation": 1, "again": True}).encode()
+    try:
+        store.write(key, mine)
+    except fs.RecordRefused:
+        pass
+    if reads["landed"]:
+        assert real_read(key) == newer
+    else:
+        assert real_read(key) == mine
+
+
+class NoExclusiveStore:
+    """A store with no ``write_exclusive`` (as S3): the syncer record comes by a plain ``write``."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name):
+        if name == "write_exclusive":
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+
+@pytest.mark.parametrize("plain", [False, True], ids=["exclusive", "plain-write"])
+@pytest.mark.parametrize("seen_lost", [False, True])
+def test_a_record_after_another_service_took_the_lock_never_overwrites_its_record(tmp_path, monkeypatch, seen_lost,
+                                                                                    plain):
+    """H1: the main thread restarts the syncer while another host's service takes the lock
+    (token 2) and records itself. The record the restart then writes is refused: by the fence
+    once the beat thread saw the lock lost, else by the conditional write (the store's record is
+    a newer generation). The other service's record stands."""
+    import threading
+    import time
+
+    from yeto.launch.pool.store_lock import StoreLock
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    seen: dict = {}
+
+    class Restarts(FakeSyncer):
+        def terminate(self):
+            self.events.append("terminate")
+
+        def start(self):
+            super().start()
+            if self.events.count("start") == 2:  # the restart: another host takes over meanwhile
+                # its lease ran out, as the other host sees it: another claim (a reclaim of the same
+                # holder name here) takes token 2
+                assert StoreLock.acquire(objects, fleet_syncer.SERVICE_LOCK, holder="site-s/yeto-r-syncer.service",
+                                         ttl_s=120, reclaim=True).token == 2
+                island_launches.write_syncer_record(objects, addr="10.0.0.9:29400", syncer_epoch=5, learners=2,
+                                                    max_learners=4, run="r",
+                                                    extra={"service": "10.0.0.9", "service_generation": 2})
+                if seen_lost:
+                    deadline = time.monotonic() + 10
+                    while not seen.get("fenced") and time.monotonic() < deadline:
+                        time.sleep(0.01)
+
+    syncer = Restarts()
+    real_terminate = syncer.terminate
+
+    def terminate():
+        if threading.current_thread().name == "syncer-service-beat":
+            seen["fenced"] = True
+        real_terminate()
+
+    syncer.terminate = terminate
+
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish,
+              **kw):
+        on_record(fleet_syncer.record(args, addr, n, objects=kw["objects"], extra=record_extra))
+        try:
+            local_syncer.restart()
+        except RuntimeError as error:
+            seen["restart"] = str(error)
+        with pytest.raises(fs.RecordRefused) as refused:
+            fleet_syncer.record(args, addr, n, objects=kw["objects"], extra=record_extra)
+        seen["refused"] = str(refused.value)
+        return 9
+
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    fs.run_syncer(str(onsite_config(tmp_path)), objects=NoExclusiveStore(objects) if plain else objects,
+                  make_syncer=lambda args, n: syncer, serve=serve, parse=_prepared, node="site-s",
+                  beat_s=0.05 if seen_lost else 30.0,
+                  workdir=str(tmp_path / "work"), log=lambda m: None)
+    record = island_launches.read_syncer_record(objects)
+    assert record["service_generation"] == 2 and record["addr"] == "10.0.0.9:29400"  # never written back
+    assert ("is not written: the syncer service lock is no longer this service's" if seen_lost
+            else "newer than this service's") in seen["refused"]
+    assert seen_lost is ("fenced" in seen.get("restart", ""))  # a fence seen during the restart stops its syncer
+
+
+@pytest.mark.parametrize("during", ["start", "terminate"])
+def test_a_fence_during_a_restart_never_waits_for_it_and_no_syncer_outlives_it(tmp_path, monkeypatch, during):
+    """H2: the fence comes while the main thread is inside the restart (its start, or its
+    terminate, blocks). The beat thread stops the syncer at once, without waiting for the
+    restart; a process the restart then starts is stopped as soon as the start returns, and
+    after a terminate the fence came in, none is started. In
+    the scaled budget the last syncer is down more than half the lock's margin before the lease
+    ends."""
+    import threading
+    import time
+
+    from yeto.launch.pool.store_lock import StoreLock
+
+    monkeypatch.setattr(fleet_syncer, "SERVICE_LOCK_TTL_S", 0.0)
+    beat_s, poll_s = fleet_syncer.SERVICE_BEAT_S * SCALE, fleet_syncer.POLL_S * SCALE
+    call_s, grace = fleet_syncer.HEARTBEAT_CALL_S * SCALE, fs.SYNCER_STOP_GRACE_S * SCALE
+    directory = DirectoryObjectStore(tmp_path / "store")
+    hanging = HangingStore(directory, 181 * SCALE)
+    times: dict = {}
+    fenced = threading.Event()
+
+    class Proc(FakeSyncer):
+        running = False
+
+        def start(self):
+            super().start()
+            if during == "start" and self.events.count("start") == 2:  # the restart's start: held until the fence
+                fenced.wait(30)
+                times["started_after_fence"] = time.time()
+            self.running = True
+
+        def terminate(self):
+            if threading.current_thread().name == "syncer-service-beat":
+                times.setdefault("fence_terminate", time.time())
+                fenced.set()
+            elif during == "terminate" and "fence_terminate" not in times:  # the restart's: the fence comes meanwhile
+                fenced.wait(30)
+                times["terminated_after_fence"] = time.time()
+            if self.running:
+                time.sleep(grace)  # the stop takes the whole grace
+                self.running = False
+                times["down"] = time.time()
+            self.events.append("terminate")
+
+        def stop(self):
+            self.terminate()
+
+    syncer = Proc()
+
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish,
+              **kw):
+        on_record(island_launches.write_syncer_record(kw["objects"], addr=addr, syncer_epoch=args.rl_syncer_epoch,
+                                                      learners=n, max_learners=4, run="r", extra=record_extra))
+        lock = StoreLock(directory, fleet_syncer.SERVICE_LOCK, record_extra["service_generation"], "x")
+        times["lease"] = lambda: float(json.loads(directory.read(lock.lease_key(lock.prefix, lock.token)))["until"])
+        hanging.down = True
+        # the syncer died (the restart's start is held), or it hangs (the restart's terminate is held)
+        syncer.running = during == "terminate"
+        with pytest.raises(RuntimeError, match="fenced"):
+            local_syncer.restart()
+        times["restart_returned"] = time.time()
+        while not stopped():
+            time.sleep(poll_s)
+        return 9
+
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    rc = fs.run_syncer(str(onsite_config(tmp_path)), objects=directory, heartbeat_store=hanging,
+                       make_syncer=lambda args, n: syncer, serve=serve, parse=_prepared, node="site-s", beat_s=beat_s,
+                       poll_s=poll_s, call_s=call_s, stop_grace_s=grace, workdir=str(tmp_path / "work"),
+                       log=lambda m: None)
+    ttl = fs.service_lock_ttl_s(grace, beat_s, poll_s=poll_s, call_s=call_s)
+    margin = min(60.0, ttl * 0.1)
+    assert rc == fs.SELF_FENCED_EXIT
+    if during == "start":
+        assert times["fence_terminate"] <= times["started_after_fence"]  # the fence never waited for the restart
+        assert syncer.events.count("start") == 2  # none started after that
+    else:
+        assert times["fence_terminate"] <= times["terminated_after_fence"]
+        assert syncer.events.count("start") == 1  # the restart's start never came after the fence
+    assert syncer.running is False
+    assert times["down"] < times["lease"]() - margin / 2, times
+
+
+@pytest.mark.parametrize("failure", ["raises", "log breaks", "silent"])
+def test_a_heartbeat_thread_that_dies_still_ends_the_syncer(tmp_path, monkeypatch, failure):
+    """M1: the beat thread raises (or its log line breaks, a closed pipe), or ends without a
+    word: the syncer is stopped all the same, by the beat thread's own guard, or by the main
+    thread once the lease left is within the lock's margin."""
+    import time
+
+    monkeypatch.setattr(fs, "service_lock_ttl_s", lambda grace, beat=None, **kw: 0.8)
+    objects = DirectoryObjectStore(tmp_path / "store")
+    if failure == "raises":
+        monkeypatch.setattr(fs.Heartbeat, "renew", lambda self: (_ for _ in ()).throw(BrokenPipeError("pipe")))
+    elif failure == "log breaks":
+        monkeypatch.setattr(fs.Heartbeat, "renew",
+                            lambda self: self.log("[syncer service] WARNING: lock not renewed (store down)"))
+    else:
+        monkeypatch.setattr(fs.Heartbeat, "_loop", lambda self: None)
+    logs: list[str] = []
+
+    def log(message):
+        if failure == "log breaks" and "WARNING" in message:
+            raise BrokenPipeError("the journal's pipe is closed")
+        logs.append(message)
+
+    syncer = FakeSyncer()
+    stopped_at: dict = {}
+
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish,
+              **kw):
+        on_record(island_launches.write_syncer_record(objects, addr=addr, syncer_epoch=args.rl_syncer_epoch,
+                                                      learners=n, max_learners=4, run="r", extra=record_extra))
+        deadline = time.monotonic() + 10
+        while not stopped():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        stopped_at["main"] = "stop" in syncer.events  # stopped before the main thread returned
+        return 9
+
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    rc = fs.run_syncer(str(onsite_config(tmp_path)), objects=objects, make_syncer=lambda args, n: syncer, serve=serve,
+                       parse=_prepared, node="site-s", beat_s=0.05, workdir=str(tmp_path / "work"), log=log)
+    assert rc == fs.SELF_FENCED_EXIT and stopped_at["main"]
+    assert any(("heartbeat thread failed" if failure != "silent" else "fenced by the main thread") in m
+               for m in logs + [str(rc)]) or failure == "log breaks"
+
+
+def test_a_lost_lock_stops_the_syncer_before_any_log_line(tmp_path, monkeypatch):
+    """M1: once another service holds the lock, the beat thread stops the syncer before it
+    writes a word: a log that hangs (a full journal pipe) never holds the fence up."""
+    import threading
+    import time
+
+    from yeto.launch.pool.store_lock import StoreLock
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    release = threading.Event()
+
+    def log(message):
+        if threading.current_thread().name == "syncer-service-beat":
+            release.wait(5)
+
+    syncer = FakeSyncer()
+    stopped_at: dict = {}
+
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish,
+              **kw):
+        on_record(island_launches.write_syncer_record(objects, addr=addr, syncer_epoch=args.rl_syncer_epoch,
+                                                      learners=n, max_learners=4, run="r", extra=record_extra))
+        assert StoreLock.acquire(objects, fleet_syncer.SERVICE_LOCK, holder="site-s/yeto-r-syncer.service",
+                                 ttl_s=120, reclaim=True).token == 2
+        deadline = time.monotonic() + 10
+        while not stopped():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        stopped_at["main"] = "stop" in syncer.events
+        return 9
+
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    try:
+        rc = fs.run_syncer(str(onsite_config(tmp_path)), objects=objects, make_syncer=lambda args, n: syncer,
+                           serve=serve, parse=_prepared, node="site-s", beat_s=0.05, workdir=str(tmp_path / "work"),
+                           log=log)
+    finally:
+        release.set()
+    assert rc == fs.LOCK_LOST_EXIT and stopped_at["main"]
+
+
+def test_the_fence_stops_the_syncer_s_process_group_not_the_whole_syncer(tmp_path, monkeypatch):
+    """The fence calls the syncer's terminate (its process group; the main thread's stop ends
+    the uploads afterwards), and LocalSyncer.terminate really ends the process."""
+    import subprocess
+    import threading
+
+    from yeto.launch.local_syncer import LocalSyncer
+
+    calls: list = []
+
+    class Both(FakeSyncer):
+        def terminate(self):
+            calls.append(("terminate", threading.current_thread().name))
+
+        def stop(self):
+            calls.append(("stop", threading.current_thread().name))
+
+    monkeypatch.setattr(fs, "service_lock_ttl_s", lambda grace, beat=None, **kw: 0.6)
+    objects = DirectoryObjectStore(tmp_path / "store")
+    from yeto.launch.pool import store_lock
+
+    monkeypatch.setattr(store_lock.StoreLock, "renew", lambda self: (_ for _ in ()).throw(OSError("store down"))
+                        if getattr(self, "_down", False) else None)
+
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish,
+              **kw):
+        import time
+
+        deadline = time.monotonic() + 10
+        while not stopped():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        return 9
+
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    real_acquire = store_lock.StoreLock.acquire
+
+    def acquire(*a, **kw):
+        lock = real_acquire(*a, **kw)
+        lock.renewed_at = lock.clock()
+        lock._down = True
+        return lock
+
+    monkeypatch.setattr(store_lock.StoreLock, "acquire", acquire)
+    rc = fs.run_syncer(str(onsite_config(tmp_path)), objects=objects, make_syncer=lambda args, n: Both(),
+                       serve=serve, parse=_prepared, node="site-s", beat_s=0.05, workdir=str(tmp_path / "work"),
+                       log=lambda m: None)
+    assert rc == fs.SELF_FENCED_EXIT
+    assert calls[0] == ("terminate", "syncer-service-beat") and ("stop", "syncer-service-beat") not in calls
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    real = LocalSyncer.__new__(LocalSyncer)
+    real.proc, real._reaped, real.stop_grace_s = proc, False, 1.0
+    real.terminate()
+    assert proc.poll() is not None
+
+
+class FakeAws:
+    """A local stand-in, on one port in 8880-8899, for every endpoint an S3 client's default
+    credential chain and its calls may reach: S3 (no object: 404; a PUT: 200), the container
+    credential endpoint, the instance metadata service (IMDSv2), STS (web identity). The access
+    key id each S3 request was signed with is kept (``signed``)."""
+
+    def __init__(self, *, imds_role: bool = True):
+        import http.server
+        import socket
+        import threading
+
+        fake = self
+        self.signed: list[str] = []
+        self.imds_role = imds_role
+
+        def creds(key):
+            return {"AccessKeyId": key, "SecretAccessKey": "test-secret", "Token": "test-token",
+                    "Expiration": "2099-01-01T00:00:00Z", "Code": "Success", "Type": "AWS-HMAC"}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                return None
+
+            def _send(self, code, body=b"", kind="application/json", headers=None):
+                self.send_response(code)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Length", str(len(body)))
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_PUT(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                if self.path == "/latest/api/token":
+                    return self._send(200, b"imds-token", "text/plain")
+                fake.signed.append(self.headers.get("Authorization", ""))
+                return self._send(200, b"", headers={"ETag": '"0"'})
+
+            def do_GET(self):  # noqa: N802
+                if self.path == "/creds":
+                    return self._send(200, json.dumps(creds("test-container-key")).encode())
+                if self.path.startswith("/latest/meta-data/iam/security-credentials/"):
+                    if not fake.imds_role:
+                        return self._send(404, b"", "text/plain")
+                    if self.path.endswith("/"):
+                        return self._send(200, b"test-role", "text/plain")
+                    return self._send(200, json.dumps(creds("test-imds-key")).encode())
+                fake.signed.append(self.headers.get("Authorization", ""))
+                return self._send(404, b"<Error><Code>NoSuchKey</Code><Message>none</Message></Error>",
+                                  "application/xml")
+
+            def do_POST(self):  # noqa: N802 - STS AssumeRoleWithWebIdentity
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                body = ("<AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult><Credentials>"
+                        "<AccessKeyId>test-webid-key</AccessKeyId><SecretAccessKey>test-secret</SecretAccessKey>"
+                        "<SessionToken>test-token</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration>"
+                        "</Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>")
+                return self._send(200, body.encode(), "text/xml")
+
+        for port in range(8880, 8900):
+            try:
+                self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+                break
+            except OSError:
+                continue
+        else:
+            raise RuntimeError("no free port in 8880-8899")
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self._thread.start()
+        del socket
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def keys(self) -> set[str]:
+        import re
+
+        return {m.group(1) for a in self.signed for m in [re.search(r"Credential=([^/]+)/", a)] if m}
+
+
+@pytest.fixture
+def fake_aws(monkeypatch, tmp_path):
+    """No credential source of this host reaches the test: the environment's AWS and store
+    variables gone, empty AWS files, every endpoint (S3, the instance metadata) the local fake."""
+    import os
+
+    from yeto.cloud import s3_store
+
+    for name in list(os.environ):
+        if name.startswith(("AWS_", "YETO_RL_STORE_S3_")):
+            monkeypatch.delenv(name)
+    (tmp_path / "aws-config").write_text("")
+    (tmp_path / "aws-credentials").write_text("")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "aws-config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "aws-credentials"))
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    fake = FakeAws()
+    monkeypatch.setenv("YETO_RL_STORE_S3_ENDPOINT_URL", fake.url)
+    monkeypatch.setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", fake.url + "/")
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    s3_store._profile_config_cached.cache_clear()
+    yield fake
+    fake.close()
+
+
+@pytest.mark.usefixtures("no_sigterm_handler")
+@pytest.mark.parametrize("source", ["aws env", "container", "credential_process", "web identity", "imds",
+                                    "r2 with aws env"])
+def test_a_default_chain_credential_is_never_refused(tmp_path, monkeypatch, fake_aws, source):
+    """H3: credentials the S3 client's default chain finds (no store key pair) pass the check
+    and sign the unit's reads: AWS_* variables, a container endpoint, credential_process, a web
+    identity (STS), the instance metadata, an R2 endpoint with AWS_* keys. Each against the
+    local fake, never a cloud."""
+    import os
+    import stat
+
+    expected = {"aws env": "test-env-key", "container": "test-container-key",
+                "credential_process": "test-process-key", "web identity": "test-webid-key",
+                "imds": "test-imds-key", "r2 with aws env": "test-env-key"}[source]
+    if source in ("aws env", "r2 with aws env"):
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-env-key")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
+    elif source == "container":
+        monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", fake_aws.url + "/creds")
+    elif source == "credential_process":
+        script = tmp_path / "creds.sh"
+        script.write_text("#!/bin/sh\nprintf '%s' '{\"Version\": 1, \"AccessKeyId\": \"test-process-key\", "
+                          "\"SecretAccessKey\": \"test-secret\"}'\n")
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        (tmp_path / "aws-config").write_text(f"[default]\ncredential_process = {script}\n")
+    elif source == "web identity":
+        (tmp_path / "token").write_text("test-web-identity-token")
+        monkeypatch.setenv("AWS_WEB_IDENTITY_TOKEN_FILE", str(tmp_path / "token"))
+        monkeypatch.setenv("AWS_ROLE_ARN", "arn:aws:iam::000000000000:role/test")
+        monkeypatch.setenv("AWS_ENDPOINT_URL_STS", fake_aws.url)
+    if source != "imds":  # the source alone: no instance metadata to fall back on
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    if source == "r2 with aws env":
+        r2 = "https://0123456789abcdef.r2.cloudflarestorage.com"
+        assert fs.store_credential_problem("s3://b/runs/r", {**os.environ, "YETO_RL_STORE_S3_ENDPOINT_URL": r2}) is None
+    assert fs.store_credential_problem("s3://b/runs/r", dict(os.environ)) is None
+    monkeypatch.setattr(fs, "run_syncer", lambda *a, **kw: 0)
+    logs: list[str] = []
+    assert fs.service_run(service_args(onsite_config(tmp_path), "syncer"), log=logs.append) == 0, logs
+    assert expected in fake_aws.keys(), (fake_aws.signed, logs)  # the read (and the marker) signed with it
+
+
+@pytest.mark.usefixtures("no_sigterm_handler")
+@pytest.mark.parametrize("case", ["named profile missing", "no source at all"])
+def test_only_a_missing_named_profile_or_no_source_at_all_is_refused(tmp_path, monkeypatch, fake_aws, case):
+    """H3: the two refusals left (exit 10): the store's named profile is not on this host, or
+    no credential source exists at all (the instance metadata off too)."""
+    if case == "named profile missing":
+        monkeypatch.setenv("YETO_RL_STORE_S3_PROFILE", "not-on-this-host")
+    else:
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    logs: list[str] = []
+    assert fs.service_run(service_args(onsite_config(tmp_path), "syncer"), log=logs.append) == fs.CONFIG_EXIT
+    assert ("'not-on-this-host'" if case == "named profile missing" else "no AWS credential source") in logs[-1]
+    assert fake_aws.signed == []  # decided here, no request
+
+
+def test_no_credential_yet_from_a_dynamic_source_is_asked_again(tmp_path, monkeypatch, fake_aws):
+    """H3: the instance metadata answers without a role yet (NoCredentialsError at the read):
+    a source that may still come up, so the read is asked again as for a store that does not
+    answer, never exit 10."""
+    fake_aws.imds_role = False
+    onsite = fs.Onsite(up.load_config(str(onsite_config(tmp_path))), "syncer")
+    tries: list = []
+
+    class Again(Exception):
+        pass
+
+    def sleep(s):
+        tries.append(s)
+        if len(tries) == 2:
+            fake_aws.imds_role = True  # the role arrives: the next read is signed with it
+        if len(tries) > 3:
+            raise Again()
+
+    logs: list[str] = []
+    assert onsite.read_ended(sleep=sleep, log=logs.append) is None
+    assert len(tries) >= 1 and "does not answer" in logs[0] and "test-imds-key" in fake_aws.keys()
+
+
+def test_the_store_environment_given_to_a_launch_is_never_in_its_args(tmp_path, monkeypatch):
+    """L: run up's environment (credentials) bound to the service's launch args reaches the
+    store clients only: never an attribute of the args, so not in the run record a launch
+    writes (cli: runs.create_run), the head's replayed args (_serializable_args) or the W&B
+    config (vars(args))."""
+    import gc
+    import os
+
+    from yeto import cli, launcher, runs
+    from yeto.launch import store_env
+    from yeto.launch.store_env import store_client_environ
+
+    secret = "run-up-secret-value-for-the-test"
+    monkeypatch.setattr(launcher, "prepare_launch_args", lambda args: None)
+    monkeypatch.setattr("yeto.launch.data_mix.materialize_data_mix", lambda args: None)
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    argv, _host = fs.syncer_launch_argv(up.open_run(str(onsite_config(tmp_path))))
+    args = fs.launch_args(argv, {"YETO_RL_STORE_S3_SECRET_ACCESS_KEY": secret, "YETO_RL_STORE_S3_ACCESS_KEY_ID": "k"})
+    assert store_client_environ(args)["YETO_RL_STORE_S3_SECRET_ACCESS_KEY"] == secret
+    assert secret not in repr(vars(args)) and secret not in json.dumps(cli._serializable_args(args), default=str)
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    args_dict = {k: v for k, v in vars(args).items() if k != "command"}
+    runs.create_run("r-test", json.loads(json.dumps(args_dict, default=str)))
+    for root, _dirs, files in os.walk(tmp_path / "runs"):
+        for name in files:
+            assert secret not in (pathlib.Path(root) / name).read_text(errors="replace")
+    assert secret not in os.environ.get("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "")
+    key = id(args)
+    del args
+    gc.collect()
+    assert key not in store_env._BOUND  # dropped with its args
