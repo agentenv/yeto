@@ -1049,7 +1049,10 @@ def run_trainer(cmd: list[str], env: dict[str, str], log: Path, *, event_tape: A
             return proc.wait()
     finally:
         if tape_uploader is not None:
-            tape_uploader.stop()  # its last batch: the tape's end
+            try:
+                tape_uploader.stop()  # its last batch: the tape's end
+            except Exception as error:  # noqa: BLE001 - observation only: the trainer's exit code stands
+                print(f"[yeto-verl] tape upload stop failed: {type(error).__name__}: {error}", flush=True)
 
 
 def onpolicy_old_logprob_static_check(args, overrides) -> None:

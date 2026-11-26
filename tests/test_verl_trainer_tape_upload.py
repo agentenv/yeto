@@ -78,3 +78,17 @@ def test_without_a_store_no_uploader_runs(monkeypatch, tmp_path):
     assert tape_upload.trainer_uploader("t.jsonl", learner_id=0) is None
     assert island_entry.run_trainer([sys.executable, "-c", "pass"], {}, tmp_path / "train.log",
                                     event_tape="t.jsonl", learner_id=0) == 0
+
+
+def test_an_uploader_that_fails_to_stop_leaves_the_trainers_exit_code(trainer, monkeypatch, tmp_path, capsys):
+    """stop() raising (a bad YETO_RL_TAPE_FINAL_FLUSH_S, say) after the trainer finished: the
+    island still exits with the trainer's code, and says the flush failed."""
+    def broken_stop(self):
+        self.calls.append("stop")
+        raise ValueError("could not convert string to float: 'soon'")
+
+    monkeypatch.setattr(FakeUploader, "stop", broken_stop)
+    code = island_entry.run_trainer(["verl"], {}, tmp_path / "train.log", event_tape="t.jsonl", learner_id=0)
+    assert code == 3 and trainer[-1] == "stop"
+    assert ("[yeto-verl] tape upload stop failed: ValueError: could not convert string to float: 'soon'"
+            in capsys.readouterr().out)
