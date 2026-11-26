@@ -75,7 +75,7 @@ class FakeNodes(FakeCluster):
         if ia.BUSY_MARK in script:
             self.scripts.append((node.name, "busy"))
             return self.done(0, self.busy)
-        if script.startswith("podman pull"):
+        if script.startswith(("podman pull", "sudo -n podman pull")):
             self.scripts.append((node.name, script))
             return self.done(*self.b[node.name].pull)
         if ia.FACT in script:
@@ -548,9 +548,16 @@ def _podman(i, **kw):
     return NodeProfile.from_node(b300(i, docker_args=(), **kw), container="podman")
 
 
+def _graphroot(root="/mnt/nvme/podman", free=3000):
+    """A podman node's host probe: ``podman info`` names ``root``, which has ``free`` GiB."""
+    return Behavior(host={"podman_root": (0, root),
+                          "disk": (0, "\n".join([disk_line("/", 80, 200, dev="/dev/sda2", mount="/"),
+                                                 disk_line(root, free, mount="/mnt/nvme")]))})
+
+
 def test_podman_nodes_are_probed_checked_and_pulled_with_podman(tmp_path):
     nodes = [_podman(0, runtime="rootfs"), b300(1)]  # podman on a node of no docker runtime
-    ops = FakeNodes(nodes, **{"b300-0": Behavior(host={"podman_root": (0, "/mnt/nvme/podman")})})
+    ops = FakeNodes(nodes, **{"b300-0": _graphroot()})
     report = adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
     assert report.ok
     pulls = sorted(s.split(" pull")[0] + "@" + n for n, s in ops.scripts if " pull -q " in s)
@@ -567,7 +574,7 @@ def test_a_podman_graphroot_short_of_room_stops_the_pull(tmp_path):
     low = Behavior(host={"podman_root": (0, "/var/lib/containers/storage"),
                          "disk": (0, "\n".join([disk_line("/", 80, 200, dev="/dev/sda2", mount="/"),
                                                 disk_line("/var/lib/containers/storage", 30, mount="/")]))})
-    ops = FakeNodes(nodes, **{"b300-1": low})
+    ops = FakeNodes(nodes, **{"b300-0": _graphroot(), "b300-1": low})
     with pytest.raises(ia.AdoptError) as error:
         adopter(request(nodes, tmp_path, node="b300-0"), ops, smoke=passing_smoke()).run()
     assert error.value.step == "pull"
@@ -619,3 +626,65 @@ def test_a_tag_next_to_a_digest_is_left_out_of_the_repository_and_the_token_scop
             f'Bearer realm="https://reg.example/token",service="reg.example",scope="repository:{repo}:pull"')}, None)
     assert ia.pin(f"reg.example/org/img:v1@{DIGEST}", urlopen=urlopen) == f"reg.example/org/img@{DIGEST}"
     assert seen[0] == f"https://reg.example/v2/org/img/manifests/{DIGEST}"
+
+
+@pytest.mark.parametrize("root, why", [
+    ("", "`podman info` printed no storage graphroot"),
+    ("/srv/containers", "the graphroot /srv/containers that `podman info` printed is not on the node"),
+])
+def test_an_image_store_whose_disk_cannot_be_confirmed_fails(tmp_path, root, why):
+    nodes = [_podman(0)]
+    ops = FakeNodes(nodes, **{"b300-0": Behavior(host={"podman_root": (0, root)})})
+    with pytest.raises(ia.AdoptError) as error:
+        adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
+    assert error.value.step == "probe"
+    assert f"disk_images: cannot confirm the disk of the image store: {why}" in error.value.reason
+    assert ops.kinds()[-1] == "host"  # stopped before the probe ran the image
+
+
+def test_a_sudo_pool_engine_reads_its_rootful_store_and_pulls_through_sudo(tmp_path):
+    class Raw(FakeNodes):
+        def run(self, node, script, *, timeout=300.0):
+            self.raw = [*getattr(self, "raw", []), script]
+            return super().run(node, script, timeout=timeout)
+
+    nodes = [_podman(0), _podman(1)]
+    ops = Raw(nodes, **{n.name: _graphroot() for n in nodes})
+    report = adopter(request(nodes, tmp_path, container_sudo=True), ops, smoke=passing_smoke()).run()
+    assert report.ok
+    sent = [s for s in ops.raw if ia.FACT in s or ia.BUSY_MARK in s]
+    assert sent and all(s.startswith("sudo -n podman run ") for s in sent if ia.FACT in s)
+    assert all("sudo -n podman ps --filter name=^yeto-" in s for s in sent if ia.BUSY_MARK in s)
+    host = [s for _, s in ops.scripts if "@@yeto-section" in s]
+    assert host and all("sudo -n podman info --format '{{.Store.GraphRoot}}'" in s for s in host)
+    assert all(s.count("podman info") == s.count("sudo -n podman info") == 2 for s in host)  # section and disk
+    assert sorted(n for n, s in ops.scripts if s.startswith("sudo -n podman pull -q ")) == ["b300-0", "b300-1"]
+    assert shlex.split(ia.probe_script(PINNED, nodes[0], sudo=True))[:4] == ["sudo", "-n", "podman", "run"]
+    assert "sudo -n podman ps --filter name=^yeto-" in ia.busy_script(nodes[0], sudo=True)
+    assert "sudo" not in ia.probe_script(PINNED, nodes[0]) and "sudo" not in ia.busy_script(nodes[0])
+
+
+def test_a_docker_node_with_sudo_reads_docker_info_through_sudo_and_without_it_is_unchanged():
+    from yeto.launch.preflight import cluster as cp
+
+    node = b300(0)
+    plain = dict(cp.host_sections(node))
+    sudo = dict(cp.host_sections(node, sudo=True))
+    assert plain == dict(cp.host_sections(node, engine="docker", sudo=False)) and "sudo" not in str(plain)
+    assert sudo["docker"] == "sudo -n docker info --format '{{json .}}'"
+    assert "$(sudo -n docker info -f '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)" in sudo["disk"]
+    assert {k: v for k, v in sudo.items() if k not in ("docker", "disk")} == \
+        {k: v for k, v in plain.items() if k not in ("docker", "disk")}
+
+
+def test_the_docker_host_probe_is_byte_for_byte_main_s():
+    """The preflight's host probe of a docker node (no engine, no sudo given): the digest
+    of main's script (recorded from main d9fb37915), so the customer path cannot drift."""
+    import hashlib
+
+    from yeto.launch.preflight import cluster as cp
+
+    for node, want in ((b300(0), "3e692f2760ba7ad24840de395a33dd4b106b8abcc3fe645004aad4a2b52fcd8e"),
+                       (b300(1, mounts={"/mnt/nvme/x": "/x"}),
+                        "958b24e9b3fed68eeb27d8221ae0357653a5009b8e016a3a9ba270211cfce5de")):
+        assert hashlib.sha256(cp.probe_script(cp.host_sections(node)).encode()).hexdigest() == want

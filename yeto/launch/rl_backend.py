@@ -79,7 +79,10 @@ def _site_catalog_trainer_nodes(args) -> tuple[list | None, str]:
                  if not n.roles or any(r == "trainer" or r.startswith("trainer-") for r in n.roles)]
     except (ValueError, InventoryError):  # the launch's own checks name a bad --gpu or inventory
         return None, ""
-    if not nodes or any(n.image for n in nodes):
+    # the island's own nodes decide whether the configuration names its image; a spare that
+    # names one for itself (trainer-spare with image:) does not turn the catalog off
+    own = [n for n in nodes if not n.roles or "trainer" in n.roles]
+    if not nodes or any(n.image for n in own):
         return None, ""
     if not all(cloud == "ssh" for cloud in clouds):
         return None, MIXED_FLEET

@@ -86,8 +86,10 @@ class AdoptRequest:
     default), the image root's free space a pull needs, the trainer's attention
     backend (the trainer floor of :mod:`.trainer_image_check`), ``strict_arch`` (the
     image must carry a cubin of exactly the node's card architecture: no minor-version
-    or PTX compatibility) and ``allow_busy`` (probe and smoke a node whose cards run
-    something, with a warning)."""
+    or PTX compatibility), ``allow_busy`` (probe and smoke a node whose cards run
+    something, with a warning) and ``container_sudo`` (the engine runs as ``sudo -n
+    <engine>``, as an ssh sampler pool's ``container.sudo`` runs it: its rootful store is
+    the one checked, pulled into and run from)."""
 
     ref: str
     model: str
@@ -100,6 +102,7 @@ class AdoptRequest:
     attention_backend: str = "auto"
     strict_arch: bool = False
     allow_busy: bool = False
+    container_sudo: bool = False
 
     def __post_init__(self) -> None:
         if self.role not in site_images.ROLES:
@@ -273,7 +276,7 @@ def container_engine(node: Node) -> str:
     return engine
 
 
-def probe_script(image: str, node: Node, *, cards: bool = False) -> str:
+def probe_script(image: str, node: Node, *, cards: bool = False, sudo: bool = False) -> str:
     """The node's ``<engine> run --rm`` of ``image`` that prints the image's facts
     (:data:`FACT` lines): ``uname -m``, the image lock and, under the first interpreter of
     :data:`PYTHONS` that imports torch (else the first that runs), the Python facts.
@@ -294,7 +297,8 @@ def probe_script(image: str, node: Node, *, cards: bool = False) -> str:
              "if command -v \"$p\" >/dev/null 2>&1; then PY=$p; break; fi; done; fi; "
              f"if [ -z \"$PY\" ]; then echo {FACT} no_python true; exit 0; fi; "
              f"\"$PY\" -c {shlex.quote(_PROBE_PY)}")
-    argv = [engine, "run", "--rm", "--network", "host", *devices, "--entrypoint", "bash", image, "-c", inner]
+    argv = [*(["sudo", "-n"] if sudo else []), engine, "run", "--rm", "--network", "host", *devices,
+            "--entrypoint", "bash", image, "-c", inner]
     return shlex.join(argv)
 
 
@@ -307,7 +311,7 @@ _BUSY_TOOLS = {
 }
 
 
-def busy_script(node: Node) -> str:
+def busy_script(node: Node, *, sudo: bool = False) -> str:
     """What runs on the node's cards: the family's card tool (:data:`_BUSY_TOOLS`: the
     compute processes of ``nvidia-smi``, ``amd-smi process`` / ``rocm-smi --showpids``,
     the process rows of ``npu-smi info``) and the node's running yeto containers. Each
@@ -325,7 +329,7 @@ def busy_script(node: Node) -> str:
                      f"( {tool} ) 2>&1 | sed 's/^/{BUSY_MARK} apps /'; else echo {BUSY_MARK} tool none; fi")
     else:
         parts.append(f"echo {BUSY_MARK} tool none")
-    parts.append(f"{engine} ps --filter name=^yeto- --format '{{{{.Names}}}} {{{{.Image}}}}' 2>/dev/null "
+    parts.append(f"{'sudo -n ' if sudo else ''}{engine} ps --filter name=^yeto- --format '{{{{.Names}}}} {{{{.Image}}}}' 2>/dev/null "
                  f"| sed 's/^/{BUSY_MARK} containers /'")
     return "; ".join(parts)
 
@@ -582,7 +586,8 @@ class Adopter:
         ref = self.report.pinned or self.request.ref
         nodes = ", ".join(self.holding)
         engine = profile_of(self.request.probe_node).container
-        engine = engine if engine in ("docker", "podman") else "docker"
+        engine = ("sudo -n " if self.request.container_sudo else "") + (engine if engine in ("docker", "podman")
+                                                                         else "docker")
         return AdoptError(error.step, f"{error.reason}; the image stays pulled on {nodes} (a retry reuses it; "
                                       f"`{engine} rmi {ref}` there frees the room)", holding=self.holding)
 
@@ -658,7 +663,7 @@ class Adopter:
 
         req = Requirements(min_image_root_free_gib=float(self.request.min_image_free_gib))
         checks = ClusterPreflight([node], image=ref, ops=self.ops, req=req, log=self.log, clock=self.clock,
-                                  engine=container_engine(node)).hosts()
+                                  engine=container_engine(node), sudo=self.request.container_sudo).hosts()
         failed = [c for c in checks if c.status == FAIL and c.name in ("ssh", "host_probe", "disk_images")]
         if failed:
             raise AdoptError("probe", "; ".join(f"node {c.scope}: {c.name}: {c.detail}" + (f" ({c.fix})" if c.fix
@@ -672,7 +677,7 @@ class Adopter:
 
         family = profile_of(node).family
         try:
-            done = self.ops.run(node, busy_script(node), timeout=120.0)
+            done = self.ops.run(node, busy_script(node, sudo=self.request.container_sudo), timeout=120.0)
             text = (getattr(done, "stdout", "") or "") + "\n" + (getattr(done, "stderr", "") or "")
         except Exception as error:  # noqa: BLE001 - a dead ssh is the step's failure
             raise AdoptError(step, f"node {node.name}: cannot read what runs on its cards: "
@@ -691,7 +696,8 @@ class Adopter:
 
     def _run_probe(self, node: Node, ref: str, *, cards: bool) -> ImageFacts:
         try:
-            done = self.ops.run(node, probe_script(ref, node, cards=cards), timeout=PROBE_TIMEOUT_S)
+            done = self.ops.run(node, probe_script(ref, node, cards=cards, sudo=self.request.container_sudo),
+                                timeout=PROBE_TIMEOUT_S)
         except AdoptError:
             raise
         except Exception as error:  # noqa: BLE001 - a dead ssh or a timeout is the step's failure
@@ -743,7 +749,7 @@ class Adopter:
         checks, pulled = [], True
         for engine, nodes in sorted(groups.items()):
             pf = ClusterPreflight(nodes, image=ref, ops=self.ops, req=req, log=self.log, clock=self.clock,
-                                  engine=engine)
+                                  engine=engine, sudo=self.request.container_sudo)
             found, ok = pf.pull()
             checks += found
             pulled = pulled and ok
