@@ -965,7 +965,7 @@ exactly as before.
 A fleet of `ssh:` trainer islands on your own machines uses the same fleet mechanisms as any
 other island fleet ([FLEET_TRAINER_ISLANDS.md](FLEET_TRAINER_ISLANDS.md)). This section
 covers what is specific to `ssh:` islands: how a slow or stuck island is reported, and what
-happens when one leaves.
+is checked before an island joins.
 
 ### An island that lags
 
@@ -1106,6 +1106,39 @@ reported then, and training is not affected. This happens:
   window is 31 minutes. This is counted only after the first record about
   the launch's islands, so a fleet whose trainers are still starting is not reported. Once
   records are read again, the launch writes `island_straggler_available`.
+
+### Adding an island
+
+With `fleet.launch: per_island`, add an `ssh:` island with its own node inventory. Its
+inventory lists the island's trainer nodes, in the format of `--rl-node-inventory`:
+
+```bash
+yeto fleet island add --config run.json --name north --gpu ssh:2x8xb300@bm --usd-per-h 0 \
+    --samplers north.samplers.json --inventory north.inventory.yaml --dry-run
+yeto fleet island add --config run.json --name north --gpu ssh:2x8xb300@bm --usd-per-h 0 \
+    --samplers north.samplers.json --inventory north.inventory.yaml
+```
+
+The island's launch gets `--rl-node-inventory north.inventory.yaml`. Before anything is
+written, and in the dry run too, the command checks the inventory's trainer nodes:
+
+| Check | Refused when |
+|---|---|
+| Count | The inventory does not list as many trainer nodes as `--gpu` says. |
+| In this fleet | A node (by name or SSH target) is a trainer node of another `ssh:` island of the fleet. |
+| Health | The node health check (one SSH call per node) finds a fault: GPU count or memory, an Xid, uncorrectable ECC, Fabric Manager. A multi-node island also needs the `NCCL_IB_HCA` ports active and at rate. A node that does not answer is refused. A device family without a health check is noted, not refused. |
+| Fabric group | The inventory declares `fabric_group` and no one group holds the island's nodes. An inventory without any `fabric_group` only gets a note. |
+| Lease | The inventory's `lease_store` shows a node leased to another run. Without `lease_store` this is not checked, and a note says so. |
+
+A refusal exits 2, names every problem, and writes nothing. No learner id is claimed:
+
+```text
+fleet island: refused: island north's nodes cannot join: node b300-5 is not healthy: Xid 79 since the last check; node b300-4 is leased to run other-run
+```
+
+Once the island is written, the trainer worker starts its launch. The island joins the
+running syncer session, catches up to the newest merged weights, and then answers rounds
+like the other islands. The other islands' processes keep running; they are not restarted.
 
 ### Removing an island
 
