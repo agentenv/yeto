@@ -65,10 +65,12 @@ from .node_quarantine import (  # noqa: F401 - the shared names here too
     QUARANTINE_NAME,
     RELEASE_NODE_HINT,
     SHARED_NODES_DIR,
+    describe,
+    release_how,
+    SPARE_ROLE,
     shared_quarantined_names,
 )
 
-SPARE_ROLE = "trainer-spare"
 NODES_DIR = "fleet/nodes"  # under the run store
 CLAIM_NAME = "claim.json"
 CLAIM_SCHEMA = "yeto.fleet.node-claim/v1"
@@ -128,7 +130,8 @@ def spares_from_args(args: Any, spec: Any, *, objects: Any = None, leases: Any =
                      num_islands: int | None = None, shared: Any = None) -> IslandSpares | None:
     """The :class:`IslandSpares` of the resident ``ssh:`` island ``spec`` (an
     ``SshTrainerSpec``) from ``--rl-node-inventory``; None when the inventory has no spare
-    node (nothing changes then). Every spare must fit the island (:func:`check_spares`)
+    node, or the island's device family has no node health check (a WARN says the spares
+    do not apply): nothing changes then, as on main. Every spare must fit the island (:func:`check_spares`)
     and the island's spec must take it in any node's place (its rendezvous address, docker
     flags); raises :class:`SpareError`. ``objects``: the run store's object API (claims,
     quarantine, the resume point; None: :func:`store_objects_of` ``--rl-checkpoint-store``).
@@ -147,8 +150,9 @@ def spares_from_args(args: Any, spec: Any, *, objects: Any = None, leases: Any =
         except Exception as error:  # noqa: BLE001 - SshIslandError: the spare as the island sees it
             raise SpareError(f"{SPARE_ROLE} node {node.name}: {error}") from None
     note = no_checker_note(spec)
-    if note is not None:
+    if note is not None:  # no spare without a health check: the island runs as on main
         (log or (lambda m: print(m, file=sys.stderr, flush=True)))(note)
+        return None
     if objects is None:
         objects = store_objects_of(args)
     if shared is None:
@@ -164,13 +168,14 @@ def spares_from_args(args: Any, spec: Any, *, objects: Any = None, leases: Any =
 
 def no_checker_note(spec: Any) -> str | None:
     """The one line said when an island has spare nodes but its device family has no node
-    health check here (``yeto.hw.node_health``): no spare is picked without one."""
+    health check here (``yeto.hw.node_health``): no spare is picked without one, so the
+    spares do not apply at all (:func:`spares_from_args` returns None)."""
     family = spec.nodes[0].device_family if getattr(spec, "nodes", None) else None
     if family is None or _checker_for(family) is not None:
         return None
-    return (f"[launcher] NOTE: the inventory declares {SPARE_ROLE} nodes, but device family {family} has no node "
-            "health check in this version (yeto.hw.node_health): a lost node is not replaced by a spare until "
-            "that check is in (the island waits, then is given up as without spares)")
+    return (f"[launcher] WARN: the inventory declares {SPARE_ROLE} nodes, but device family {family} has no node "
+            "health check in this version (yeto.hw.node_health): the spare nodes do not apply; a failed island "
+            "is relaunched on its own nodes, as without spares")
 
 
 def spare_view(args: Any, spec: Any) -> dict[str, Any] | None:
@@ -276,25 +281,29 @@ def _pick_placement(candidates: Sequence[Node], need: int, *, excluded: Mapping[
     return (added[0], "") if added else (None, f"the placement {[n.name for n in nodes]} adds no node")
 
 
-def hcas_of(node: Node) -> list[str]:
-    """The job ports of the node (its inventory ``NCCL_IB_HCA``, ``node_health.hcas_of``)."""
+def hcas_of(node: Node, env: Mapping[str, str] | None = None) -> list[str]:
+    """The job ports of the node as the island's health watch reads them: ``NCCL_IB_HCA``
+    of the node's inventory env with the island's job ``env`` over it (the job's own
+    order), ``node_health.hcas_of``."""
     from yeto.hw import node_health  # noqa: PLC0415
 
-    return node_health.hcas_of((node.env or {}).get("NCCL_IB_HCA"))
+    return node_health.hcas_of({**dict(node.env or {}), **dict(env or {})}.get("NCCL_IB_HCA"))
 
 
-def node_check(node: Node, ops: Any, *, multi: bool, timeout: float = 120.0) -> tuple[bool, str]:
+def node_check(node: Node, ops: Any, *, multi: bool, timeout: float = 120.0,
+               env: Mapping[str, str] | None = None) -> tuple[bool, str]:
     """Whether ``node`` may take an island node's place now: its health check (one SSH
     call, ``yeto.hw.node_health``) ran (``checked``) and passes for a multi-node (``multi``)
     or single-node island. An answer over SSH alone is not enough: a family without a
-    checker, or a check that did not run, is refused."""
+    checker, or a check that did not run, is refused. ``env``: the island's job env (its
+    ``NCCL_IB_HCA`` names the ports checked, as the island's own health watch does)."""
     from .ssh_trainer_island import RDMA_FABRICS  # noqa: PLC0415
 
     checker = _checker_for(node.device_family, expect_gpus=node.cards_per_node,
                            fabric=node.fabric if node.fabric in RDMA_FABRICS else None)
     if checker is None:
         return False, f"no health check for device family {node.device_family} here (yeto.hw.node_health)"
-    hcas = hcas_of(node) if multi else []
+    hcas = hcas_of(node, env) if multi else []
     script = checker.script(hcas)
     if not script:
         return False, f"the health check of device family {node.device_family} runs nothing"
@@ -353,8 +362,9 @@ class NodeRecords:
         try:
             doc = json.loads(raw)
         except ValueError:
-            return {"unreadable": True}
-        return doc if isinstance(doc, dict) else {"unreadable": True}
+            doc = None
+        return doc if isinstance(doc, dict) else {"unreadable": True,
+                                                  "reason": "quarantine record unreadable: not a JSON object"}
 
     def _read(self, key: str) -> dict[str, Any] | None:
         return self._parse(self._memory.get(key) if self.objects is None else self.objects.read(key))
@@ -418,10 +428,9 @@ class NodeRecords:
         """The node's quarantine in the lease store (any run's; None: none, or no lease store)."""
         if self.shared is None:
             return None
-        try:
-            return self._parse(self.shared.read(self.shared_key(name)))
-        except Exception:  # noqa: BLE001 - unknown is not quarantined; the run store still says
-            return None
+        from .node_quarantine import read_record  # noqa: PLC0415
+
+        return read_record(self.shared, name)  # unreadable: a quarantine (with that reason)
 
     def own_quarantine(self, name: str) -> dict[str, Any] | None:
         """The node's quarantine record in this run store (None: not quarantined here)."""
@@ -497,6 +506,7 @@ def release_node(records: NodeRecords, node: Node, ssh: Any, *, kill_grace_s: in
     if doc is None:
         return True, f"node {node.name} is not quarantined"
     grace = int(KILL_GRACE_S if kill_grace_s is None else kill_grace_s)
+    ledger_notes: list[str] = []
     for owed in doc.get("owed") or ():
         run_id = str(owed.get("run_id") or records.run_id)
         paths = remote_paths(run_id, str(owed["island"]), int(owed["incarnation"]))
@@ -509,8 +519,11 @@ def release_node(records: NodeRecords, node: Node, ssh: Any, *, kill_grace_s: in
             err = (getattr(done, "stderr", "") or "").strip()[-300:]
             return False, (f"node {node.name}: the stop of {owed['island']} incarnation {owed['incarnation']} "
                            f"ended rc {done.returncode} {err}").rstrip()
-        ssh_trainer_ledger.release_owed(run_id=run_id, island=str(owed["island"]),
-                                        incarnation=int(owed["incarnation"]), node=node.name)
+        status, ledger_path = ssh_trainer_ledger.release_owed(run_id=run_id, island=str(owed["island"]),
+                                                              incarnation=int(owed["incarnation"]), node=node.name)
+        if status != ssh_trainer_ledger.OWED_RELEASED:
+            ledger_notes.append(_owed_row_note(run_id, str(owed["island"]), int(owed["incarnation"]), node.name,
+                                               ledger_path))
     lease_note = ""
     if leases is not None:
         holder = doc.get("lease_holder") or lease_holder_id(leases)
@@ -529,7 +542,38 @@ def release_node(records: NodeRecords, node: Node, ssh: Any, *, kill_grace_s: in
             return False, (f"node {node.name}: its lease could not be released ({type(error).__name__}: "
                            f"{error}); it stays quarantined")
     records.release(node.name)
-    return True, f"node {node.name} released ({len(doc.get('owed') or ())} owed stop(s) run){lease_note}"
+    return True, (f"node {node.name} released ({len(doc.get('owed') or ())} owed stop(s) run){lease_note}"
+                  + "".join(f"; {n}" for n in ledger_notes))
+
+
+def _lease_plan(records: NodeRecords, node: Node, doc: Mapping[str, Any], leases: Any) -> str:
+    """What release-node would do with the node's cross-run lease (its dry run)."""
+    if leases is None:
+        return "no lease store: no lease to end"
+    holder = doc.get("lease_holder") or lease_holder_id(leases)
+    try:
+        current = leases.holder(node)
+    except Exception as error:  # noqa: BLE001 - the dry run reads only
+        return f"the lease of {node.name} could not be read ({type(error).__name__}: {error})"
+    if current is None:
+        return f"no lease held on {node.name}: none to end"
+    if current != holder:
+        return f"the lease of {node.name} is held by {current}, not {holder}: it is left alone"
+    return (f"would end the lease of {holder} on {node.name} (a kept one at once; a live one only after a "
+            "probe over SSH finds nothing of that run on the node)")
+
+
+def _owed_row_note(run_id: str, island: str, incarnation: int, node: str, path: str) -> str:
+    """Where the owed ledger row of a stop release-node ran lives when this machine has none open."""
+    from yeto.cost.ledger import LEDGER_FILE  # noqa: PLC0415
+
+    from . import ssh_trainer_ledger  # noqa: PLC0415
+
+    rid = ssh_trainer_ledger.owed_id(run_id, island, incarnation, node)
+    return (f"WARN: its owed ledger row {rid} is not open in {path or 'any ledger here'}: the row is in the run "
+            f"dir of the machine that ran the launcher of run {run_id} (runs/{run_id}/{LEDGER_FILE}); the "
+            "launcher closes it (released elsewhere) when it picks the node again, or close it there with "
+            f"`yeto cleanup --run {run_id}` once the run has ended")
 
 
 RELEASE_NODE_RUN = "yeto-cluster-release-node"  # who ends a lease (its released_by)
@@ -591,15 +635,29 @@ def release_node_main(*, inventory: str, name: str, store: str, ssh: Any = None,
     if doc is None:
         say(f"[yeto] node {name} is not quarantined in {store}")
         return 0
+    if doc.get("unreadable"):  # a broken record: which stops the node owes is not known
+        say(f"[yeto] node {name}: its quarantine record is unreadable ({doc.get('reason')}): the stops it still owes "
+            "cannot be known")
+        if not force:
+            say(f"[yeto] node {name} stays quarantined: check it by hand for containers or processes of the run "
+                "(yeto-<run>-*), then release it with --force")
+            return 1
+        say(f"[yeto] WARN: --force: node {name} is released without running any owed stop")
+        doc = {**doc, "owed": []}
     owed = list(doc.get("owed") or ())
-    say(f"[yeto] node {name}: quarantined by island {doc.get('island')} of run {doc.get('run')}: "
-        f"{doc.get('reason')}")
+    if not doc.get("unreadable"):
+        say(f"[yeto] node {name}: quarantined by island {doc.get('island')} of run {doc.get('run')}: "
+            f"{doc.get('reason')}")
     for row in owed:
         say(f"[yeto]   owes the stop of {row.get('island')} incarnation {row.get('incarnation')} (rank "
             f"{row.get('rank')}" + (f", container {row['container']}" if row.get("container") else "") + ")")
     if dry_run:
         say(f"[yeto] dry run: would {'skip the health check of' if force else 'check'} {name}, run {len(owed)} "
             f"stop(s) and remove {NODES_DIR}/{name}/{QUARANTINE_NAME}")
+        say(f"[yeto]   would remove {records.key(name, QUARANTINE_NAME)} in the run store {store}"
+            + (f" and {records.shared_key(name)} in the lease store {getattr(leases, 'store_uri', '')}".rstrip()
+               if records.shared is not None else ""))
+        say(f"[yeto]   {_lease_plan(records, node, doc, leases)}")
         return 0
     if ssh is None:
         from .ssh_trainer_island import SshOps  # noqa: PLC0415
@@ -701,6 +759,7 @@ class IslandSpares:
 
     pool: tuple[Node, ...]
     records: NodeRecords
+    job_env: dict[str, str] = field(default_factory=dict)  # the island's job env (SshIslandOps.add sets it)
     leases: Any = None
     resume_probe: Callable[[], dict[str, Any] | None] | None = None
     wait_first_s: float = WAIT_FIRST_S
@@ -715,7 +774,8 @@ class IslandSpares:
     stream_ended: set[int] = field(default_factory=set)  # ranks whose stream ended on its own
     unconfirmed: set[int] = field(default_factory=set)  # ranks whose stop the release did not confirm
     silent: dict[int, int] = field(default_factory=dict)  # rank -> failed SSH checks in a row
-    stopped: set[str] = field(default_factory=set)  # lost nodes whose own stop was confirmed (owe nothing)
+    # (lost node, incarnation) whose own stop was confirmed: that stop is owed no more
+    stopped: set[tuple[str, int]] = field(default_factory=set)
     stop_threads: list[Any] = field(default_factory=list, repr=False)  # background stops of lost nodes
     waiting: bool = False
     limited: bool = False  # the replacement limit was reported
@@ -864,8 +924,11 @@ def spare_candidates(spares: IslandSpares, island: str, current: Sequence[Node],
             skipped[node.name] = f"fabric group {fabric_group(node) or 'none'} (the island's is {group or 'none'})"
         else:
             candidates.append(node)
-            if (record := spares.records.quarantined(node.name)) is not None:
+            if (record := spares.records.own_quarantine(node.name)) is not None:
                 skipped[node.name] = f"quarantined ({str(record.get('reason') or '')[:120]})"
+            elif (record := spares.records.shared_quarantined(node.name)) is not None:  # another run's
+                skipped[node.name] = (f"quarantined: {describe(node.name, record)}; once fixed, "
+                                      f"{release_how(node.name)}")
             elif (held := spares.records.holder(node.name)) is not None and held != island:
                 skipped[node.name] = f"held by island {held}"
             elif spares.leases is not None and (holder := spares.leases.holder(node)) is not None \
@@ -897,7 +960,7 @@ def check_candidates(spares: IslandSpares, island: str, current: Sequence[Node],
         node, _why = _place(spares, candidates, keep, {**out, **{k: why for k, (_ok, why) in checked.items()}})
         if node is None:
             break
-        checked[node.name] = node_check(node, ops, multi=multi)
+        checked[node.name] = node_check(node, ops, multi=multi, env=spares.job_env)
         passed += bool(checked[node.name][0])
     return checked
 
@@ -920,7 +983,7 @@ def pick_spare(spares: IslandSpares, island: str, current: Sequence[Node], lost:
         if node is None:
             return Pick(None, group, skipped, tuple(unchecked), placement=why)
         skipped[node.name] = "tried"
-        verdict = node_check(node, ops, multi=multi) if health is None else health.get(node.name)
+        verdict = node_check(node, ops, multi=multi, env=spares.job_env) if health is None else health.get(node.name)
         if verdict is None:
             unchecked.append(node.name)
             skipped[node.name] = "health not checked yet"
@@ -946,7 +1009,21 @@ def pick_spare(spares: IslandSpares, island: str, current: Sequence[Node], lost:
                                       else f"leased by run {getattr(lease, 'holder', None) or 'unknown'}")
                 continue
         skipped.pop(node.name, None)
+        with spares.owed_lock:  # picked again: a loss of its new incarnation owes its stop again
+            spares.stopped -= {k for k in spares.stopped if k[0] == node.name}
+        _close_owed_elsewhere(spares, node)
         return Pick(node, group, skipped)
+
+
+def _close_owed_elsewhere(spares: IslandSpares, node: Node) -> None:
+    """A picked node has no quarantine record: a stop it owed this run was run by a
+    release-node elsewhere; its owed ledger rows here close (``released elsewhere``)."""
+    from . import ssh_trainer_ledger  # noqa: PLC0415
+
+    closed = ssh_trainer_ledger.release_owed_elsewhere(run_id=spares.records.run_id, node=node.name)
+    if closed:
+        spares.records.log(f"[launcher] node {node.name} is picked again with no quarantine record: its owed "
+                           f"ledger row(s) {closed} are closed (released elsewhere)")
 
 
 def unpick(spares: IslandSpares, island: str, node: Node) -> None:

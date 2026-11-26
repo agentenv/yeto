@@ -513,7 +513,9 @@ architecture, card, card count, runtime and `store_env_file`, and it must have a
 rendezvous `address`. `yeto launch --dry-run` refuses a spare that cannot take a
 node's place, and lists the spares and their fabric groups under the island's
 `spares`. A device family without a node health checker (see "Node health" in
-`docs/NODE_RUNTIME.md`) never gets a spare; the dry run and the start say so.
+`docs/NODE_RUNTIME.md`) never gets a spare: its spares do not apply at all. The dry
+run and the start print a WARN, and a failed island is relaunched on its own nodes,
+as without spares.
 
 ### When a node is lost
 
@@ -532,8 +534,9 @@ node that answers again is relaunched on, as before.
 
 A network partition is enough: a node that cannot be reached for about 2 to 5
 minutes (the stream's keepalive timeout plus the checks) is lost and quarantined,
-even if it was healthy. Nothing lifts a quarantine on its own; release the node by
-hand (below) once it is reachable again.
+even if it was healthy. Each check of a waiting island tries the stops such a node
+still owes again, so its old container stops once it answers. Nothing lifts a
+quarantine on its own; release the node by hand (below) once it is reachable again.
 
 When a node is lost, the island writes `island_node_lost` and stops on its other
 nodes. The lost node is not waited for; one that still answers (a health loss) is
@@ -547,12 +550,21 @@ node still owes, and the run's lease holder. With a `lease_store`:
   node and how to release it, once and on every waiting line. A new run whose
   inventory lists no other free trainer node waits for one (`--rl-node-lease-wait-s`)
   and then fails with the same note; it does not use a spare in its place;
+- a record that cannot be read (the store fails, or the record is not JSON) counts
+  as a quarantine, with the reason `quarantine record unreadable: ...`; if the store
+  cannot list the records, each node's record is read instead. A running island's
+  node is not taken as lost on such a read failure;
 - the run keeps its lease on the node (`kept: true`, no longer renewed) while it is
-  quarantined, also across a restarted launcher.
+  quarantined, also across a restarted launcher;
+- once a spare took a node's place, the run dir's lease record (`node-leases.json`)
+  names the spare. A restarted launcher leases the island's current nodes, the spare
+  among them, and gives back a lease of a released old node it no longer runs on.
+  An old node another run holds by then does not stop the island from reattaching.
 
 A stop the node still owes stays in the run's ledger as a row of its own, priced as
 that node only, so `yeto cleanup --run <run>` still tries to stop it there. A lost
-node whose own stop was confirmed owes nothing and has no such row.
+node whose own stop was confirmed owes nothing for that incarnation and has no such
+row; picked again later, a loss of its new incarnation owes its stop again.
 
 ### Which spare is taken
 
@@ -565,7 +577,9 @@ every condition below is taken:
 - its node health check ran and passes now; an answer over SSH is not enough;
 - no other island of the run holds it (`fleet/nodes/<name>/claim.json`, written
   once with an exclusive create);
-- it is not quarantined, by this run or (with a `lease_store`) by another run;
+- it is not quarantined, by this run or (with a `lease_store`) by another run. The
+  wait reason names the run and island of another run's quarantine and how to
+  release the node;
 - its cross-run lease is free, when the inventory names a `lease_store`.
 
 The claims need a run store with an atomic exclusive create (s3:// or r2:// with
@@ -629,12 +643,20 @@ yeto cluster release-node b300-1 --inventory inventory.yaml --store s3://RUN-STO
 1. checks the node: its health check must run and pass (an answer over SSH alone is
    not enough). `--force` skips the check and prints a WARN; a device family without
    a health checker needs it;
-2. runs the stops the node still owes and closes each owed ledger row;
+2. runs the stops the node still owes and closes each owed ledger row. The ledger is
+   the run's (`runs/<run>/resources.jsonl` on the machine that ran the launcher); run
+   elsewhere, the command says where the row is, and the launcher closes it
+   (`released elsewhere`) when it picks the node again, so the node is billed once.
+   A quarantine record that cannot be read needs `--force`: the stops it owes are not
+   known, so check the node for the run's containers by hand first;
 3. gives up the run's lease on the node (with a `lease_store`). A kept lease ends at
    once. A live one (the run's launcher still renews it) ends only after a probe over
    SSH found nothing of the run on the node; a lease another run holds is not
    touched;
 4. removes the quarantine record, in the run store and in the `lease_store`.
+
+`--dry-run` prints the record, the stops it would run, the records it would remove
+(in the run store and the `lease_store`) and what it would do with the lease.
 
 From then on any island may take the node again, including one waiting for a spare.
 If the check, a stop, the probe or the lease release fails, the node stays

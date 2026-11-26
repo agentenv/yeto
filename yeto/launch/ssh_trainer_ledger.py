@@ -80,24 +80,55 @@ def owed_id(run_id: str, island: str, incarnation: int, node: str) -> str:
     return f"{resource_id(run_id, island, incarnation)}-owed-{node}"
 
 
-def release_owed(*, run_id: str, island: str, incarnation: int, node: str) -> None:
+OWED_RELEASED = "released"  # release_owed: the row closed
+OWED_ABSENT = "absent"  # not open in this ledger (never recorded, closed, or the ledger is elsewhere)
+OWED_NO_LEDGER = "no-ledger"
+
+
+def _run_ledger(run_id: str) -> Any:
+    from yeto.cost.ledger import ResourceLedger, current
+
+    return current() or ResourceLedger.for_run(str(run_id))
+
+
+def release_owed(*, run_id: str, island: str, incarnation: int, node: str) -> tuple[str, str]:
     """The owed stop of ``node`` for that incarnation is confirmed (its own stop in the
     background, or ``yeto cluster release-node``): its row closes. The run's ledger is
-    ``$YETO_RESOURCE_LEDGER``, else the run's own (a ``release-node`` outside the run)."""
-    from yeto.cost.ledger import ResourceLedger, current, record_safely
+    ``$YETO_RESOURCE_LEDGER``, else the run's own (a ``release-node`` outside the run).
+    ``(status, ledger path)``: :data:`OWED_RELEASED`, :data:`OWED_ABSENT` (a ``release-node``
+    on a machine without the run dir finds no row: the caller says where it is) or
+    :data:`OWED_NO_LEDGER`."""
+    from yeto.cost.ledger import record_safely
 
-    ledger = current()
-    if ledger is None:
-        try:
-            ledger = ResourceLedger.for_run(str(run_id))
-        except Exception as error:  # noqa: BLE001 - printed, the row stays for yeto cleanup
-            print(f"[cost] WARNING: no resource ledger for run {run_id} ({error}); the owed row of {node} stays "
-                  "open for `yeto cleanup`", flush=True)
-            return
+    try:
+        ledger = _run_ledger(run_id)
+    except Exception as error:  # noqa: BLE001 - printed, the row stays for yeto cleanup
+        print(f"[cost] WARNING: no resource ledger for run {run_id} ({error}); the owed row of {node} stays "
+              "open for `yeto cleanup`", flush=True)
+        return OWED_NO_LEDGER, ""
     rid = owed_id(run_id, island, incarnation, node)
     if not any(r.id == rid for r in ledger.open_resources()):
-        return  # never recorded (the stop came first) or closed already
+        return OWED_ABSENT, str(ledger.path)  # never recorded (the stop came first), closed, or elsewhere
     record_safely("released", KIND, rid, f"{island}-i{int(incarnation)}-owed-{node}", ledger=ledger)
+    return OWED_RELEASED, str(ledger.path)
+
+
+def release_owed_elsewhere(*, run_id: str, node: str) -> list[str]:
+    """``node`` is picked again and has no quarantine record: its owed stops were run
+    elsewhere (``yeto cluster release-node`` on a machine without this run's ledger), so
+    the run's open owed rows of that node close (``reason: released elsewhere``) and it is
+    not billed twice. Returns the rows closed."""
+    from yeto.cost.ledger import record_safely
+
+    try:
+        ledger = _run_ledger(run_id)
+        rows = [r for r in ledger.open_resources()
+                if r.kind == KIND and str(r.id).startswith(f"{run_id}/") and str(r.id).endswith(f"-owed-{node}")]
+    except Exception:  # noqa: BLE001 - no ledger: nothing billed here
+        return []
+    for row in rows:
+        record_safely("released", KIND, row.id, getattr(row, "name", None), ledger=ledger, reason="released elsewhere")
+    return [str(r.id) for r in rows]
 
 
 class _LedgerNode:

@@ -1484,6 +1484,13 @@ def _lease_record(args: Any) -> dict[str, Any]:
     return doc if isinstance(doc, dict) else {}
 
 
+def record_island_nodes(run_id: str, name: str, nodes: Sequence[Node]) -> None:
+    """Island ``name`` of run ``run_id`` runs on ``nodes`` now (a spare took a lost node's
+    place): the run dir's lease record (:data:`NODE_LEASE_FILE`) says so, so a restarted
+    launcher leases these nodes again, not the lost one. Raises OSError."""
+    _record_island_nodes(type("Args", (), {"cluster_prefix": run_id})(), name, nodes)
+
+
 def _record_island_nodes(args: Any, name: str, nodes: Sequence[Node]) -> None:
     path = _lease_record_path(args)
     doc = _lease_record(args)
@@ -1541,15 +1548,20 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
 
     from .node_lease import NodeLeased, pick_nodes
 
+    from .node_quarantine import SPARE_ROLE
+
     key = name or f"island-{len(leases.picks)}"
     by_name = {n.name: n for n in trainers}
+    # a recorded node may be a spare that took a lost node's place (island_spares)
+    known = {**{n.name: n for n in (getattr(args, "rl_node_inventory_nodes", None) or ())
+                if SPARE_ROLE in (getattr(n, "roles", None) or ())}, **by_name}
     if key in leases.picks:
-        return tuple(by_name[n] for n in leases.picks[key])
-    recorded = [n for n in (_lease_record(args).get("islands") or {}).get(key, ()) if n in by_name]
+        return tuple(known[n] for n in leases.picks[key])
+    recorded = [n for n in (_lease_record(args).get("islands") or {}).get(key, ()) if n in known]
     if recorded and len(recorded) == need and _journal_incarnation(args, key):
         held = {}
         for node in recorded:
-            got = leases.acquire(by_name[node])
+            got = leases.acquire(known[node])
             if not got.ok:
                 held[node] = leases.same_run_conflict(got.holder) or got.blocked or f"run {got.holder}"
         if held:
@@ -1560,7 +1572,7 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
                 f"ssh: island {key}: its last incarnation ran on {recorded} (the jobs journal); "
                 + ", ".join(f"{n} is held by {h}" for n, h in sorted(held.items()))
                 + ": not moving the island to other nodes (free them, or start a new run)")
-        picked = [by_name[n] for n in recorded]
+        picked = [known[n] for n in recorded]
     else:
         flag = getattr(args, "rl_node_lease_wait_s", None)
         limit = wait_s if wait_s is not None else float(DEFAULT_NODE_LEASE_WAIT_S if flag is None else flag)
@@ -1571,11 +1583,12 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
 
         # a node quarantined by any run of the inventory (a lost node, island_spares: its record
         # in the lease store, nodes/<name>/quarantine.json) is no candidate until release-node
-        from .node_quarantine import shared_quarantine_note, shared_quarantined_names
+        from .node_quarantine import quarantine_note, shared_quarantines
 
-        shared = getattr(leases, "objects", None)
-        quarantined = shared_quarantined_names(shared) & set(by_name)
-        note = shared_quarantine_note(shared, quarantined) if quarantined else None
+        docs = shared_quarantines(getattr(leases, "objects", None), by_name,
+                                  log=lambda line: print(line, file=sys.stderr, flush=True))
+        quarantined = set(docs)  # an unreadable record counts as one
+        note = quarantine_note(docs)
         if note:  # said once, and on every waiting line: not just "no free node"
             print(f"[launcher] node leases: island {key}: {note}", file=sys.stderr, flush=True)
 

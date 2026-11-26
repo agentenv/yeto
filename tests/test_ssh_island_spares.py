@@ -125,8 +125,9 @@ class Cluster(FakeCluster):
 
 
 @pytest.fixture(autouse=True)
-def _health(monkeypatch):
+def _health(monkeypatch, tmp_path):
     monkeypatch.setattr(isp, "_checker_for", lambda family, **kw: FakeChecker())
+    monkeypatch.setattr("yeto.runs.RUNS_DIR", tmp_path / "runs")  # the run dir (lease record) of make_ops' run1
 
 
 # node_health.Reading by its agreed fields (verdict, result.facts, degraded)
@@ -462,7 +463,8 @@ def test_a_released_node_can_be_picked_again(tmp_path):
     lost = ops.islands["isl"].spec.nodes[1]
     cluster.unreachable.discard("b300-1")  # repaired
     clock.t += 61
-    assert ops.relaunch(None, "isl") is None  # still quarantined: not picked
+    assert ops.relaunch(None, "isl") is None  # still quarantined: not picked (its owed stop retried)
+    join_stops(spares)
     leases = FakeLeases(held={"b300-1": "run1/trainer@launcher-a"})
     leases.keep_all(nodes=[lost])  # kept while it was quarantined
     ok, message = isp.release_node(spares.records, lost, cluster, kill_grace_s=1, leases=leases)
@@ -904,7 +906,8 @@ def test_the_release_node_command_parses_its_flags_and_runs_release_node_main(tm
         "release-node", "b300-1", True, False, 5)
     lines = []
     assert crn.main(args, ssh=cluster, objects=store, say=lines.append) == 0
-    assert "dry run: would check b300-1, run 1 stop(s)" in lines[-1]
+    assert any("dry run: would check b300-1, run 1 stop(s)" in ln for ln in lines)
+    assert lines[-1] == "[yeto]   no lease store: no lease to end"
     assert store.read("fleet/nodes/b300-1/quarantine.json") is not None
     args = parser.parse_args(["release-node", "b300-9", "--inventory", inv, "--store", str(tmp_path / "store")])
     assert crn.main(args, ssh=cluster, objects=store, say=lines.append) == 2  # not in the inventory
