@@ -29,6 +29,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
+
 TUNNEL_EVENT = "rl_agentic_tunnel"
 
 
@@ -88,7 +90,7 @@ def tunnel_loop(ssh_argv: Sequence[str], events: str | Path, *, settle_s: float 
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="python -m yeto.launch.agentic_node_agent")
+    p = ExactArgumentParser(prog="python -m yeto.launch.agentic_node_agent")
     sub = p.add_subparsers(dest="cmd", required=True)
     t = sub.add_parser("tunnel")
     t.add_argument("--events", required=True)

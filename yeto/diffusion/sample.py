@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from .. import accel
 from ..models import resolve
 
@@ -18,7 +19,7 @@ DIFFUSION_ADAPTER_SCHEMA_VERSION = 1
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Sample from a Yeto diffusion adapter artifact")
+    p = ExactArgumentParser(description="Sample from a Yeto diffusion adapter artifact")
     p.add_argument("--adapter-dir", required=True, help="directory written by yeto.diffusion.learner")
     p.add_argument("--prompt", default=None)
     p.add_argument("--output", default=None, help="single-sample output image file or frame directory")

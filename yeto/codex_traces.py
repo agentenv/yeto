@@ -8,7 +8,6 @@ and JSONL files are also accepted as a fallback.
 
 from __future__ import annotations
 
-import argparse
 import base64
 import json
 import os
@@ -17,6 +16,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+from yeto.exact_argparse import ExactArgumentParser
 
 
 CHAT_ROLES = {"system", "user", "assistant", "tool"}
@@ -671,7 +672,7 @@ def _has_trainable_pair(messages: list[dict[str, Any]]) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(
+    p = ExactArgumentParser(
         description="Convert Codex/Puffer ATIF trajectories or session logs to Yeto chat JSONL."
     )
     p.add_argument("--input", nargs="+", required=True, help="Input trace files or directories")

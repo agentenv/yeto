@@ -39,7 +39,6 @@ engine.
 
 from __future__ import annotations
 
-import argparse
 import csv
 import hashlib
 import json
@@ -51,6 +50,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.rl.engine.cut import MANIFEST_NAME, CutError, load_manifest
 from yeto.rl.engine.resume import ROUND_CUTS
 from yeto.rl.rewards.registry import RewardPlugin, load_reward
@@ -385,7 +385,7 @@ def _load_callable(ref: str) -> Callable[..., Any]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m yeto.rl.eval.offline_cuts", description=__doc__.split("\n")[0])
+    ap = ExactArgumentParser(prog="python -m yeto.rl.eval.offline_cuts", description=__doc__.split("\n")[0])
     ap.add_argument("--store", required=True, help="checkpoint store root of the run")
     ap.add_argument("--cut-root", help="cut directory (default <store>/round-cuts)")
     ap.add_argument("--heldout", required=True, help="held-out JSONL (prompt + label per row)")

@@ -27,13 +27,14 @@ Checks:
 """
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import re
 import statistics
 import sys
 from pathlib import Path
+
+from yeto.exact_argparse import ExactArgumentParser
 
 OUTER = re.compile(r"outer step (.*)")
 RESPONDERS = re.compile(r"responders=\[([^\]]*)\]")
@@ -190,7 +191,7 @@ def check(run_dir: Path, learners: int = 2) -> dict:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser()
+    parser = ExactArgumentParser()
     parser.add_argument("run_dir")
     parser.add_argument("--json", default=None)
     args = parser.parse_args(argv)

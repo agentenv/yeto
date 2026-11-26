@@ -22,13 +22,13 @@ Needs ``torch``, ``transformers`` and ``huggingface_hub``.
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import sys
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from .full_parameter import DEFAULT_MAX_FRAGMENT_BYTES
 
 
@@ -76,7 +76,7 @@ def plan(model: str, model_revision: str, *, fragments: int, matrix_merge: str,
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m yeto.rl.adapters.verl.full_parameter_plan",
+    parser = ExactArgumentParser(prog="python -m yeto.rl.adapters.verl.full_parameter_plan",
                                      description=__doc__.split("\n\n")[0])
     parser.add_argument("--model", required=True)
     parser.add_argument("--model-revision", required=True)

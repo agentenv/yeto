@@ -23,7 +23,6 @@ The npu1 uplink is ~0.2 MB/s to Nebius, so a 120B release (a 13 GB delta,
 """
 from __future__ import annotations
 
-import argparse
 import errno
 import hashlib
 import json
@@ -36,6 +35,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.rl.engine import file_verify
 
 SCHEMA = "yeto.s29.cut-manifest/v1"
@@ -314,7 +314,7 @@ def place(manifest: Mapping[str, Any], staged: Path, store: Path, *,
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="cut_manifest")
+    p = ExactArgumentParser(prog="cut_manifest")
     sub = p.add_subparsers(dest="cmd", required=True)
     m = sub.add_parser("make")
     m.add_argument("--store", required=True)

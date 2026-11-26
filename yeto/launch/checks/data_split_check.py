@@ -40,7 +40,6 @@ Checks:
 
 from __future__ import annotations
 
-import argparse
 import json
 import shlex
 import sys
@@ -49,6 +48,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.rl.engine.data_split import rows_of_runs
 from yeto.rl.engine.timeline import validate_round_data_rows
 
@@ -251,7 +251,7 @@ def check(records: Iterable[Mapping[str, Any]], *, plan: Mapping[str, Any] | Non
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = ExactArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("tapes", nargs="+")
     parser.add_argument("--plan", default=None,
                         help="the launch plan (plan.json): the slots of trainer islands fed by sampler islands")

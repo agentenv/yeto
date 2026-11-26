@@ -38,7 +38,6 @@ The reference model (``--ref-load``) is the release as well.
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
@@ -46,6 +45,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from yeto.exact_argparse import ExactArgumentParser
 from .policy_release import (
     FULL,
     LORA,
@@ -394,7 +394,7 @@ def _base_path(model: str, revision: str | None) -> str:
 
 
 def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = ExactArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--release", required=True, help="latest, r<seq>-v<version> or a version")
     parser.add_argument("--store", default=None, help="the island's store path (default: the object stage)")
     parser.add_argument("--model", required=True)
@@ -447,7 +447,7 @@ def cli(argv: list[str] | None = None, environ: Mapping[str, str] | None = None)
     import sys
     import traceback
 
-    probe = argparse.ArgumentParser(add_help=False)
+    probe = ExactArgumentParser(add_help=False)
     probe.add_argument("--out", default=None)
     out = probe.parse_known_args(argv)[0].out
     failure = None if out is None else Path(out).expanduser() / FAILURE_FILE

@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
+from yeto.exact_argparse import ExactArgumentParser
 from . import accel
 from .autobatch import exact_grad_accum, int_or_auto, resolve_micro_batch_size
 from .causal_kernels import (
@@ -66,7 +67,7 @@ log = logging.getLogger("learner")
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Yeto learner")
+    p = ExactArgumentParser(description="Yeto learner")
     p.add_argument("--model", required=True, help="HF model id or an alias from yeto/models.py (gemma4, qwen35-9b, llama31-8b, gptoss-120b, ...)")
     p.add_argument("--data", required=True, help="HF dataset id")
     p.add_argument(

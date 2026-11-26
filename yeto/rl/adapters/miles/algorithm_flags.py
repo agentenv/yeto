@@ -31,6 +31,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.rl.engine.algorithm import (
     CRITIC_ESTIMATORS,
     AlgorithmSpec,
@@ -495,7 +496,7 @@ def dry_run(argv: Sequence[str] | None = None) -> dict[str, Any]:
     from yeto.rl.engine.capabilities import CapabilityMismatch
     from .entry import miles_capabilities
 
-    parser = argparse.ArgumentParser(prog="python3 -m yeto.rl.adapters.miles.algorithm_flags")
+    parser = ExactArgumentParser(prog="python3 -m yeto.rl.adapters.miles.algorithm_flags")
     parser.add_argument("--dry-run", action="store_true", required=True)
     parser.add_argument("--rl-algorithm-spec", default=None)
     parser.add_argument("--extra", default="", help="extra Miles argv (one shell string)")

@@ -39,6 +39,8 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
+
 logger = logging.getLogger(__name__)
 
 RUN_LABEL_ENV = "YETO_SANDBOX_RUN_LABEL"  # yeto.sandbox.trial_labels.RUN_LABEL_ENV
@@ -203,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     import argparse  # noqa: PLC0415
     import json  # noqa: PLC0415
 
-    parser = argparse.ArgumentParser(prog="python -m yeto.rl.harness.harbor.agentenv_labels")
+    parser = ExactArgumentParser(prog="python -m yeto.rl.harness.harbor.agentenv_labels")
     sub = parser.add_subparsers(dest="cmd", required=True)
     rel = sub.add_parser("release")
     rel.add_argument("--shard", required=True)

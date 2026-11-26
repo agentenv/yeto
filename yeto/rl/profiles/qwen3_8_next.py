@@ -21,12 +21,13 @@ Nothing here imports Miles.
 
 from __future__ import annotations
 
-import argparse
 import dataclasses
 import json
 import shlex
 import sys
 from collections.abc import Sequence
+
+from yeto.exact_argparse import ExactArgumentParser
 
 PROFILE_NAME = "qwen3_8_next_4layer_lora"
 
@@ -464,7 +465,7 @@ def _quote(tokens: Sequence[str]) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python3 -m yeto.rl.profiles.qwen3_8_next")
+    parser = ExactArgumentParser(prog="python3 -m yeto.rl.profiles.qwen3_8_next")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("model-args", help="Megatron model args (shell-quoted, one line)")
     conv = sub.add_parser("convert-command", help="HF -> torch_dist conversion command")

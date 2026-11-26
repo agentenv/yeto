@@ -36,7 +36,6 @@ on a GPU.
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import os
@@ -46,6 +45,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
+
+from yeto.exact_argparse import ExactArgumentParser
 
 SCHEMA = "yeto.rl.quant.gate/v1"
 
@@ -226,7 +227,7 @@ def _load_criteria(path: str | None) -> GateCriteria:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="python -m yeto.rl.quant.gate", description=__doc__.splitlines()[0])
+    p = ExactArgumentParser(prog="python -m yeto.rl.quant.gate", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("collect", help="run both engines on a prompt file and gate")
     c.add_argument("--engines", required=True, help='JSON file {"quant": <engine section>, "bf16": <engine section>}')

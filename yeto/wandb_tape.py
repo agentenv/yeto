@@ -21,7 +21,6 @@ function and is what the tests pin.
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import os
@@ -31,6 +30,7 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from yeto.exact_argparse import ExactArgumentParser
 from .rl.engine.merge_metrics import MergeMetricsFolder
 from .wandb_logger import NullRun, WandbRun
 
@@ -361,7 +361,7 @@ def replay(
 
 def main(argv=None) -> int:
     """Replay a finished event tape into a W&B run (offline analysis)."""
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p = ExactArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("tape", help="path to a syncer --event-tape JSONL file")
     p.add_argument("--wandb-project", default="yeto")
     p.add_argument("--wandb-entity", default=None)

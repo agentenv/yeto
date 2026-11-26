@@ -28,11 +28,13 @@ import time
 import numpy as np
 import torch
 
+from yeto.exact_argparse import ExactArgumentParser
+
 log = logging.getLogger("mlx-learner")
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser("yeto.mlx.learner")
+    p = ExactArgumentParser("yeto.mlx.learner")
     p.add_argument("--model", required=True, help="HF id or yeto/models.py alias")
     p.add_argument("--data", required=True)
     p.add_argument(

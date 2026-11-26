@@ -57,6 +57,7 @@ falling back to the ``AWS_*`` name. Requests are signed with SigV4, path style.
 from __future__ import annotations
 
 import argparse
+import functools
 import datetime
 import hashlib
 import hmac
@@ -860,8 +861,10 @@ def _stages(text: str | None):
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="weights_sync", description=__doc__.split("\n\n")[0])
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    parser = argparse.ArgumentParser(prog="weights_sync", description=__doc__.split("\n\n")[0], allow_abbrev=False)
+    # full option names only, the subcommands too (this file runs alone on a node: no yeto import)
+    sub = parser.add_subparsers(dest="cmd", required=True,
+                                parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     run = sub.add_parser("sync", help="copy model@revision from the source under --root")
     run.add_argument("--source", required=True)
     run.add_argument("--root", required=True)

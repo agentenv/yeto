@@ -58,6 +58,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.launch.rollout.offers import PRICES_8GPU, Candidate, candidates, load_prices  # noqa: F401 - re-exported
 
 REPO = Path(__file__).resolve().parents[3]
@@ -553,7 +554,7 @@ def provider_ops(a: argparse.Namespace, cands: list[Candidate], envs: list[str],
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p = ExactArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--cluster-prefix", required=True, help="must match --own-name-re; clusters are PREFIX-<n>")
     p.add_argument("--own-name-re", default=os.environ.get("YETO_SPOT_OWN_NAME_RE") or DEFAULT_OWN_NAME,
                    help="regex our cluster names match; nothing else is ever deleted "

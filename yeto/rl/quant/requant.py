@@ -57,6 +57,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from yeto.exact_argparse import ExactArgumentParser
 from . import scope as quant_scope
 from .awq import AwqSmoothing
 from .fp8 import FP8_DTYPE, quantize_fp8_per_channel
@@ -713,7 +714,7 @@ def _smoothing_from_args(args: argparse.Namespace) -> AwqSmoothing:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="python -m yeto.rl.quant.requant", description=__doc__.splitlines()[0])
+    p = ExactArgumentParser(prog="python -m yeto.rl.quant.requant", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     t = sub.add_parser("template", help="record the layout of a reference quantized checkpoint (W4A8 or MXFP4)")
     t.add_argument("checkpoint")

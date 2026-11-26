@@ -42,6 +42,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.config_errors import CONFIG_ERROR_EXIT, CONFIG_ERROR_MARKER, ISLAND_STOP_EXIT, ISLAND_STOP_MARKER
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -2495,7 +2496,7 @@ class RoutingOps:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
+    p = ExactArgumentParser(
         prog="python -m yeto.modal_runner",
         description="Join a running Yeto fleet from a Modal GPU container "
         "(the fleet must have been launched with --external-learners).",

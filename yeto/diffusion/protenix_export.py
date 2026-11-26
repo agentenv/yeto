@@ -8,12 +8,13 @@ consume via ``protenix_batch_path``.
 
 from __future__ import annotations
 
-import argparse
 import json
 import shlex
 from copy import deepcopy
 from pathlib import Path
 from typing import Mapping
+
+from yeto.exact_argparse import ExactArgumentParser
 
 
 def _deep_update(base: dict, update: Mapping) -> dict:
@@ -26,7 +27,7 @@ def _deep_update(base: dict, update: Mapping) -> dict:
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(
+    p = ExactArgumentParser(
         description="Export pre-collated Protenix batches for Yeto training"
     )
     p.add_argument("--model-name", default="protenix_base_default_v1.0.0")

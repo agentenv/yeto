@@ -37,7 +37,6 @@ CLI (one pass or a loop)::
 
 from __future__ import annotations
 
-import argparse
 import json
 import shutil
 import sys
@@ -46,6 +45,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.rl.engine.policy_release import (
     FULL,
     PolicyRelease,
@@ -242,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from .awq import AwqSmoothing
 
-    p = argparse.ArgumentParser(prog="python -m yeto.rl.quant.release", description=__doc__.splitlines()[0])
+    p = ExactArgumentParser(prog="python -m yeto.rl.quant.release", description=__doc__.splitlines()[0])
     p.add_argument("--store", required=True, help="the run's checkpoint store (as the trainer island mounts it)")
     p.add_argument("--template", required=True)
     p.add_argument("--recipe")

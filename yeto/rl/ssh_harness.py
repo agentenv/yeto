@@ -19,6 +19,7 @@ from typing import Any
 
 import torch
 
+from yeto.exact_argparse import ExactArgumentParser
 from . import (
     MILES_NEXT_COMMIT,
     MILES_NEXT_REPOSITORY,
@@ -3291,7 +3292,7 @@ def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="yeto-rl-ssh", description=__doc__)
+    parser = ExactArgumentParser(prog="yeto-rl-ssh", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     prepare_parser = commands.add_parser("prepare")
     prepare_parser.add_argument(

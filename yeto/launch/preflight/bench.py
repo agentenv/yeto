@@ -27,6 +27,7 @@ Modes:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import socket
@@ -245,8 +246,10 @@ def run_collectives(ops: list[str], sizes: list[int], *, iters: int, warmup: int
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = parser.add_subparsers(dest="mode", required=True)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
+    # full option names only, the subcommands too (this file runs alone on a node: no yeto import)
+    sub = parser.add_subparsers(dest="mode", required=True,
+                                parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     ports = sub.add_parser("ports", help="listen on ports and dial the same ports on the peers")
     ports.add_argument("--ports", required=True, help="comma-separated TCP ports")
     ports.add_argument("--peers", default="", help="comma-separated peer addresses")

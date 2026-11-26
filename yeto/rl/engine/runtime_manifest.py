@@ -24,7 +24,6 @@ drift into a warning; a missing interface always refuses).
 
 from __future__ import annotations
 
-import argparse
 import importlib
 import json
 import subprocess
@@ -33,6 +32,8 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from yeto.exact_argparse import ExactArgumentParser
 
 MANIFEST_SCHEMA = "yeto-rl-runtime-manifest-v1"
 
@@ -264,7 +265,7 @@ def certify(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = ExactArgumentParser(description=__doc__)
     parser.add_argument("--image", help="image reference with @sha256 digest")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--check", type=Path, help="validate an existing manifest against pins")

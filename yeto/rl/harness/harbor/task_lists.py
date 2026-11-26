@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.rl.harness.reward_env import benchmark as bm
 
 BENCHMARK = "tb2"
@@ -452,7 +453,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """``python -m yeto.rl.harness.harbor.task_lists rows|images ...`` (any Harbor task directory)."""
     import argparse
 
-    p = argparse.ArgumentParser(prog="python -m yeto.rl.harness.harbor.task_lists")
+    p = ExactArgumentParser(prog="python -m yeto.rl.harness.harbor.task_lists")
     p.add_argument("what", choices=("rows", "images"))
     p.add_argument("--tasks-dir", required=True)
     p.add_argument("--benchmark", help="task set name (default: tb2 / tb2.1 by layout)")

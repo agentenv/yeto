@@ -120,7 +120,6 @@ Nothing here was run on a PPU or NPU node.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import dataclasses
@@ -136,6 +135,7 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from .engine_sampler import START_EVENT, EngineSamplerConfig, PromptItem, Reward, build_engine_sampler
 from .sampler_checks import PostLoadChecks
 from .data_split import DataSlot
@@ -1752,7 +1752,7 @@ def main(argv: Sequence[str] | None = None, *, default_data_path: str | None = N
          prog: str = "python -m yeto.rl.engine.engine_sampler") -> int:
     """``default_data_path``: the ``data_path`` of a spec that names none (the spot
     sampler entry passes ``syncer``)."""
-    parser = argparse.ArgumentParser(prog=prog, description="run a sampler island from a spec file")
+    parser = ExactArgumentParser(prog=prog, description="run a sampler island from a spec file")
     parser.add_argument("--spec", required=True, help="the sampler spec JSON (module doc)")
     args = parser.parse_args(argv)
     deadline = ReclaimDeadline()

@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
+
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -307,7 +309,7 @@ def build_subset(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = ExactArgumentParser(description=__doc__)
     parser.add_argument("--parent-jsonl", type=Path, required=True)
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--ordered-task-ids", type=Path)

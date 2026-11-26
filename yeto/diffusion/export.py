@@ -15,6 +15,7 @@ from pathlib import Path
 
 import torch
 
+from yeto.exact_argparse import ExactArgumentParser
 from .. import accel
 from ..export import Checkpoint, parse_checkpoint, validate_against_layout
 from ..fragments import FragmentLayout, build_layout
@@ -29,7 +30,7 @@ from .learner import (
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(
+    p = ExactArgumentParser(
         prog="yeto-diffusion-export",
         description="Export a syncer checkpoint into a Diffusers/PEFT adapter directory.",
     )

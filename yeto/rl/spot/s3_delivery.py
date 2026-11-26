@@ -40,7 +40,6 @@ string to upload every release).
 """
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -52,6 +51,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.rl.spot import peer_fanout
 from yeto.rl.spot_rollout import cut_manifest as cm
 
@@ -393,7 +393,7 @@ def pull_loop(s3: S3, store: Path, interval: float, *, peers: Sequence[str] = ()
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="s3_delivery")
+    p = ExactArgumentParser(prog="s3_delivery")
     p.add_argument("cmd", choices=["publish", "publish-loop", "pull", "pull-loop", "pointer"])
     p.add_argument("release", nargs="?")
     p.add_argument("--store", required=True, type=Path)

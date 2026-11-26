@@ -32,7 +32,6 @@ neutral core and a directory backend. Cloud backends live with their cloud code.
 
 from __future__ import annotations
 
-import argparse
 import fnmatch
 import hashlib
 import io
@@ -46,6 +45,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Protocol
+
+from yeto.exact_argparse import ExactArgumentParser
 
 CODE_PACK_MODE_GIT_PATCH = "git-patch"
 CODE_PACK_MODE_RELEASE = "release"
@@ -722,7 +723,7 @@ def _resolve_release_pack(old_record, previous, release_image: str, *,
 # CLI (island setup / operators)
 # ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m yeto.codepack")
+    parser = ExactArgumentParser(prog="python -m yeto.codepack")
     sub = parser.add_subparsers(dest="cmd", required=True)
     verify = sub.add_parser("verify", help="check an unpacked tree against a digest")
     verify.add_argument("--dir", default=".")

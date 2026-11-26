@@ -4,15 +4,15 @@ plane's tombstone for an assignment (an unreadable one included) that keeps its 
 
 from __future__ import annotations
 
-import argparse
 import sys
 from collections.abc import Sequence
 
+from yeto.exact_argparse import ExactArgumentParser
 from .runtime import add_run_args, run_cli
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m yeto.node", description="the yeto sampler node runtime")
+    parser = ExactArgumentParser(prog="python -m yeto.node", description="the yeto sampler node runtime")
     sub = parser.add_subparsers(dest="command", required=True)
     add_run_args(sub.add_parser("run", help="start this node's assigned sampler and report it in the store"))
     revoke = sub.add_parser("revoke", help="replace a ticket's assignment with a tombstone that keeps its generation")

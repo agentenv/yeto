@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
@@ -13,6 +12,7 @@ from pathlib import Path
 
 import torch
 
+from yeto.exact_argparse import ExactArgumentParser
 from ..export import parse_checkpoint, validate_against_layout
 from ..tensor_io import apply_fragment
 from .engine.selection import RL_MATRIX_MERGES
@@ -529,7 +529,7 @@ def export_rl_checkpoint(
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(
+    parser = ExactArgumentParser(
         prog="yeto-rl-export",
         description="Export a committed Yeto RL checkpoint as a PEFT adapter.",
     )

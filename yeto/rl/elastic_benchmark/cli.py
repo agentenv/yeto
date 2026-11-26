@@ -12,6 +12,7 @@ import json
 import sys
 from pathlib import Path
 
+from yeto.exact_argparse import ExactArgumentParser
 from yeto.rl.elastic_benchmark import capabilities as caps
 from yeto.rl.elastic_benchmark import results as results_mod
 from yeto.rl.elastic_benchmark.manifest import (
@@ -26,7 +27,7 @@ from yeto.rl.elastic_benchmark.plan import build_plan, plan_as_dict, render_plan
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = ExactArgumentParser(
         prog="benchmark_rl_elastic",
         description="Plan and report RL elastic resource benchmark studies (no GPU work here).",
     )

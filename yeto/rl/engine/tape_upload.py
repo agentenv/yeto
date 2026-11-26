@@ -39,6 +39,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from yeto.exact_argparse import ExactArgumentParser
+
 TAPES_PREFIX = "tapes"
 INTERVAL_ENV = "YETO_RL_TAPE_UPLOAD_S"
 DEFAULT_INTERVAL_S = 30.0
@@ -339,7 +341,7 @@ def main(argv: Any = None) -> int:
     import sys  # noqa: PLC0415
     import time  # noqa: PLC0415
 
-    parser = argparse.ArgumentParser(prog="python -m yeto.rl.engine.tape_upload")
+    parser = ExactArgumentParser(prog="python -m yeto.rl.engine.tape_upload")
     sub = parser.add_subparsers(dest="cmd", required=True)
     ev = sub.add_parser("event", help="push the stdin event lines into the run store")
     ev.add_argument("--store", required=True)
