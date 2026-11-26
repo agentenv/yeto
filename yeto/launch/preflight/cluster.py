@@ -474,13 +474,40 @@ HOST_SECTIONS_BASE = (
 )
 
 
-def host_sections(node: Node) -> list[tuple[str, str]]:
-    paths = ["/", "/var/lib/containerd", "$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)",
-             *[shlex.quote(p) for p in sorted(node.mounts)]]
+def engine_command(engine: str = "docker", sudo: bool = False) -> str:
+    """The container engine as a node runs it: ``sudo -n <engine>`` with ``sudo`` (the
+    rootful store of an ssh sampler pool's ``container.sudo``), else ``<engine>``."""
+    return ("sudo -n " if sudo else "") + engine
+
+
+def podman_root(sudo: bool = False) -> str:
+    """podman's storage graphroot (nothing printed when podman does not say: the image
+    store's disk is then not confirmed, :func:`host_checks`)."""
+    return f"{engine_command('podman', sudo)} info --format '{{{{.Store.GraphRoot}}}}' 2>/dev/null"
+
+
+
+def host_sections(node: Node, *, engine: str = "docker", sudo: bool = False) -> list[tuple[str, str]]:
+    """The host probe's sections. ``engine`` ``podman``: the image root read is podman's
+    storage graphroot (section ``podman_root``) instead of docker's data root; ``sudo``:
+    the engine runs as ``sudo -n <engine>`` (its rootful store). docker without sudo:
+    the sections of the preflight, unchanged."""
+    if engine == "podman":
+        root = f"$({podman_root(sudo)})"
+    elif sudo:
+        root = f"$({engine_command(engine, sudo)} info -f '{{{{.DockerRootDir}}}}' 2>/dev/null || echo /var/lib/docker)"
+    else:
+        root = "$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+    paths = ["/", "/var/lib/containerd", root, *[shlex.quote(p) for p in sorted(node.mounts)]]
+    extra = [("podman_root", podman_root(sudo))] if engine == "podman" else []
+    base = list(HOST_SECTIONS_BASE)
+    if sudo and engine == "docker":  # the docker info the image root and docker checks read: through sudo too
+        base = [(name, f"{engine_command(engine, sudo)} info --format '{{{{json .}}}}'" if name == "docker" else cmd)
+                for name, cmd in base]
     disk = ("for p in " + " ".join(f'"{p}"' if p.startswith("$(") else p for p in paths) + "; do "
             "if [ -e \"$p\" ]; then printf '%s\\t%s\\t%s\\n' \"$p\" \"$(findmnt -n -o FSTYPE -T \"$p\" 2>/dev/null)\" "
             "\"$(df -P -k \"$p\" | tail -1)\"; else printf '%s\\t-\\tmissing\\n' \"$p\"; fi; done")
-    return [*HOST_SECTIONS_BASE, ("disk", disk)]
+    return [*base, *extra, ("disk", disk)]
 
 
 CONTAINER_SECTIONS = (
@@ -509,6 +536,8 @@ class NodeState:
     tools: dict[str, str] = field(default_factory=dict)
     ports_from_container: bool = False
     pulled: bool = True
+    engine: str = "docker"  # the container engine whose image root and pull are checked
+    sudo: bool = False  # the engine runs as sudo -n <engine> (a pool's container.sudo: its rootful store)
 
     @property
     def name(self) -> str:
@@ -700,11 +729,22 @@ def host_checks(state: NodeState, req: Requirements, *, multi: bool, image: str 
             want = "/var/lib/containerd" if snap else str(info.get("DockerRootDir") or "/var/lib/docker")
             label = f"{want} ({'containerd image store' if snap else 'docker data root'})"
             image_roots = {label: d for d in disks if d.path == want}  # noqa: B035 - one path
+        fix = "move it to NVMe (docker data-root; bind-mount /var/lib/containerd: it does not follow data-root)"
+        if state.engine == "podman":
+            root = h["podman_root"].text.strip() if _ok(h.get("podman_root")) else ""
+            image_roots = {f"{root} (podman graphroot)": d for d in disks if root and d.path == root}
+            fix = "move it to NVMe (graphroot in /etc/containers/storage.conf)"
+            if not image_roots:
+                who = engine_command("podman", state.sudo)
+                why = (f"`{who} info` printed no storage graphroot" if not root
+                       else f"the graphroot {root} that `{who} info` printed is not on the node")
+                add("disk_images", FAIL, f"cannot confirm the disk of the image store: {why}",
+                    f"check that `{who} info` runs on the node" + (" (sudo -n: passwordless sudo)" if state.sudo
+                                                                    else ""))
         for label, d in image_roots.items():
             if d.free_gib < req.min_image_root_free_gib:
-                add("disk_images", FAIL, f"{label} on {d.mountpoint}: {d.free_gib:.0f} GiB free",
-                    "move it to NVMe (docker data-root; bind-mount /var/lib/containerd: it does not "
-                    "follow data-root)", free_gib=d.free_gib)
+                add("disk_images", FAIL, f"{label} on {d.mountpoint}: {d.free_gib:.0f} GiB free", fix,
+                    free_gib=d.free_gib)
             else:
                 add("disk_images", PASS, f"{label} on {d.mountpoint}: {d.free_gib:.0f} GiB free")
     # docker
@@ -1072,8 +1112,14 @@ class ClusterPreflight:
                  req: Requirements | None = None, steps: Steps | None = None, out_dir: Path | None = None,
                  log: Callable[[str], None] = lambda m: print(m, file=sys.stderr, flush=True),
                  clock: Callable[[], float] = time.time, max_parallel: int = 32,
-                 inventory: Sequence[Node] | None = None) -> None:
+                 inventory: Sequence[Node] | None = None, engine: str = "docker", sudo: bool = False) -> None:
+        """``engine``: the container engine whose image root the host probe checks and
+        that :meth:`pull` pulls with (``docker``, the trainer's; ``podman`` for
+        ``yeto image adopt`` on podman nodes); ``sudo``: it runs as ``sudo -n <engine>``
+        (an ssh sampler pool's ``container.sudo``: the rootful store)."""
         self.nodes = list(nodes)
+        self.engine = engine
+        self.sudo = bool(sudo)
         self.inventory = list(inventory) if inventory is not None else None  # decides "grouped"
         # nodes, or node pairs, at once. At least 2: the two ends of a pair (ib_write_bw
         # server and client, the two NCCL ranks) must run together, or the server waits
@@ -1089,7 +1135,7 @@ class ClusterPreflight:
         self.log = log
         self.clock = clock
         self.multi = len(self.nodes) > 1
-        self.states = [NodeState(n) for n in self.nodes]
+        self.states = [NodeState(n, engine=engine, sudo=self.sudo) for n in self.nodes]
 
     # -- helpers
     def _raw(self, step: str, name: str, text: str) -> None:
@@ -1148,6 +1194,23 @@ class ClusterPreflight:
             (self.out_dir / "preflight.txt").write_text(report.table())
         return report
 
+    def pull(self, *, blocking: Sequence[str] = ("ssh", "host_probe", "disk_images")) -> tuple[list[Check], bool]:
+        """``(checks, pulled)``: ssh and the host probes on every node, then, when no node
+        failed a ``blocking`` check (an unreachable node, an image root without room for
+        the image), the image pull on every docker node (``yeto image adopt``'s pre-pull).
+        ``pulled`` is False when the pull was not run or a node's pull failed."""
+        checks = self.hosts()
+        if any(c.status == FAIL and c.name in blocking for c in checks):
+            return checks, False
+        checks += self._pull([s for s in self.states if s.reachable])
+        return checks, all(c.status != FAIL for c in checks if c.name == "image_pull")
+
+    def hosts(self) -> list[Check]:
+        """ssh and the host probes on every node (the disk, docker and card checks of the
+        host): what ``yeto image adopt`` asks of its probe node before the image runs there."""
+        checks = self._reach()
+        return checks + self._host([s for s in self.states if s.reachable])
+
     def _reach(self) -> list[Check]:
         self.log(f"[preflight] ssh + clock on {len(self.states)} node(s)")
 
@@ -1182,7 +1245,8 @@ class ClusterPreflight:
         self.log(f"[preflight] host probes on {len(live)} node(s)")
 
         def one(state: NodeState) -> list[Check]:
-            _, text = self._run(state.node, probe_script(host_sections(state.node)), 300.0, "host")
+            _, text = self._run(state.node, probe_script(host_sections(state.node, engine=state.engine,
+                                                                       sudo=state.sudo)), 300.0, "host")
             state.host = parse_sections(text)
             if not state.host:
                 return [Check(state.name, "host_probe", FAIL, f"the host probe printed nothing: {_tail(text, 200)}",
@@ -1195,13 +1259,15 @@ class ClusterPreflight:
         return [c for cs in self._parallel(one, live) for c in cs]
 
     def _pull(self, live: Sequence[NodeState]) -> list[Check]:
-        docker = [s for s in live if s.node.runtime == "docker"]
-        self.log(f"[preflight] docker pull on {len(docker)} node(s)")
+        engine, command = self.engine, engine_command(self.engine, self.sudo)
+        # docker: the nodes that run docker (the trainer's); another engine: every node it was asked for
+        docker = [s for s in live if s.node.runtime == "docker"] if engine == "docker" else list(live)
+        self.log(f"[preflight] {command} pull on {len(docker)} node(s)")
 
         def one(state: NodeState) -> Check:
             image = str(self.image or state.node.image)
             t0 = self.clock()
-            rc, text = self._run(state.node, f"docker pull -q {shlex.quote(image)}", 3600.0, "pull")
+            rc, text = self._run(state.node, f"{command} pull -q {shlex.quote(image)}", 3600.0, "pull")
             if rc == 0:
                 return Check(state.name, "image_pull", PASS, f"{image[:90]} ({self.clock() - t0:.0f} s)")
             state.pulled = False
@@ -1211,7 +1277,7 @@ class ClusterPreflight:
                        "docker/miles-ports/make_layer.py")
             elif "no space left" in text.lower():
                 fix = "free the docker data root / /var/lib/containerd (put them on NVMe)"
-            return Check(state.name, "image_pull", FAIL, f"docker pull failed (rc {rc}): {_tail(text, 240)}", fix)
+            return Check(state.name, "image_pull", FAIL, f"{command} pull failed (rc {rc}): {_tail(text, 240)}", fix)
 
         return self._parallel(one, docker)
 

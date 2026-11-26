@@ -675,3 +675,21 @@ def test_the_kept_file_is_written_through_a_temporary_file_of_its_own(tmp_path, 
     ops.images_path().with_suffix(".tmp").mkdir(parents=True)  # another writer's fixed temporary path
     assert ops.image_for(ops.conf.nodes[0]) == REF3
     assert json.loads(ops.images_path().read_text())["images"]["b300-0"]["ref"] == REF3
+
+
+def test_a_spare_naming_its_own_image_does_not_turn_the_catalog_off(tmp_path, capsys):
+    from yeto.launch.rl_backend import resolve_default_rl_image
+
+    inv = _inventory(tmp_path, catalog=write_catalog(tmp_path / "c.yaml", record()), nodes=2)
+    doc = yaml.safe_load(inv.read_text())
+    doc["nodes"][0]["roles"] = ["trainer"]
+    doc["nodes"][1].update(roles=["trainer-spare"], image="registry.example/site/spare@sha256:" + "e" * 64)
+    inv.write_text(yaml.safe_dump(doc))
+    args = _args(inv)
+    resolve_default_rl_image(args)
+    assert args.rl_image == "docker:" + record()["ref"]  # the island's node names no image: the site record
+    doc["nodes"][0]["image"] = doc["nodes"][1].pop("image")  # the island's own node names one: no catalog
+    inv.write_text(yaml.safe_dump(doc))
+    args = _args(inv)
+    resolve_default_rl_image(args)
+    assert args.rl_image != "docker:" + record()["ref"]
