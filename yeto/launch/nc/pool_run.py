@@ -477,6 +477,14 @@ def model_problems(uri: str, env_file: str | os.PathLike[str]) -> list[str]:
     return model_check.store_problems(elastic.s3_fence_store(uri, env_file).objects, uri)
 
 
+def _node_runtime_sky(cfg: dict[str, Any]) -> bool:
+    """A sky pool on the node runtime (:func:`cli.node_image_lines`' route): the node pulls
+    ``model_pull`` into the ``dest`` the spec names, under ``/models/``."""
+    section = cfg.get("provider") or {}
+    return (str(section.get("kind") or "") == "sky" and cfg.get("sampler_route") in (None, "docker")
+            and cfg.get("data_path", "r2") == "r2" and cli.node_runtime_on(cfg))
+
+
 def store_layout_problems(cfg: dict[str, Any], env_file: str | os.PathLike[str], bucket: str) -> list[str]:
     """Store-layout checks of ``pool --dry-run``: ``run_prefix`` does not repeat
     ``runs/``, the model is in the bucket (a missing upload otherwise surfaces only
@@ -491,7 +499,14 @@ def store_layout_problems(cfg: dict[str, Any], env_file: str | os.PathLike[str],
     if not pull:
         return problems
     dest = str(pull.get("dest", ssh_sampler.MODEL_HOST)).rstrip("/")
-    if dest != ssh_sampler.MODEL_HOST:
+    if _node_runtime_sky(cfg):  # the node's model plan: any /models/... path the spec names
+        from yeto.node import ssh_docker  # noqa: PLC0415
+
+        try:
+            ssh_docker.container_dest(dest)
+        except ssh_docker.SshDockerError as error:
+            problems.append(str(error))
+    elif dest != ssh_sampler.MODEL_HOST:
         problems.append(f"model_pull.dest {dest!r}: the sampler container mounts only {ssh_sampler.MODEL_HOST} "
                         f"(at {ssh_sampler.MOUNTS[ssh_sampler.MODEL_HOST]}); leave dest unset")
     uri = f"s3://{bucket}/{str(pull['src_key']).strip('/')}"

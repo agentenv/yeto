@@ -1464,11 +1464,15 @@ class Run:
         from yeto.launch.preflight.gate import commands_for_launch_argv  # noqa: PLC0415
 
         commands = commands_for_launch_argv([str(a) for a in self.cfg["trainer"]["argv"]])
-        if not commands:
-            return True
         shown = "; ".join("yeto " + " ".join(c) for c in commands)
         if dry_run:
-            _log(f"dry run: before ordering, run up would run the trainer's cluster preflight: {shown}")
+            if commands:
+                _log(f"dry run: before ordering, run up would run the trainer's cluster preflight: {shown}")
+            ok = self.own_nodes_reach()
+            if ok:
+                self.log_own_nodes_spend()
+            return ok
+        if not commands:
             return True
         ok = all(self._cmd(self.yeto(*c), log="preflight.log", timeout=CLUSTER_PREFLIGHT_TIMEOUT_S) == 0
                  for c in commands)
@@ -1479,6 +1483,93 @@ class Run:
             _log(f"cluster preflight failed: {shown} (see {self.dir / 'preflight.log'} and the report in the "
                  "trainer's run dir; --skip-preflight skips it)")
         return ok
+
+    def own_node_targets(self) -> list[tuple[Any, tuple[Any, ...]]]:
+        """``(node, endpoints)`` of every own (SSH inventory) node of the run: the nodes of
+        the trainer's ``ssh:`` islands (the run store and the trainer image's registry) and
+        of each ``provider.kind: ssh`` pool (its store and image registry)."""
+        from yeto.launch.preflight.cluster import resolve_nodes  # noqa: PLC0415
+        from yeto.launch.preflight.gate import argv_value, launch_endpoints, ssh_entries  # noqa: PLC0415
+
+        argv = [str(a) for a in self.cfg["trainer"]["argv"]]
+        inventory = argv_value(argv, "--rl-node-inventory")
+        out = []
+        for entry in ssh_entries(argv_value(argv, "--gpu")):
+            nodes = resolve_nodes(entry, inventory)
+            endpoints = tuple(launch_endpoints(argv, self.env, nodes))
+            out += [(node, endpoints) for node in nodes]
+        for ref in self.pools:
+            cfg = ref.load()
+            if str((cfg.get("provider") or {}).get("kind") or "") != "ssh":
+                continue
+            from yeto.launch import ssh_sampler_pool  # noqa: PLC0415
+
+            out += ssh_sampler_pool.egress_targets(cfg)
+        return out
+
+    def own_nodes_reach(self, *, ops: Any = None) -> bool:
+        """``yeto run up --dry-run`` on own nodes: every node of :meth:`own_node_targets`
+        reaches its endpoints from its own network (checked there over SSH,
+        ``yeto.launch.preflight.cluster.egress_preflight``). False (each node and endpoint
+        logged) when one does not: the run up orders nothing. True without own nodes."""
+        from yeto.launch.node_inventory import InventoryError  # noqa: PLC0415
+        from yeto.launch.preflight.cluster import egress_preflight  # noqa: PLC0415
+        from yeto.launch.preflight.gate import egress_lines  # noqa: PLC0415
+
+        try:
+            targets = self.own_node_targets()
+        except (InventoryError, OSError, ValueError) as error:
+            _log(f"dry run: own nodes: {error}")
+            return False
+        if not targets:
+            return True
+        groups: dict[tuple[Any, ...], dict[str, Any]] = {}  # endpoints -> the nodes (once each) that reach them
+        for node, endpoints in targets:
+            groups.setdefault(endpoints, {}).setdefault(node.name, node)
+        ok = True
+        for endpoints, by_name in groups.items():
+            nodes = list(by_name.values())
+            shown = ", ".join(f"{e.role} {e.url}" for e in endpoints) or "no endpoint (ssh only)"
+            _log(f"dry run: own nodes {', '.join(n.name for n in nodes)}: checking over ssh that they reach {shown}")
+            report = egress_preflight(nodes, list(endpoints), ops=ops, log=lambda m: None)
+            for line in egress_lines(report):
+                _log(f"dry run: {line}")
+            ok &= report.ok
+        if not ok:
+            _log("dry run: an own node cannot reach what the run needs: fix its network (the lines above name "
+                 "each node and endpoint); nothing is ordered")
+        return ok
+
+    def log_own_nodes_spend(self) -> None:
+        """The hourly spend a dry run of a single-trainer run on own nodes estimates: the
+        pools at their node price (own ``kind: ssh`` nodes at 0) plus ``trainer.usd_per_h``
+        (0 on own nodes). A fleet logs its own estimate (:meth:`fleet_budget_lines`)."""
+        from yeto.launch.preflight.gate import argv_value, ssh_entries  # noqa: PLC0415
+
+        argv = [str(a) for a in self.cfg["trainer"]["argv"]]
+        own = ssh_entries(argv_value(argv, "--gpu"))
+        if self.fleet_plan() is not None or not (own or any(ref.kind() == "ssh" for ref in self.pools)):
+            return
+        rows = []
+        for i, ref in enumerate(self.pools):
+            try:
+                target = self.pool_target(None, i)
+            except Exception:  # noqa: BLE001 - an unreadable pool config: the pool dry-run says so
+                target = 0
+            rows.append((ref.name, ref.kind(), max(0, int(target)), max(0.0, self.node_usd_per_h(i))))
+        pools_h = sum(n * price for _name, _kind, n, price in rows)
+        trainer_h = max(0.0, float(up_consistency.number_or_default(self.cfg["trainer"], "usd_per_h", 0) or 0))
+        hourly = pools_h + trainer_h
+        listed = ", ".join(f"{name} ({kind}) {n} x ${price:g}" for name, kind, n, price in rows)
+        trainer = f"trainer ${trainer_h:g}/h" + (f" (own nodes: {', '.join(own)})" if own else "")
+        line = f"dry run: spend estimate ${hourly:.2f}/h = pools ${pools_h:.2f}/h ({listed}) + {trainer}"
+        wall_h = self.breaker_param("run.wall_clock", "hours")
+        usd = self.breaker_param("run.budget", "usd")
+        if wall_h is not None:
+            line += f"; over the {wall_h:g} h wall clock ${hourly * wall_h:.2f}"
+        if usd is not None:
+            line += f" (budget.usd ${usd:g})"
+        _log(line)
 
     def sandbox_prepare(self) -> bool:
         if not self.envs:

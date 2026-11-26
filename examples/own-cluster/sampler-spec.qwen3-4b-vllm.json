@@ -1,0 +1,66 @@
+{
+  "_comment": [
+    "Engine sampler spec of one Qwen3-4B vLLM sampler (one L40S, bf16, in-place reload) on a sky",
+    "spot VM (run.own-trainer-sky-sampler.json and the cloud island of run.fleet-own-and-cloud.json):",
+    "the SSH + docker node route mounts the pulled model (model_pull) at /models and the work",
+    "directory at /work; the route renders the store, shard and sampler id at start",
+    "(__RUN_PREFIX__ is the pool's run_prefix). docs/OWN_CLUSTERS.md."
+  ],
+  "sampler_id": "qwen3-4b-0",
+  "platform": "cuda",
+  "rollout_fields": {
+    "top_logprobs_num": 0
+  },
+  "engine": {
+    "factory": "yeto.rl.adapters.sampler_engines.from_spec:build",
+    "adapter": "vllm-server",
+    "server": {
+      "base_dir": "/models/Qwen3-4B",
+      "port": 30000,
+      "card_model": "L40S",
+      "device_family": "cuda",
+      "engine_version": "vllm@0.11.0",
+      "precision": "bf16",
+      "quant_scheme": "bf16",
+      "topology": "tp1",
+      "max_model_len": 8192,
+      "in_place_reload": true,
+      "start_timeout_s": 1800.0,
+      "extra_args": []
+    },
+    "options": {
+      "tp": 1,
+      "max_num_seqs": 64
+    }
+  },
+  "sampling": {
+    "max_tokens": 2048,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "n": 8
+  },
+  "num_rollouts": 1000000,
+  "max_backlog_groups": "auto",
+  "max_prompt_tokens": 1024,
+  "store": "/work/stage/<bucket>/runs/__RUN_PREFIX__",
+  "prompts": {
+    "path": "/work/prompts.jsonl",
+    "input_key": "question",
+    "label_key": "answer",
+    "groups_per_round": 2,
+    "format": "chat",
+    "tokenizer": "/models/Qwen3-4B",
+    "dispense": {
+      "backend": "store",
+      "namespace": "task-dispense"
+    }
+  },
+  "reward": "yeto.rl.gsm8k_reward:score",
+  "reward_kind": "miles",
+  "checks": {
+    "require_fixed_answers": false
+  },
+  "incarnation_lease": true,
+  "event_tape": "/work/sampler/events-__RUN_PREFIX__.jsonl"
+}

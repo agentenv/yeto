@@ -882,13 +882,16 @@ def price_problem(name: str, entry_usd_per_h: float | None, pool_cfg: dict[str, 
     """A pool of a USD-priced provider without a positive hourly price (with a spend cap set):
     the run's spend estimate would count its islands at $0. The entry's ``usd_per_h`` wins
     over the provider section's ``price_usd_h``; National Compute (ucr) is priced by
-    ``budget.nc_usd_per_h`` and never refused here."""
+    ``budget.nc_usd_per_h`` and never refused here, nor is an ssh pool of own nodes (they bill
+    nothing)."""
     from yeto.launch.nc.cli import pool_price  # noqa: PLC0415
     from yeto.launch.pool import provider as providers  # noqa: PLC0415
 
     kind = providers.kind_of(pool_cfg) or "factory"
     entry = providers.registered(kind)
     if entry is None or entry.caps.currency != "usd":
+        return None
+    if kind == "ssh":  # the operator's own nodes: $0 an hour unless the config states a price (pool_price)
         return None
     unpriced = ""
     if entry_usd_per_h is not None:

@@ -14,7 +14,7 @@ from __future__ import annotations
 import shlex
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import IO, Any
 
@@ -25,6 +25,7 @@ from .cluster import (
     SKIP,
     WARN,
     ClusterPreflight,
+    Endpoint,
     Report,
     Steps,
     requirements_from_env,
@@ -73,6 +74,70 @@ def commands_for_launch_argv(argv: Sequence[str]) -> list[list[str]]:
     """The preflight commands of a ``yeto launch`` argv (``yeto run up``'s trainer)."""
     return preflight_commands(argv_value(argv, "--gpu"), argv_value(argv, "--rl-node-inventory"),
                               argv_value(argv, "--cluster-prefix"), argv_value(argv, "--rl-image"))
+
+
+DOCKER_HUB = "registry-1.docker.io"
+
+
+def registry_endpoint(image: str | None) -> Endpoint | None:
+    """The registry an image is pulled from (``https://<host>/``; Docker Hub for a
+    reference without a registry host); None for no image or a placeholder."""
+    ref = str(image or "").strip().removeprefix("docker:")
+    if not ref or "<" in ref:
+        return None
+    first, sep, _rest = ref.partition("/")
+    host = first if sep and ("." in first or ":" in first or first == "localhost") else DOCKER_HUB
+    return Endpoint("registry", f"https://{host}/", ref)
+
+
+def store_endpoint(store: str | None, environ: Mapping[str, str]) -> Endpoint | None:
+    """The object API the nodes use for the run store ``store``: an ``s3://`` store's
+    S3-compatible endpoint (``YETO_RL_STORE_S3_ENDPOINT_URL`` / ``AWS_ENDPOINT_URL`` / the
+    store profile's, else AWS S3 in the store's region), an ``oss://`` store's
+    ``YETO_RL_STORE_OSS_ENDPOINT_URL``. None for any other store (a host path, a Modal
+    Volume: nothing to reach over the network) or an endpoint not known here."""
+    from ...cloud import oss_store, s3_store
+
+    store = str(store or "")
+    if store.startswith("s3://"):
+        url = s3_store.store_endpoint(environ)
+        if not url:
+            region = s3_store.store_region(environ)
+            url = f"https://s3.{region}.amazonaws.com" if region and region != "auto" else "https://s3.amazonaws.com"
+    elif store.startswith("oss://"):
+        url = environ.get(oss_store.ENDPOINT_ENV)
+    else:
+        return None
+    if not url or "<" in url:
+        return None
+    return Endpoint("store", url if "://" in url else f"https://{url}", store)
+
+
+def launch_endpoints(argv: Sequence[str], environ: Mapping[str, str], nodes: Sequence[Any] = ()) -> list[Endpoint]:
+    """What the trainer nodes of a ``yeto launch`` argv reach: the run store
+    (``--rl-checkpoint-store``, its endpoint from ``--rl-object-store-endpoint`` or the
+    environment) and the registry of the trainer image (``--rl-image``, else the
+    inventory's, else the pinned default)."""
+    from ...cloud import s3_store
+
+    env = dict(environ)
+    endpoint = argv_value(argv, "--rl-object-store-endpoint")
+    if endpoint:
+        env[s3_store.ENDPOINT_ENV] = endpoint
+    image = argv_value(argv, "--rl-image") or next((n.image for n in nodes if getattr(n, "image", None)), None)
+    if not image:
+        from ...rl import default_rl_image
+
+        image = default_rl_image(recipe=argv_value(argv, "--rl-model-recipe"), tuning=argv_value(argv, "--tuning"))
+    found = [store_endpoint(argv_value(argv, "--rl-checkpoint-store"), env), registry_endpoint(image)]
+    return [e for e in found if e is not None]
+
+
+def egress_lines(report: Report) -> list[str]:
+    """One line per finding of an egress report that is not a PASS (the node, the check,
+    the endpoint and the fix)."""
+    return [f"[{c.status}] node {c.scope} {c.name}: {c.detail}" + (f" -> {c.fix}" if c.fix else "")
+            for c in report.checks if c.status != PASS]
 
 
 def _say(out: IO[str], line: str) -> None:

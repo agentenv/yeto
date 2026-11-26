@@ -1,0 +1,58 @@
+# Your own bare-metal cluster as yeto sees it: an SSH node inventory
+# (yeto/launch/node_inventory.py). docs/OWN_CLUSTERS.md explains each use.
+#
+# Two 8 x B300 trainer nodes (roles: [trainer]) and three 8 x H100 sampler
+# nodes (roles: [sampler]). The trainer templates use the trainer nodes; the
+# own-sampler-pool template uses the sampler nodes (two run a sampler, the
+# third is the spare a lost node's slot moves to).
+#
+# Replace the documentation addresses (192.0.2.x management, 198.51.100.x
+# cluster network), the SSH user, the interface, the HCA list and the paths
+# with your site's values. Own nodes bill nothing: the run's spend counts the
+# cloud parts only (the sampler pools on sky / Modal, a cloud trainer island).
+#
+# Check the file without touching a node:
+#   python -c "from yeto.launch.node_inventory import load_inventory; \
+#     print(len(load_inventory('inventory.own-nodes.yaml')))"
+# `yeto run up --config run.<template>.json --dry-run` then checks over SSH
+# that every node of the run reaches the run store and the image registry.
+
+nodes:
+  - &trainer
+    name: own-b300-0
+    host: ops@192.0.2.30              # SSH target from the control host
+    address: 198.51.100.30            # this node's IP on the cluster network
+    interface: bond0                  # NIC of the cluster IP (Ray, NCCL bootstrap)
+    device_family: cuda
+    cpu_arch: x86_64
+    card: B300
+    cards_per_node: 8
+    hbm_gib: 288
+    host_memory_gib: 2048
+    fabric: ib                        # ib or roce
+    runtime: docker
+    docker_args: [--gpus, all, --device, /dev/infiniband, --ulimit, "memlock=-1:-1",
+                  --ulimit, stack=67108864, --cap-add, IPC_LOCK]
+    scratch: /mnt/nvme/yeto           # run data under <scratch>/<run>
+    scratch_min_free_gib: 500
+    roles: [trainer]
+    env:
+      NCCL_IB_HCA: "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
+  - {<<: *trainer, name: own-b300-1, host: ops@192.0.2.31, address: 198.51.100.31}
+  - &sampler
+    name: own-smp-0
+    host: ops@192.0.2.40
+    address: 198.51.100.40
+    device_family: cuda
+    cpu_arch: x86_64
+    card: H100
+    cards_per_node: 8
+    hbm_gib: 80
+    host_memory_gib: 1024
+    fabric: tcp                       # a sampler node needs no RDMA
+    runtime: docker
+    mounts:
+      /data/models: /data/models      # Qwen3-4B weights and the prompts, put there once
+    roles: [sampler]
+  - {<<: *sampler, name: own-smp-1, host: ops@192.0.2.41, address: 198.51.100.41}
+  - {<<: *sampler, name: own-smp-2, host: ops@192.0.2.42, address: 198.51.100.42}

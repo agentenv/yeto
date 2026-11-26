@@ -1643,6 +1643,86 @@ def _size(nbytes: int) -> str:
     return str(nbytes)
 
 
+# ------------------------------------------------------------ egress checks
+REACH_CONNECT_S = 10
+REACH_TOTAL_S = 20
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """One address the nodes reach from their own network: the run store's object API
+    (``role`` ``store``) or the image registry (``registry``). ``source``: what it serves
+    (the store URI, the image), for the finding."""
+    role: str
+    url: str
+    source: str = ""
+
+    @property
+    def host_port(self) -> tuple[str, int]:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(self.url)
+        return parsed.hostname or "", parsed.port or (80 if parsed.scheme == "http" else 443)
+
+
+def reach_command(endpoint: Endpoint) -> str:
+    """Bash that reaches ``endpoint`` from the node: an HTTPS request with ``curl`` (any
+    HTTP answer, 403 included, means the network path and TLS work), else a TCP connect
+    by bash's ``/dev/tcp``. Exit 0 when it reached it."""
+    host, port = endpoint.host_port
+    url = shlex.quote(endpoint.url)
+    tcp = shlex.quote(f"exec 3<>/dev/tcp/{host}/{port}")
+    return (f"if command -v curl >/dev/null 2>&1; then curl -sS -o /dev/null --connect-timeout {REACH_CONNECT_S} "
+            f"-m {REACH_TOTAL_S} -w 'http %{{http_code}}\\n' {url}; "
+            f"else timeout {REACH_CONNECT_S} bash -c {tcp} && echo 'tcp open (no curl on the node)'; fi")
+
+
+def reach_sections(endpoints: Sequence[Endpoint]) -> list[tuple[str, str]]:
+    return [(f"reach{i}", reach_command(e)) for i, e in enumerate(endpoints)]
+
+
+def reach_checks(name: str, endpoints: Sequence[Endpoint], sections: Mapping[str, Section]) -> list[Check]:
+    """One check per endpoint of node ``name`` from its probe (:func:`reach_sections`)."""
+    out = []
+    for i, e in enumerate(endpoints):
+        sec = sections.get(f"reach{i}")
+        what = f"the {e.role} endpoint {e.url}" + (f" ({e.source})" if e.source else "")
+        fix = ("open the node's egress to it (firewall, proxy: https_proxy in the node's environment, DNS)"
+               if e.role == "store" else
+               "open the node's egress to the registry, or mirror the image to a registry the node reaches")
+        if sec is None or sec.rc is None:
+            out.append(Check(name, f"reach_{e.role}", FAIL, f"{what}: the probe printed nothing", fix,
+                             {"url": e.url}))
+        elif sec.rc != 0:
+            out.append(Check(name, f"reach_{e.role}", FAIL,
+                             f"{name} cannot reach {what} (rc {sec.rc}): {_tail(sec.text, 200)}", fix,
+                             {"url": e.url}))
+        else:
+            out.append(Check(name, f"reach_{e.role}", PASS, f"{what}: {_tail(sec.text, 60)}", data={"url": e.url}))
+    return out
+
+
+def egress_preflight(nodes: Sequence[Node], endpoints: Sequence[Endpoint], *, ops: SshOps | None = None,
+                     log: Callable[[str], None] = lambda m: print(m, file=sys.stderr, flush=True),
+                     clock: Callable[[], float] = time.time) -> Report:
+    """Whether every node of ``nodes`` reaches ``endpoints`` from its own network: the
+    ssh check of :class:`ClusterPreflight`, then one probe per reachable node. A node that
+    takes no ssh fails its ssh check (nothing else runs there). Writes no report file."""
+    run = ClusterPreflight(nodes, ops=ops, log=log, clock=clock)
+    checks = run._reach()
+    live = [s for s in run.states if s.reachable]
+    if endpoints and live:
+        log(f"[preflight] egress to {len(endpoints)} endpoint(s) from {len(live)} node(s)")
+        script = probe_script(reach_sections(endpoints))
+
+        def one(state: NodeState) -> list[Check]:
+            _, text = run._run(state.node, script, 2.0 * REACH_TOTAL_S * len(endpoints) + 60.0, "reach")
+            return reach_checks(state.name, endpoints, parse_sections(text))
+
+        checks += [c for cs in run._parallel(one, live) for c in cs]
+    return Report(checks)
+
+
 # --------------------------------------------------------------------- CLI
 def resolve_nodes(gpu: str, inventory: str | None) -> list[Node]:
     """The trainer nodes of ``--gpu ssh:<NxMxCARD>`` with ``--rl-node-inventory``, or of

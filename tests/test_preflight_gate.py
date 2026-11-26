@@ -1,6 +1,7 @@
 """The cluster preflight a launch of an ``ssh:`` trainer island runs first
 (``yeto launch`` and ``yeto run up``): FAIL refuses, WARN prints, ``--skip-preflight``
-skips, a dry run only prints the command."""
+skips, a dry run prints the command (``yeto run up --dry-run`` also checks the nodes'
+egress to the store and the registry over ssh)."""
 
 from __future__ import annotations
 
@@ -172,14 +173,27 @@ def test_run_up_runs_the_cluster_preflight_then_the_trainer_skips_it(make_up):
     assert run.trainer_argv()[-1] == "--skip-preflight"
 
 
-def test_run_up_cluster_preflight_failure_and_dry_run(make_up, capsys):
+def test_run_up_cluster_preflight_failure_and_dry_run(make_up, capsys, tmp_path, monkeypatch):
+    from tests.test_own_cluster_templates import FakeSsh
+
     run = make_up(SSH_ARGV, rc=1)
     assert not run.cluster_preflight()
     assert "--skip-preflight" not in run.trainer_argv()
     assert "cluster preflight failed" in "".join(capsys.readouterr())
-    run = make_up(SSH_ARGV)
+    # a dry run runs no `yeto preflight`: it prints it, and checks the nodes' egress over ssh
+    monkeypatch.setattr(cp, "SshOps", FakeSsh)
+    FakeSsh.unreachable, FakeSsh.calls = set(), []
+    argv = ["--gpu", "ssh:2x8xb300", "--rl-node-inventory", str(_inventory(tmp_path)), "--cluster-prefix", "k31-bm",
+            "--rl-checkpoint-store", "s3://b/runs/r1", "--rl-object-store-endpoint", "https://store.example"]
+    run = make_up(argv)
     assert run.cluster_preflight(dry_run=True) and not run.calls
-    assert "would run the trainer's cluster preflight: yeto preflight --gpu ssh:6x8xb300" in "".join(
+    out = "".join(capsys.readouterr())
+    assert "would run the trainer's cluster preflight: yeto preflight --gpu ssh:2x8xb300" in out
+    assert "dry run: own nodes b300-0, b300-1: checking over ssh that they reach store https://store.example" in out
+    assert {node for node, _ in FakeSsh.calls} == {"b300-0", "b300-1"}
+    FakeSsh.unreachable = {("b300-1", "https://store.example")}
+    assert not make_up(argv).cluster_preflight(dry_run=True)
+    assert "[FAIL] node b300-1 reach_store: b300-1 cannot reach the store endpoint https://store.example" in "".join(
         capsys.readouterr())
 
 
@@ -207,6 +221,7 @@ def test_run_up_main_refuses_before_ordering_and_skip_reaches_the_trainer(make_u
     monkeypatch.setattr(run, "wait_first_group", lambda: None)
     monkeypatch.setattr(run, "trainer", lambda: order.append(run.trainer_argv()))
     monkeypatch.setattr(run, "dashboard", lambda: None)
+    monkeypatch.setattr(run, "own_nodes_reach", lambda **kw: True)  # test_own_cluster_templates checks it
     assert up.main(_up_args()) == 2 and order == []
     assert up.main(_up_args(dry_run=True)) == 0 and order == []
     assert up.main(_up_args(skip_preflight=True)) == 0

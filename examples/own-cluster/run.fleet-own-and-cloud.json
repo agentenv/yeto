@@ -1,0 +1,165 @@
+{
+  "comment": "Two-island fleet of one own island and one cloud island: async GRPO of Qwen3-4B (full parameters, decoupled), island 0 trains on 2 own 8 x B300 nodes (SSH + Docker, inventory.own-nodes.yaml) with sky spot L40S samplers, island 1 on Modal (1 x 2 x B300: the syncer merges islands of one card type) with Modal L40S samplers; one syncer merges them. Own nodes bill nothing (island 0 trainer usd_per_h 0): the spend is the pools', the Modal trainer's and the syncer's. docs/OWN_CLUSTERS.md, 'Trainer with cloud samplers'. yeto run up --config THIS.json --dry-run (it checks over SSH that the own nodes reach the store and the registry), then without --dry-run.",
+  "run": "<run>",
+  "store": "s3://<bucket>/runs/<run>",
+  "budget": {
+    "usd": 120,
+    "wall_h": 4,
+    "nc_usd_per_h": 0
+  },
+  "first_group": {
+    "timeout_s": 4800,
+    "poll_s": 60
+  },
+  "fleet": {
+    "dispense": "fleet",
+    "trainer_argv": [
+      "--training-mode",
+      "rl",
+      "--cluster-prefix",
+      "<run>",
+      "--rl-node-inventory",
+      "<inventory.own-nodes.yaml>",
+      "--model",
+      "Qwen/Qwen3-4B",
+      "--model-revision",
+      "<model-revision>",
+      "--data",
+      "<prompts.jsonl>",
+      "--reward-function",
+      "yeto.rl.gsm8k_reward:score",
+      "--trust-remote-code",
+      "--tuning",
+      "full",
+      "--rl-sync-preset",
+      "decoupled",
+      "--fragments",
+      "4",
+      "--rl-parameter-layout-sha256",
+      "auto",
+      "--local-rl-rounds-per-sync",
+      "4",
+      "--rl-max-policy-age",
+      "2",
+      "--rl-algorithm-spec",
+      "<algorithm-spec.async-age2-tis.json>",
+      "--rollout-batch-size",
+      "16",
+      "--n-samples-per-prompt",
+      "8",
+      "--rollout-max-response-len",
+      "2048",
+      "--seq-len",
+      "4096",
+      "--inner-lr",
+      "1e-6",
+      "--total-steps",
+      "40",
+      "--rl-stall-timeout",
+      "1800",
+      "--rl-checkpoint-store",
+      "s3://<bucket>/runs/<run>",
+      "--rl-object-store-endpoint",
+      "<store-endpoint>"
+    ]
+  },
+  "islands": [
+    {
+      "name": "own",
+      "trainer": {
+        "gpu": "ssh:2x8xb300",
+        "usd_per_h": 0,
+        "argv": [
+          "--rl-release-every",
+          "2"
+        ]
+      },
+      "samplers": [
+        {
+          "name": "sky-l40s",
+          "provider": {
+            "kind": "sky",
+            "offers": [
+              {
+                "resources": {
+                  "infra": "nebius/eu-north1",
+                  "accelerators": "L40S:1",
+                  "use_spot": true
+                }
+              }
+            ],
+            "cluster_prefix": "<run>-smp",
+            "ssh_key": "<sky-ssh-key>",
+            "start_timeout_s": 1800,
+            "hard_cap_minutes": 1440
+          },
+          "target": 2,
+          "slots": [
+            1,
+            2,
+            3
+          ],
+          "shard_base": "<run>-sky",
+          "shard_limit": 4,
+          "spec": "<sampler-spec.qwen3-4b-vllm.json>",
+          "run_prefix": "<run>",
+          "r2_env_file": "<store.env>",
+          "model_pull": {
+            "src_key": "models/Qwen3-4B",
+            "dest": "/models/Qwen3-4B"
+          },
+          "sampler": {
+            "dispense": {
+              "backend": "store",
+              "namespace": "task-dispense"
+            }
+          },
+          "prompts_file": "<prompts.jsonl>"
+        }
+      ]
+    },
+    {
+      "name": "cloud",
+      "trainer": {
+        "gpu": "modal:1x2xb300",
+        "usd_per_h": 17.0,
+        "argv": [
+          "--rl-release-every",
+          "2"
+        ]
+      },
+      "samplers": [
+        {
+          "name": "modal-l40s",
+          "provider": {
+            "kind": "modal",
+            "image": "<sampler-image>",
+            "secret": "<modal-secret>",
+            "bucket": "<bucket>",
+            "gpu": "L40S",
+            "gpus": 1,
+            "cpu": 8,
+            "memory_gib": 64,
+            "model_volume": "<volume>"
+          },
+          "target": 1,
+          "slots": [
+            1,
+            2
+          ],
+          "shard_base": "<run>-modal",
+          "shard_limit": 4,
+          "spec": "<sampler-spec.qwen3-4b-vllm-modal.json>",
+          "run_prefix": "<run>",
+          "r2_env_file": "<store.env>",
+          "sampler": {
+            "dispense": {
+              "backend": "store",
+              "namespace": "task-dispense"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

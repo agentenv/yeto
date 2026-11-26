@@ -1,0 +1,110 @@
+{
+  "comment": "Own cluster as the trainer, cloud spot samplers: async GRPO of Qwen3-4B (full parameters) on 2 own 8 x B300 nodes (SSH + Docker, inventory.own-nodes.yaml, roles: [trainer]) fed by a sky spot pool of 1 x L40S VMs. Own nodes bill nothing (trainer.usd_per_h 0): the spend is the sampler pool's. docs/OWN_CLUSTERS.md, 'Trainer with cloud samplers'. yeto run up --config THIS.json --dry-run (it checks over SSH that the trainer nodes reach the store and the registry), then without --dry-run.",
+  "run": "<run>",
+  "store": "s3://<bucket>/runs/<run>",
+  "samplers": [
+    {
+      "name": "sky-l40s",
+      "provider": {
+        "kind": "sky",
+        "offers": [
+          {
+            "resources": {
+              "infra": "nebius/eu-north1",
+              "accelerators": "L40S:1",
+              "use_spot": true
+            }
+          }
+        ],
+        "cluster_prefix": "<run>-smp",
+        "ssh_key": "<sky-ssh-key>",
+        "start_timeout_s": 1800,
+        "hard_cap_minutes": 1440
+      },
+      "target": 2,
+      "slots": [
+        1,
+        2,
+        3
+      ],
+      "shard_base": "<run>",
+      "shard_limit": 8,
+      "spec": "<sampler-spec.qwen3-4b-vllm.json>",
+      "run_prefix": "<run>",
+      "r2_env_file": "<store.env>",
+      "model_pull": {
+        "src_key": "models/Qwen3-4B",
+        "dest": "/models/Qwen3-4B"
+      },
+      "sampler": {
+        "dispense": {
+          "backend": "store",
+          "namespace": "task-dispense"
+        }
+      },
+      "prompts_file": "<prompts.jsonl>"
+    }
+  ],
+  "trainer": {
+    "argv": [
+      "--training-mode",
+      "rl",
+      "--gpu",
+      "ssh:2x8xb300",
+      "--rl-node-inventory",
+      "<inventory.own-nodes.yaml>",
+      "--cluster-prefix",
+      "<run>",
+      "--model",
+      "Qwen/Qwen3-4B",
+      "--model-revision",
+      "<model-revision>",
+      "--data",
+      "<prompts.jsonl>",
+      "--reward-function",
+      "yeto.rl.gsm8k_reward:score",
+      "--trust-remote-code",
+      "--tuning",
+      "full",
+      "--rl-sample-role",
+      "trainer",
+      "--rl-single-island-no-sync",
+      "--controller",
+      "local",
+      "--rl-buffer-shards",
+      "<run>-0,<run>-1,<run>-2,<run>-3,<run>-4,<run>-5,<run>-6,<run>-7",
+      "--rl-checkpoint-store",
+      "s3://<bucket>/runs/<run>",
+      "--rl-object-store-endpoint",
+      "<store-endpoint>",
+      "--rl-algorithm-spec",
+      "<algorithm-spec.async-age2-tis.json>",
+      "--rl-max-policy-age",
+      "2",
+      "--rl-release-every",
+      "2",
+      "--rollout-batch-size",
+      "16",
+      "--n-samples-per-prompt",
+      "8",
+      "--rollout-max-response-len",
+      "2048",
+      "--seq-len",
+      "4096",
+      "--inner-lr",
+      "1e-6",
+      "--total-steps",
+      "40"
+    ],
+    "usd_per_h": 0
+  },
+  "first_group": {
+    "timeout_s": 4800,
+    "poll_s": 60
+  },
+  "budget": {
+    "usd": 30,
+    "wall_h": 6,
+    "nc_usd_per_h": 0
+  }
+}
