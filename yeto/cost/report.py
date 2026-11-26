@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .billing import CostSummary, ModalBilling, Rates, resource_costs
+from .egress import EgressMeter
 from .guard import TapeTail, record_time
 from .idle import _gpu_util, classify
 from .ledger import ResourceLedger
@@ -116,9 +117,10 @@ def cmd_cost(args) -> int:
         print(f"[cost] run {args.run}: no resource ledger at {led.path}")
         return 1
     billing = None if args.no_billing else ModalBilling()
-    summary = resource_costs(led.resources(), time.time(), rates=Rates.from_env(args.prices),
-                             billing=billing)
     globs = default_tape_globs(args.run) + list(args.tapes or [])
+    egress = EgressMeter().feed(TapeTail(globs).read())  # bytes the run's Modal trainer sent out of Modal
+    summary = resource_costs(led.resources(), time.time(), rates=Rates.from_env(args.prices),
+                             billing=billing, egress=egress.samples)
     rep = build_report(args.run, summary=summary, tape_globs=globs, gap_s=args.gap_minutes * 60)
     print(json.dumps(rep, indent=2, default=str) if args.json else format_report(rep))
     return 0

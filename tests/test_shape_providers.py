@@ -397,6 +397,7 @@ def test_modal_price_composes_gpu_cpu_memory_and_region(monkeypatch):
 
 
 def test_modal_offerings_unpinned_pinned_and_shape_rules(monkeypatch):
+    from yeto.shape import providers as p
     from yeto.shape.providers import ModalSignals
 
     sig = ModalSignals(cache=None)
@@ -416,9 +417,10 @@ def test_modal_offerings_unpinned_pinned_and_shape_rules(monkeypatch):
     assert by_region["eu-north"] == pytest.approx(eight.spot_price * 1.75, abs=1e-3)
     assert by_region["us"] == pytest.approx(eight.spot_price * 1.15, abs=1e-3)
     # Pinning is disclosed with the multiplier and its source.
+    recorded = p.MODAL_PRICES_RECORDED  # the oldest date of the GPU rows and host.modal
     assert sorted(sig.warnings) == [
-        "modal: region eu-north pinned at 1.75x (narrow region surcharge, modal.com/pricing as of 2026-09-23)",
-        "modal: region us pinned at 1.15x (broad region surcharge, modal.com/pricing as of 2026-09-23)",
+        f"modal: region eu-north pinned at 1.75x (narrow region surcharge, modal.com/pricing as of {recorded})",
+        f"modal: region us pinned at 1.15x (broad region surcharge, modal.com/pricing as of {recorded})",
     ]
     with pytest.raises(ValueError, match="unknown Modal region"):
         sig.offerings({"mars"}, None, None)
@@ -431,11 +433,12 @@ def test_modal_price_table_staleness_warning(monkeypatch):
 
     from yeto.shape import providers as p
 
-    assert p.modal_price_table_age_days(dt.date(2026, 9, 23)) == 0
+    recorded = p.MODAL_PRICES_RECORDED
+    assert p.modal_price_table_age_days(dt.date.fromisoformat(recorded)) == 0
     monkeypatch.setattr(p, "modal_price_table_age_days", lambda today=None: 120)
     sig = p.ModalSignals(cache=None)
     sig.offerings(None, ["H100"], None)
-    assert any("recorded 2026-09-23 (120 days ago)" in w for w in sig.warnings)
+    assert any(f"recorded {recorded} (120 days ago)" in w for w in sig.warnings)
 
 
 # --- Nebius ------------------------------------------------------------------

@@ -1778,7 +1778,11 @@ class ModalOps:
         if self._app is None:
             self._app = modal.App(self.app_name)
         gpus = getattr(self, "_ledger_gpus", {})
-        gpus[cfg.function_name] = (cfg.gpu, cfg.gpus_per_node * cfg.num_nodes)
+        # (gpu, gpus, cores, memory GiB, disk GiB) of every node: Modal bills the requested
+        # CPU and memory next to the GPUs (yeto.cost.billing.default_modal_rate)
+        disk = None if cfg.ephemeral_disk_gib is None else cfg.ephemeral_disk_gib * cfg.num_nodes
+        gpus[cfg.function_name] = (cfg.gpu, cfg.gpus_per_node * cfg.num_nodes, cfg.cpu_request * cfg.num_nodes,
+                                   cfg.memory_request_mib / 1024 * cfg.num_nodes, disk)
         self._ledger_gpus = gpus
         if cfg.function_name in self._functions:
             return self._functions[cfg.function_name]
@@ -1828,9 +1832,23 @@ class ModalOps:
 
         shapes = list(getattr(self, "_ledger_gpus", {}).values())
         gpu = shapes[0][0] if shapes else None
-        gpus = sum(n for _, n in shapes) or None
+        gpus = sum(s[1] for s in shapes) or None
         extra = {"gpu": gpu, "gpus": gpus} if gpu else {}
-        rate = modal_shapes_rate(shapes)  # every function's GPUs, mixed types summed
+        if gpu:
+            extra["cpu"] = sum(s[2] for s in shapes)
+            extra["memory_gib"] = sum(s[3] for s in shapes)
+            disks = [s[4] for s in shapes if s[4] is not None]
+            if disks:
+                extra["disk_gib"] = sum(disks)
+        # every function's GPUs (mixed types summed) plus the CPU and memory they request
+        rate = modal_shapes_rate(shapes)
+        egress = getattr(self, "ledger_egress", None) or {}
+        if gpu and egress.get("egress_events"):  # tape records that leave Modal (yeto.cost.egress)
+            extra["egress_events"] = list(egress["egress_events"])
+            if egress.get("egress_islands") is not None:
+                extra["egress_islands"] = sorted(int(i) for i in egress["egress_islands"])
+            if egress.get("egress_fallback_bytes"):
+                extra["egress_fallback_bytes"] = egress["egress_fallback_bytes"]
         if rate is not None:
             extra["usd_per_hour"] = rate
         # the intent carries the GPU shape so the budget counts the deploy span too

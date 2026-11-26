@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from .billing import CostSummary, ModalBilling, Rates, _ts, resource_costs, ts_or_none
+from .egress import EgressMeter
 from .idle import IdleConfig, IdleDetector
 from .ledger import Resource, ResourceLedger
 
@@ -154,6 +155,7 @@ class CostGuard:
         self.start_ts = clock() if start is None else start
         self.events_path = Path(events_path) if events_path else ledger.path.parent / EVENTS_FILE
         self.idle = IdleDetector(config.idle, self.start_ts)
+        self.egress = EgressMeter()  # what the run's Modal trainer sends out of Modal (its tape)
         self.warned_budget = False
         self.stop_reason: str | None = None
         self.stop_at: float | None = None
@@ -221,14 +223,16 @@ class CostGuard:
     def tick(self) -> CostSummary:
         now = self.clock()
         for path, rec in self.tapes.read():
-            self.idle.observe(rec, record_time(rec, now), source=path)
+            t = record_time(rec, now)
+            self.idle.observe(rec, t, source=path)
+            self.egress.observe(rec, t)
         resources = self.ledger.resources()
         # A reused run name keeps its ledger: what an earlier launch of that name
         # created and released before this guard started is not this launch's spend
         # (``yeto cost --run`` still reports the whole ledger). A resource still open
         # bills now and counts, whoever created it.
         counted = [r for r in resources if r.released_at is None or r.released_at >= self.start_ts]
-        summary = resource_costs(counted, now, rates=self.rates, billing=self.billing)
+        summary = resource_costs(counted, now, rates=self.rates, billing=self.billing, egress=self.egress.samples)
         self.last_summary = summary
         total = summary.total_usd
         self.emit("cost_tick", total_usd=round(total, 4), budget_usd=self.config.budget_usd,

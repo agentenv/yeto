@@ -286,6 +286,16 @@ class ModalSource(Source):
 
         modal_ops = ModalOps(modal_app_name(prov.args.cluster_prefix))
         modal_ops.ledger = prov.ledger
+        # which of the trainer's tape records count as egress out of Modal (yeto.cost.egress),
+        # and whose: the island ids its records carry (a launch's other islands are elsewhere)
+        from ..cost import egress as cost_egress
+
+        islands = [i.m for i in prov.batch(self.kind).values()]
+        if held is not None:
+            islands.append(prov.held.m)
+        modal_ops.ledger_egress = {"egress_events": cost_egress.egress_events(prov.args),
+                                   "egress_islands": cost_egress.tape_island_ids(prov.args, islands),
+                                   "egress_fallback_bytes": cost_egress.fallback_bytes(prov.args)}
         for cfg in [*cfgs, *([] if held is None else [held])]:
             modal_ops.define(cfg)
         print(f"[launcher] deploying Modal app {modal_ops.app_name} "
