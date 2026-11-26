@@ -8,7 +8,8 @@ round ahead of a slow one instead of training rounds whose progress the next
 broadcast overwrites and whose c_steps inflate its tokens^2/steps merge weight.
 
 Covered here: the pairing rule on fakes (who blocks, the half-timeout escape,
-the terminal phase, peer snapshots during the wait), the profile and the
+the terminal phase, peer snapshots during the wait, no push during a wait that
+would hold the wait itself), the profile and the
 launcher/island wiring (default off, hashes unchanged), and two islands of
 the real pairing and session (:class:`FullParameterSync`) against the real
 Rust syncer: a fast island and a slow island, with and without the cap.
@@ -170,6 +171,78 @@ async def test_the_wait_for_a_late_pull_gives_up_at_half_the_wait_timeout():
     pairing.local_round = 3
     assert await pairing.wait_for_lead() > 0  # past the give-up time: one poll, then trains on
     assert pairing.lead_wait_escapes == 2
+
+
+class _PeerPacedRole(_PairedRole):
+    """A role whose broadcast of a step arrives only once the peer island
+    pushed that step too (``peer_pushed``): a fixed roster's merge."""
+
+    def __init__(self, candidates):
+        super().__init__("actor", candidates, [], release_broadcasts=False)
+        self.peer_pushed: set[int] = set()
+
+    async def stage_available_broadcasts(self):
+        for step in [step for step in self._queued_steps if step in self.peer_pushed]:
+            self._queued_steps.remove(step)
+            self._staged_steps.append(step)
+        return await super().stage_available_broadcasts()
+
+
+@pytest.mark.asyncio
+async def test_with_k_1_the_wait_opens_no_pair_that_would_hold_it():
+    """A PULL that arrives during a K = 1 wait is not pushed from the cut the
+    island already pushed: that push would block the wait itself, so each
+    PULL arriving while the wait's pushes merge held the island one merge
+    longer (a slow island sat at its boundary while a fast island trained a
+    round per merge). The wait ends when the pushes it waited for merged; the
+    held PULL goes out at the next boundary, from the newer cut."""
+    role = _PeerPacedRole([_candidate(1, 1)])
+    pairing = _pairing(role, max_local_rounds_ahead=1, wait_timeout=2.0)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    served = []
+
+    async def serve():
+        served.append(len(served))
+        if len(served) == 1:
+            role.candidates.append(_candidate(2, 1))  # the next round opens during the wait
+        if len(served) == 3:
+            role.peer_pushed.add(1)  # the peer pushed step 1: it merges
+        return 0
+
+    assert await pairing.wait_for_lead(serve) > 0
+    assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 0)
+    assert pairing.inflight == {} and role.fragment_versions == (1, 0)
+    assert [step for _, step, _ in role.events] == [1]  # step 2 was not pushed from cut 1
+    pairing.local_round = 2
+    pairing.submit_ready()
+    assert [(key[0], pair.local_round) for key, pair in pairing.inflight.items()] == [(2, 2)]
+
+
+@pytest.mark.asyncio
+async def test_with_k_2_the_wait_still_pushes_a_pull_that_cannot_hold_it():
+    """With K = 2 a pair from the current cut does not block this wait (one
+    round may train on top of it), so the wait keeps answering PULLs."""
+    role = _PeerPacedRole([_candidate(1, 1)])
+    pairing = _pairing(role, max_local_rounds_ahead=2, wait_timeout=2.0)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    pairing.local_round = 2  # a round on top of the unmerged step 1: the next one waits
+    assert len(pairing.lead_blockers()) == 1
+    served = []
+
+    async def serve():
+        served.append(len(served))
+        if len(served) == 1:
+            role.candidates.append(_candidate(2, 2))
+        if len(served) == 3:
+            role.peer_pushed.add(1)
+        return 0
+
+    assert await pairing.wait_for_lead(serve) > 0
+    assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 0)
+    assert [step for _, step, _ in role.events] == [1, 2]
+    assert [(key[0], pair.local_round) for key, pair in pairing.inflight.items()] == [(2, 2)]
 
 
 @pytest.mark.asyncio
@@ -585,9 +658,12 @@ def test_real_syncer_fast_island_stays_within_the_cap_and_both_islands_join_ever
             assert not unmerged, (value, unmerged)
             # ... and only after it pushed from its newest cut (round r).
             assert value == 1 or value - 1 in fast_pushes.values(), (value, fast_pushes)
-    # So it stays close to the slow island: one round ahead, or two when
-    # the slow island itself waited under the cap at a boundary while its
-    # push from an older cut completed the fast island's merge.
+    # So it stays close to the slow island: one round ahead, or two when a
+    # PULL reached the fast island only after its boundary and the slow
+    # island's push of it, from the same cut as the round before, completed
+    # a second merge of the fast island. A K = 1 wait never pushes from the
+    # cut it already pushed, so a slow island's wait cannot chain such
+    # pushes (test_with_k_1_the_wait_opens_no_pair_that_would_hold_it).
     assert _max_lead(capped.log) <= 2
     waits = [fields for _, kind, who, (name, fields) in
              ((t, k, w, v) for t, k, w, v in capped.log if k == "event")
@@ -597,13 +673,11 @@ def test_real_syncer_fast_island_stays_within_the_cap_and_both_islands_join_ever
     # Not checked: that a second run with the same inputs gives the same bits.
     # Which local round a push carries depends on wall-clock order.  One slow
     # boundary closes two rounds a few ms apart (the syncer writes a checkpoint
-    # before each broadcast).  The fast island's lead wait polls every
-    # LEAD_WAIT_POLL_S and pushes before it applies broadcasts, and a pair
-    # holds a pipeline slot until its broadcast is applied.  If one poll sees
-    # both broadcasts, the wait ends and the next push carries one more local
-    # round (c_steps 2).  If a poll falls between them, the freed slot takes
-    # the next PULL from the current cut (c_steps 1) and the island waits a
-    # slow round longer.  Both schedules keep the cap.  The syncer orders a
+    # before each broadcast), and the syncer paces the PULLs of new rounds, so
+    # whether a PULL is visible at the fast island's boundary or arrives during
+    # its lead wait (then it is pushed at the next boundary, from the newer
+    # cut: a K = 1 wait pushes nothing from the cut it already pushed) depends
+    # on wall-clock order.  Both schedules keep the cap.  The syncer orders a
     # round's pushes by learner id (server.rs), so arrival order inside a
     # round does not change the merge.  _check_merges instead checks that the
     # result equals, up to float32 rounding, the merge of this run's pushes.

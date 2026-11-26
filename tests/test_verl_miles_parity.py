@@ -570,7 +570,7 @@ def run_catch_up_case(syncer_binary, tmp_path, monkeypatch, *, harness=_Fsdp2Har
 @needs_cargo
 def test_the_lead_cap_holds_a_fast_verl_island_to_the_slow_one(syncer_binary, tmp_path, monkeypatch):
     """K = 1 with a fixed roster (quorum 2): the fast island waits at its
-    boundaries for the slow island's pushes; the cap fields reach its tape."""
+    boundaries for the slow island's pushes; the cap fields reach its events."""
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "verl-parity-lead-cap-key")
     monkeypatch.setenv("TOKIO_WORKER_THREADS", "4")
     rounds, fragments = 4, len(_layout(matrix_merge="rda").fragments.fragments)
@@ -602,7 +602,12 @@ def test_the_lead_cap_holds_a_fast_verl_island_to_the_slow_one(syncer_binary, tm
     slow_rounds = [f for e, f in slow["events"] if e == "rl_full_parameter_round"]
     assert all(f["sync/max_local_rounds_ahead"] == 1 for f in fast_rounds)
     assert fast_rounds[-1]["sync/lead_waits"] > 0, fast_rounds[-1]
+    assert fast_rounds[-1]["sync/lead_wait_escapes"] == 0, fast_rounds[-1]  # no wait gave up and trained on
     # Without the cap the unpaced island would run hundreds of local rounds meanwhile.
+    # This bound once failed on a loaded host (11 rounds against 8): the slow island's
+    # lead wait pushed each PULL arriving during the wait from the cut it had already
+    # pushed and so held itself at its boundary while the fast island trained a round
+    # per merge. A K = 1 wait no longer pushes from that cut (RolePairing.wait_for_lead).
     assert len(fast_rounds) <= len(slow_rounds) + 2, (len(fast_rounds), len(slow_rounds))
     assert fast["final_ack"] == slow["final_ack"] == [{"acknowledged": True}]
 

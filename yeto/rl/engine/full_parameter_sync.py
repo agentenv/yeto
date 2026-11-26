@@ -313,6 +313,9 @@ class RolePairing:
         self.lead_waits = 0
         self.lead_wait_seconds = 0.0
         self.lead_wait_escapes = 0
+        # Set while a lead wait polls and must not open a pair that would hold
+        # the wait itself (:meth:`_wait_opens_no_blocker`).
+        self._no_new_pairs = False
         # Background pushes, decided at the first submit (a role
         # knows whether it can encode ahead once it is initialized); None
         # keeps every push on this thread.
@@ -441,7 +444,7 @@ class RolePairing:
                     # push is harvested, and is no replay.
                     continue
                 self._push_once(pair, observed, produced)
-            capacity = self.profile.effective_pipeline_depth - len(self.inflight)
+            capacity = self._new_pair_capacity()
             shared = sorted(set.intersection(*(set(keys) for keys in by_role.values())))
             if self.profile.partial_quorum:
                 # A round whose broadcast is staged or applied closed without
@@ -467,6 +470,12 @@ class RolePairing:
             self.fail_stop(error)
             raise
         return {role: RoleProgress(submissions=tuple(values)) for role, values in produced.items()}
+
+    def _new_pair_capacity(self) -> int:
+        """Pipeline slots for new pairs: none while a lead wait holds them."""
+        if self._no_new_pairs:
+            return 0
+        return self.profile.effective_pipeline_depth - len(self.inflight)
 
     def _replay_permits(
         self, by_role: Mapping[str, Mapping[LogicalKey, Any]]
@@ -500,7 +509,7 @@ class RolePairing:
                 role: _candidate_map(stream.ready_submission_candidates(include_deferred=True), role=role)
                 for role, stream in self.streams.items()
             }
-            capacity = self.profile.effective_pipeline_depth - len(self.inflight)
+            capacity = self._new_pair_capacity()
             shared = sorted(set.intersection(*(set(keys) for keys in by_role.values())) - set(self.inflight))
             if self.profile.partial_quorum:
                 shared = [key for key in shared if not self._round_closed(key[1], key[0])]
@@ -951,15 +960,34 @@ class RolePairing:
         limit = self.profile.max_local_rounds_ahead
         return limit is not None and self.retained_round <= self.local_round - limit
 
+    def _wait_opens_no_blocker(self) -> bool:
+        """Whether a lead wait poll must open no new pair.
+
+        A pair opened now is retained at :attr:`local_round`; it blocks this
+        wait when ``local_round <= local_round + 1 - K``, i.e. for K = 1.  Such a
+        pair is opened only for the push the wait waits for
+        (:meth:`lead_unpushed`).  Otherwise each PULL that arrives while the
+        wait's own pushes merge would add a push from the same, already pushed
+        cut and hold the wait one more merge: a slow island, whose pushes
+        complete the merges a fast island already pushed to, then sits at
+        its boundary while the fast island trains a round per merge, and the
+        fast island's lead grows without a bound.  The held PULLs are answered
+        at the next boundary, from the newer cut."""
+
+        limit = self.profile.max_local_rounds_ahead
+        return limit is not None and self.local_round <= self.local_round + 1 - limit and not self.lead_unpushed()
+
     async def wait_for_lead(self, serve: Any = None) -> float:
         """Lead cap: block at this boundary while :meth:`lead_blockers` is not
         empty or :meth:`lead_unpushed` holds.
 
-        The wait keeps the island's sync duties: every poll materializes and
-        pushes PULLs it has candidates for (from this boundary's cut), applies
-        arrived broadcasts, and runs ``serve`` (peer snapshots).  It stops at
-        once when the terminal phase starts (``any_finalizing``): the terminal
-        barrier then waits instead.
+        The wait keeps the island's sync duties: every poll replays and
+        harvests its pushes, applies arrived broadcasts, and runs ``serve``
+        (peer snapshots).  It materializes and pushes new PULLs (from this
+        boundary's cut) only where such a push cannot hold the wait itself
+        (:meth:`_wait_opens_no_blocker`).  It stops at once when the terminal
+        phase starts (``any_finalizing``): the terminal barrier then waits
+        instead.
 
         No new timer: each pair's wait timeout keeps running inside
         :meth:`submit_ready`, so a broadcast that never comes still fails
@@ -968,7 +996,8 @@ class RolePairing:
         ``wait_timeout`` since its last push, before that pair could time out.
         This also breaks a theoretical deadlock where each island waits for a
         push the other can make only after training (possible only when two
-        broadcasts reach the two islands in different orders).
+        broadcasts, or two PULLs a K = 1 wait holds, reach the two islands in
+        different orders).
 
         Returns the seconds this boundary waited."""
 
@@ -988,8 +1017,12 @@ class RolePairing:
               f"(lead cap {self.profile.max_local_rounds_ahead})", file=sys.stderr, flush=True)
         while True:
             await asyncio.sleep(poll)
-            await self.prepare_submissions()
-            self.submit_ready()
+            self._no_new_pairs = self._wait_opens_no_blocker()
+            try:
+                await self.prepare_submissions()
+                self.submit_ready()
+            finally:
+                self._no_new_pairs = False
             await self.commit_staged_broadcasts()
             if serve is not None:
                 await serve()
