@@ -112,26 +112,34 @@ def pool_problems(pools: Sequence[tuple[str, Mapping[str, Any]]],
     return out
 
 
-def trainer_nodes(entries: Sequence[str], inventory: str | None, *, every_candidate: bool = False) -> list[TrainerNode]:
+def trainer_nodes(entries: Sequence[str], inventory: str | None) -> list[TrainerNode]:
     """The trainer side of the run's ``ssh:`` island entries (``--gpu``): the nodes each
-    entry takes (``every_candidate``: every node of its inventory a trainer may take, the
-    nodes of a fleet's islands being picked at launch) and the inventory's
-    ``trainer-spare`` nodes. An entry whose inventory does not load is skipped (the
+    entry takes and its inventory's ``trainer-spare`` nodes. Every node of the inventory
+    a trainer may take counts when the entry's nodes are picked at launch (a leased
+    inventory: the launch takes free ones; fleet islands sharing one inventory) or the
+    entry is refused there. An entry whose inventory does not load is skipped (the
     trainer launch's own dry run says why)."""
+    from .node_inventory import InventoryError, island_nodes, lease_store_of, load_inventory  # noqa: PLC0415
     from .node_quarantine import SPARE_ROLE  # noqa: PLC0415
-    from .node_inventory import InventoryError, island_nodes  # noqa: PLC0415
     from .preflight.cluster import resolve_inventory  # noqa: PLC0415
 
     out: list[TrainerNode] = []
     for entry in dict.fromkeys(entries):
-        try:
-            nodes, every = resolve_inventory(entry, inventory)
-        except (InventoryError, OSError, ValueError):
-            continue
         rest = entry[4:]
-        path = _path(rest if rest.endswith((".yaml", ".yml", ".json")) or Path(rest).expanduser().is_file()
-                     else inventory)
-        taken = island_nodes(list(every), "trainer") if every_candidate else list(nodes)
+        own_file = rest.endswith((".yaml", ".yml", ".json")) or Path(rest).expanduser().is_file()
+        source = rest if own_file else inventory
+        try:
+            every = load_inventory(Path(str(source)).expanduser())
+        except (InventoryError, OSError, ValueError, TypeError):
+            continue
+        try:
+            nodes, _every = resolve_inventory(entry, inventory)
+        except (InventoryError, OSError, ValueError):  # refused at launch, or picked there: any may be taken
+            nodes, picked_at_launch = [], True
+        else:  # a leased inventory: the launch takes free nodes, not these
+            picked_at_launch = lease_store_of(every) is not None
+        path = _path(source)
+        taken = island_nodes(list(every), "trainer") if picked_at_launch else list(nodes)
         out += [TrainerNode(n, entry, path) for n in taken]
         out += [TrainerNode(n, entry, path, spare=True) for n in every
                 if SPARE_ROLE in n.roles and n.name not in {t.name for t in taken}]

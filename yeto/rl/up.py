@@ -1525,8 +1525,7 @@ class Run:
         plan = self.fleet_plan()
         entries = ssh_entries(argv_value(argv, "--gpu"))
         entries += [e for island in (plan.islands if plan is not None else ()) for e in ssh_entries(island.gpu)]
-        trainers = own_node_checks.trainer_nodes(entries, argv_value(argv, "--rl-node-inventory"),
-                                                 every_candidate=plan is not None)
+        trainers = own_node_checks.trainer_nodes(entries, argv_value(argv, "--rl-node-inventory"))
         problems = own_node_checks.pool_problems(pools, trainers)
         return "; ".join(problems) + "; nothing is started" if problems else None
 

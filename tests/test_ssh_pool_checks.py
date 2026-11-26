@@ -328,3 +328,37 @@ def test_one_name_is_one_machine_only_in_one_inventory_file():
     assert not checks.same_machine(a, "/i.yaml", b, "/j.yaml")
     lo = parse_node(_raw("x", "h3", address="127.0.0.1"), index=0)
     assert not checks.same_machine(lo, None, parse_node(_raw("y", "h4", address="127.0.0.1"), index=0), None)
+
+
+def test_the_trainer_side_holds_the_island_nodes_and_its_spares(tmp_path):
+    inv = tmp_path / "trainers.yaml"
+    inv.write_text(json.dumps({"nodes": [_raw("t-0", "ops@t-0", roles=["trainer"]),
+                                         _raw("t-1", "ops@t-1", roles=["trainer"]),
+                                         _raw("s-0", "ops@s-0", roles=["trainer-spare"]),
+                                         _raw("p-0", "ops@p-0", roles=["sampler"])]}))
+    side = checks.trainer_nodes([f"ssh:{inv}"], None)
+    assert [(t.node.name, t.spare) for t in side] == [("t-0", False), ("t-1", False), ("s-0", True)]
+    assert {t.inventory for t in side} == {str(inv.resolve())} and {t.entry for t in side} == {f"ssh:{inv}"}
+    assert checks.trainer_nodes(["ssh:/nonexistent/inventory.yaml"], None) == []  # its launch dry run says why
+    pool = _pool(tmp_path, "p", ["s-0"], inventory_nodes=[_raw("s-0", "ops@s-0", roles=["sampler"])])
+    (problem,) = checks.pool_problems([pool], side)
+    assert "which is a trainer-spare node of this run's trainer island" in problem
+
+
+def test_a_fleet_trainer_side_is_every_node_its_islands_may_take(tmp_path):
+    inv = tmp_path / "trainers.yaml"
+    inv.write_text(json.dumps({"nodes": [_raw("t-0", "ops@t-0", roles=["trainer"]),
+                                         _raw("t-1", "ops@t-1", roles=["trainer"])]}))
+    assert [t.node.name for t in checks.trainer_nodes(["ssh:2x8xh100"], str(inv))] == ["t-0", "t-1"]
+    # fleet islands sharing one inventory pick their nodes at launch: any trainer node counts
+    side = checks.trainer_nodes(["ssh:1x8xh100", "ssh:1x8xh100"], str(inv))  # two islands, one entry each
+    assert [t.node.name for t in side] == ["t-0", "t-1"] and side[0].inventory == str(inv.resolve())
+
+
+def test_a_leased_trainer_inventory_counts_every_node_the_launch_may_take(tmp_path):
+    inv = tmp_path / "trainers.yaml"
+    inv.write_text(json.dumps({"lease_store": str(tmp_path / "leases"),
+                               "nodes": [_raw(f"t-{i}", f"ops@t-{i}", roles=["trainer"]) for i in range(3)]}))
+    assert [t.node.name for t in checks.trainer_nodes(["ssh:1x8xh100"], str(inv))] == ["t-0", "t-1", "t-2"]
+    inv.write_text(json.dumps({"nodes": [_raw(f"t-{i}", f"ops@t-{i}", roles=["trainer"]) for i in range(2)]}))
+    assert [t.node.name for t in checks.trainer_nodes(["ssh:2x8xh100"], str(inv))] == ["t-0", "t-1"]
