@@ -378,6 +378,7 @@ def test_a_spare_takes_the_lost_nodes_place_in_the_same_layout(tmp_path, rank):
     view = ops.spares_view("isl")
     assert view["nodes"] == new and view["lost"] == [] and view["replacements"] == 1
     assert view["waiting_spare"] is False and view["spare_nodes"] == [NAMES[rank]]
+    assert view["max_wait_s"] == isp.MAX_WAIT_S  # --spare-max-wait-s: the page reads a longer wait as lost
     assert str(ops.job_status("isl", 1)) == "RUNNING"
     # the new incarnation's ledger row names its own nodes (a cleanup stops it there)
     rows = {r.id: r for r in ResourceLedger(tmp_path / "ledger.jsonl").open_resources()}

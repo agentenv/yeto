@@ -23,6 +23,9 @@ function esc(s){return U.esc(s)}
 function lr(x){return fin(x)?(x===0?"0":x.toExponential(0)):null}
 function kn(v){return !fin(v)?"n/a":v>=1e9?(v/1e9).toFixed(1)+"B":v>=1e6?(v/1e6).toFixed(1)+"M":v>=1e4?(v/1e3).toFixed(1)+"k":v.toFixed(0)}
 function now(){return T?T.now+(U.clock()-recvAt)/1000:0}
+// the time a spare-node wait or a replacement is measured against, the same on the card, its tip and the
+// Islands now table: a snapshot's own time offline, the topology's clock live
+function spNow(){return T?(T.live?now():T.now):null}
 function colors(){var cs=typeof getComputedStyle==="function"?getComputedStyle(document.documentElement):null,o={},g=function(n){return cs&&cs.getPropertyValue?String(cs.getPropertyValue(n)||"").trim():""};
   ["ink","ink2","line","good","warn","bad","traj","wt","delta","bg"].forEach(function(k){o[k]=g("--"+k)});o.wire=g("--topo-wire");return o}
 function arch(a){return a?"var(--arch-"+String(a).toLowerCase()+")":"var(--ink2)"}
@@ -72,7 +75,7 @@ function islandNow(tr){var n=tr.island_now;if(!n)return null;
 function straggler(tr){var n=tr.island_now;return (n&&"straggler" in n?n.straggler:tr.straggler)||null}
 function trainerState(tr,tn,isl){
   var age=fin(tr.phase_since)?tn-tr.phase_since:null,a=age!=null?" · "+dur(age):"",ph=tr.phase_raw,co=isl&&isl.colocated;
-  if(waitingSpare(tr))return ["waiting for a spare node"+(fin(tr.spares.since)?" · "+dur(Math.max(0,tn-tr.spares.since)):""),"warn"];
+  if(waitingSpare(tr))return ["waiting for a spare node"+(absentWait(tr)?" · counts as absent":fin(tr.spares.since)?" · "+dur(Math.max(0,spNow()-tr.spares.since)):""),"warn"];
   var inow=islandNow(tr);if(inow)return inow;
   if(tr.failure)return["failed: "+tr.failure.metric,"bad"];
   if(sft()){var q=fin(tr.last_event_ts)?dur(tn-tr.last_event_ts)+" ago":"n/a";
@@ -99,13 +102,18 @@ var ENDED_NOW=/^(stopped|done|down|removed|failed|abandoned)$/;
 function ended(tr){return D.done||!!(tr.island_now&&ENDED_NOW.test(tr.island_now.state))}
 function waitingSpare(tr){return !!(tr.spares&&tr.spares.waiting&&!ended(tr))}
 function lostNode(tr){return !ended(tr)&&(tr.node_health||[]).some(function(h){return h.verdict==="lost"})}
-function spareBadge(tr){return waitingSpare(tr)?["waiting spare",C.warn]:lostNode(tr)?["node ✕",C.bad]:null}
-// why no spare node (island_spares.Pick.why_none): its group and the skipped nodes (nested brackets kept),
-// then its placement; any other reason as it is
+// a wait past fleet.waiting_absent_after_s (the fleet counts the island absent; it still waits)
+function absentWait(tr){return waitingSpare(tr)&&(tr.spares.wait_state||{}).state==="absent"}
+// a wait not believed (past --spare-max-wait-s, or no report for an hour): the island reads lost
+function overdueWait(tr){var w=(tr.spares||{}).wait_state;return !ended(tr)&&!!w&&w.state!=="absent"?w:null}
+// the badge of a lost node (a wait is the card's phase line, not a badge too)
+function spareBadge(tr){return lostNode(tr)?["node ✕",C.bad]:null}
+// why no spare node (island_spares.Pick.why_none): the skipped nodes and why first (what to act on: a
+// lease, a quarantine), then the group, then the placement; any other reason as it is
 function whyNoSpare(r){r=String(r||"");var i=r.indexOf("; placement: "),head=i<0?r:r.slice(0,i),place=i<0?"":r.slice(i+13);
   var m=/^(?:fabric group (\S+)|the inventory) has no free healthy spare node(?: \((.*)\))?$/.exec(head);
   if(!m)return r||"no free spare node";
-  return "no free spare"+(m[1]?" in "+m[1]:"")+(m[2]?" · "+m[2]:"")+(place?" · placement: "+place:"")}
+  return (m[2]?m[2]+" · ":"")+"no free spare"+(m[1]?" in "+m[1]:"")+(place?" · placement: "+place:"")}
 // a node's health in words: its reasons, else what its verdict means
 var VERDICT_WORDS={lost:"health bad in 2 checks in a row",bad_once:"health bad in 1 check",read_failed:"health unread"};
 function healthWhy(h){if(h.stale)return "health unread (stale)";if(h.verdict==="read_failed")return "health unread"+(h.reasons.length?" ("+h.reasons[0]+")":"");
@@ -114,11 +122,12 @@ function healthWhy(h){if(h.stale)return "health unread (stale)";if(h.verdict==="
 // or null; waiting: why no spare is free; stopped: why the island gave up
 function spareNote(tr,tn){var sp=tr.spares,bad=ended(tr)?[]:tr.node_health||[],out=[];
   if(sp&&sp.stopped)return [[sp.stopped,"bad"]];
+  var od=overdueWait(tr);if(od)return [[od.why,"bad"]];
   if(waitingSpare(tr))return [[whyNoSpare(sp.reason),"warn"]];
   if(bad.length){var h=bad[0];out.push([h.node+": ",""],[healthWhy(h),h.verdict==="lost"?"bad":"warn"]);
     if(bad.length>1)out.push([" +"+(bad.length-1)+" node"+(bad.length>2?"s":""),""])}
   if(sp&&sp.replacements>0){var l=sp.last||{};
-    out.push([(out.length?" · ":"")+"replaced "+sp.replacements+"×"+(l.lost&&l.spare?" · "+l.lost+" → "+l.spare:"")+(fin(sp.last_at)?" · "+dur(Math.max(0,tn-sp.last_at))+" ago":""),""])}
+    out.push([(out.length?" · ":"")+"replaced "+sp.replacements+"×"+(l.lost&&l.spare?" · "+l.lost+" → "+l.spare:"")+(fin(sp.last_at)?" · "+dur(Math.max(0,spNow()-sp.last_at))+" ago":""),""])}
   return out.length?out:null}
 // rich text cut to maxW (an ellipsis on the part where it ends), the whole line on hover
 function fitRich(e,parts,maxW){var full=parts.map(function(p){return p[0]}).join(""),key=full+"|"+parts.map(function(p){return p[1]}).join(",")+"|"+maxW;
@@ -128,11 +137,12 @@ function fitRich(e,parts,maxW){var full=parts.map(function(p){return p[0]}).join
   rich(e,out);
   if(full.length>cap&&typeof document!=="undefined"&&document.createElementNS&&e.namespaceURI){var tt=document.createElementNS(e.namespaceURI,"title");tt.textContent=full;e.appendChild(tt)}}
 // the trainer tip's rows of its spare nodes and unhealthy nodes (a 400 px touch page reads them here)
-function spareRows(tr,tn){var sp=tr.spares,h="";
+function spareRows(tr){var sp=tr.spares,h="",tn=spNow(),ws=(sp||{}).wait_state;
   (tr.node_health||[]).forEach(function(x){h+=row("node "+x.node,(x.verdict==="lost"?"lost · ":"")+healthWhy(x))});
   if(!sp)return h;
   if(sp.stopped)h+=row("spare nodes",sp.stopped);
-  if(sp.waiting)h+=row("waiting for a spare",(fin(sp.since)?dur(Math.max(0,tn-sp.since))+" · ":"")+(sp.reason||"no free spare node"));
+  if(sp.waiting||ws)h+=row("waiting for a spare",(fin(sp.since)?dur(Math.max(0,tn-sp.since))+" · ":"")+(sp.reason||"no free spare node"));
+  if(ws)h+=row("spare wait",ws.state==="absent"?"counts as absent for the fleet (past fleet.waiting_absent_after_s)":ws.why);
   if(sp.lost&&sp.lost.length)h+=row("lost node(s)",sp.lost.join(", "));
   if(sp.replacements>0){var l=sp.last||{};
     h+=row("last replacement",(l.lost&&l.spare?l.lost+" → "+l.spare:"")+(l.resume_step!=null?" · resumed at step "+l.resume_step:"")+(fin(sp.last_at)?" · "+dur(Math.max(0,tn-sp.last_at))+" ago":""));
@@ -457,7 +467,7 @@ function paint(){
         if(!fin(sw0)||sw0<=0)sw0=pre.length*6.3+big.length*12.2;  // no layout: the small and big fonts' advances
         if(fi===forms.length-1||14+sw0+16+textW(o.of,5.9)<=o.w-12)break}}
     o.barf.setAttribute("width",D.P?(o.barW*(((sh.step-1)%D.P+1)/D.P)).toFixed(1):0);
-    o.roster.textContent=D.done?"run done · roster "+D.M:"roster "+D.roster+"/"+D.M;o.roster.style.fill=D.done?C.ink2:D.roster<D.M?C.bad:C.good;
+    o.roster.textContent=D.done?"run done · roster "+D.M:"roster "+D.roster+"/"+D.M;o.roster.style.fill=D.done?C.ink2:D.roster<D.M?(D.roster+(D.roster_spare||0)>=D.M?C.warn:C.bad):C.good;
     var c=st==="done"?C.ink2:st==="waiting for quorum"?(sh.attempt_max>1?C.bad:C.warn):st==="merging"?C.wt:st==="gathering"?C.good:C.ink2;
     var ended=mine.length&&mine.every(function(r){return r.ended});
     fitText(o.st,(st==="done"?"done (final cut)":st==="stale"?"stale: no trainer up":st)+(ended?" · "+mine.length+" unmerged at the end":st==="done"&&!mine.length?"":" · in flight "+mine.length)+(D.behind&&D.syncer_tape!==false?" · syncer tape behind":""),o.lw-14);o.st.style.fill=c===C.good?C.ink:c;o.dot.setAttribute("fill",c);
@@ -594,7 +604,7 @@ function tipHtml(key){var a=key.split(":"),tn=now(),tr=null;D.trainers.forEach(f
   if(a[0]==="trn"&&tr)return '<div class="h">Trainer '+esc(tr.id)+"</div>"+row("island status",tr.status)+row("local step",tr.step)+row("outer sweep",fin(tr.outer)?tr.outer+": every fragment merged at least "+tr.outer+" time"+(tr.outer===1?"":"s")+" (complete sweeps applied)":null)+row("policy hash",tr.hash)+
     row("fragment versions",tr.versions?"["+tr.versions.join(", ")+"]":null)+row("merged, not applied",tr.pending_n)+row("applied lr",lr(tr.lr))+
     row("last PUSH",tr.last_push?"f"+tr.last_push.frag+" t"+tr.last_push.step+" · "+mb(tr.last_push.bytes)+(tr.last_push.wire?" on the wire ("+mb(tr.last_push.payload_bytes)+" f32)":""):null)+
-    row("BCAST overwrite / catch-up",tr.bcast_overwrites||tr.bcast_catch_ups?(tr.bcast_overwrites||0)+" / "+(tr.bcast_catch_ups||0):null)+row("last event",fin(tr.last_event_ts)?dur(tn-tr.last_event_ts)+" ago":null)+spareRows(tr,tn)+
+    row("BCAST overwrite / catch-up",tr.bcast_overwrites||tr.bcast_catch_ups?(tr.bcast_overwrites||0)+" / "+(tr.bcast_catch_ups||0):null)+row("last event",fin(tr.last_event_ts)?dur(tn-tr.last_event_ts)+" ago":null)+spareRows(tr)+
     row("source",tr.full_push?"rl_full_parameter_round · rl_fragment_*":"rl_local_round · rl_policy_snapshot · rl_fragment_*")+'<div class="ns">PULL permits held and live BCAST queueing are not on the tapes yet</div>';
   if(a[0]==="rol"&&tr&&tr.island){var r=tr.island;return '<div class="h">Island '+esc(tr.id)+" rollout ("+esc(r.placement||"placement n/a")+")</div>"+row("execution mode",r.exec_mode)+row("engines",r.engines)+row("rollout round",r.round)+
     row("serving",r.served?r.served.token:null)+row("groups / traj / tokens",[r.groups,r.traj,r.tokens].join(" / "))+row("rollout seconds",fin(r.rollout_s)?r.rollout_s.toFixed(1):null)+
@@ -659,7 +669,8 @@ function render(view,offline){
   var W=host.clientWidth||800;
   if(!L||L.shape!==shape()||vw(L.W)!==vw(W)||(host.contains&&!host.contains(L.svg)))build(host);
   var live=D.trainers.filter(function(x){return x.live}).length,rolls=D.trainers.filter(function(x){return x.island}).length;
-  $("topoNote").textContent="layout: "+D.kind.replace("_"," ")+" ("+D.layout_reason+") · "+(sft()?D.trainers.length+" learner island(s), no rollout":D.kind==="island"?rolls+" island(s): trainer + in-island rollout":(t.samplers||[]).filter(function(s){return s.live}).length+" live sampler(s)"+(D.fleet?" in "+D.fleet.islands.length+" island(s)":""))+" · "+live+"/"+D.M+(sft()?" learner(s)":" trainer(s)")+" live · syncer "+(D.shards.length>1?D.shards.length+" shards":"1 process")+
+  if(D.roster_spare)live=D.roster;  // an island out of the roster while a spare takes a lost node's place is not live
+  $("topoNote").textContent="layout: "+D.kind.replace("_"," ")+" ("+D.layout_reason+") · "+(sft()?D.trainers.length+" learner island(s), no rollout":D.kind==="island"?rolls+" island(s): trainer + in-island rollout":(t.samplers||[]).filter(function(s){return s.live}).length+" live sampler(s)"+(D.fleet?" in "+D.fleet.islands.length+" island(s)":""))+" · "+live+"/"+D.M+(sft()?" learner(s)":" trainer(s)")+" live"+(D.roster_spare?" ("+D.roster_spare+" replacing a lost node)":"")+" · syncer "+(D.shards.length>1?D.shards.length+" shards":"1 process")+
     (t.live?" · replayed "+DELAY_S+" s behind the newest tape data":" · offline snapshot");
   paint();kick();
   if(!bound){bound=true;host.addEventListener("mousemove",tip);host.addEventListener("mouseleave",function(){var tp=$("topoTip");if(tp)tp.style.display="none"});
@@ -672,7 +683,7 @@ function render(view,offline){
 function ago(t,tn){return fin(t)?dur(tn-t)+" ago":"n/a"}
 function kpis(view,kp){
   var t=view&&view.topology,d=t&&t.diloco;if(!d)return kp;U=YetoTopo.util;
-  var tn=(view.overview||{}).now||t.now,trs=d.trainers,isl=d.kind==="island",live=trs.filter(function(x){return x.live}).length,rolls=trs.filter(function(x){return x.island});
+  var tn=(view.overview||{}).now||t.now,trs=d.trainers,isl=d.kind==="island",live=d.roster_spare?d.roster:trs.filter(function(x){return x.live}).length,rolls=trs.filter(function(x){return x.island});
   var eng=rolls.reduce(function(a,x){return a+(x.island.engines||0)},0),pls={};rolls.forEach(function(x){if(x.island.placement)pls[x.island.placement]=1});
   var pl=Object.keys(pls),co=rolls.some(function(x){return x.island.colocated});
   var pct=function(x){return fin(x)?Math.round(100*x)+"%":"—"},sh=d.shards[0]||{},open=d.rounds.filter(function(r){return !r.ended}).length,pend=trs.filter(function(x){return x.live}).reduce(function(a,x){return a+x.pending_n},0);
@@ -701,5 +712,5 @@ function table(view){var d=view&&view.topology&&view.topology.diloco;if(!d)retur
       return (p?"↑ f"+p.frag+" t"+p.step+" · "+dur(tn-p.ts)+" ago":t.full_push?"↑ "+(t.full_push.count||0)+" PUSH last round, "+(t.full_push.total||0)+" in the run"+(t.full_push.overwritten?" · overwritten "+t.full_push.overwritten:""):"↑ none")+'<div class="ns">'+(b?"↓ f"+b.frag+" v"+b.v+" applied"+(fin(t.apply_s)?" · apply "+t.apply_s.toFixed(2)+"s":""):t.full_push?"↓ applied in the round (no per-fragment record yet)":"↓ no BCAST applied yet")+"</div>"+
         '<div class="ns">frag ['+(t.versions||[]).join(" ")+"]</div>"}}}
 
-return{render:render,kpis:kpis,table:table,whyNoSpare:whyNoSpare,healthWhy:healthWhy};
+return{render:render,kpis:kpis,table:table,whyNoSpare:whyNoSpare,healthWhy:healthWhy,spNow:spNow};
 })();

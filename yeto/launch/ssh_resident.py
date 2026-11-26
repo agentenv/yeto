@@ -1321,7 +1321,7 @@ class SshIslandOps:
                 "wait_reason": sp.wait_reason, "waiting_since": sp.wait_since if sp.waiting else None,
                 "replacements": len(sp.replacements),
                 "replacements_window": len(sp.recent(self.wall())), "max_replacements": int(sp.max_replacements),
-                "last_replaced_at": None if last is None else last.get("at")}
+                "last_replaced_at": None if last is None else last.get("at"), "max_wait_s": float(sp.max_wait_s)}
 
     def _node_log_tail(self, rec: _Island, reason: str, lines: int = 20) -> str:
         """The last lines of the failed rank's local log copy (rank > 0)."""

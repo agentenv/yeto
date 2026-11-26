@@ -132,6 +132,9 @@ def load_plan(doc: Any) -> dict | None:
                       if isinstance(syncer, dict) else None)}
     if doc.get("launch") == "per_island":  # its trainers are billed from their launch records (PlanFile)
         out["launch"] = "per_island"
+    absent = _f((doc.get("roster") or {}).get("waiting_absent_after_s")) if isinstance(doc.get("roster"), dict) else None
+    if absent is not None and absent > 0:  # fleet.waiting_absent_after_s, when the plan sets it
+        out["waiting_absent_after_s"] = absent
     return out
 
 
@@ -309,7 +312,7 @@ def _trainer_records(objects: Any, learners: Any = None) -> dict[int, dict]:
             launch.get("decision") if isinstance(launch.get("decision"), dict) else None)
         ended = launch.get("ended") if isinstance(launch.get("ended"), dict) else {}
         # a resident ssh: island with spare nodes and node health checks: only when its record has them
-        extra = {key: doc for key, doc in (("spares", spares_record(life.get("spares"))),
+        extra = {key: doc for key, doc in (("spares", spares_record(life.get("spares"), life.get("updated"))),
                                            ("health", health_record(life.get("health"), life.get("updated"))))
                  if doc is not None}
         out[k] = {**extra, "launch_state": _str(launch.get("state")), "life_state": _str(life.get("state")),
@@ -347,9 +350,10 @@ def _names(v: Any) -> list[str]:
     return [str(x) for x in v if isinstance(x, str) and x] if isinstance(v, (list, tuple)) else []
 
 
-def spares_record(doc: Any) -> dict | None:
+def spares_record(doc: Any, updated: Any = None) -> dict | None:
     """The ``spares`` of a trainer island's record (``SshIslandOps.spares_view``: a resident
-    ``ssh:`` island with spare nodes), the fields the page shows; None: no such field."""
+    ``ssh:`` island with spare nodes), the fields the page shows; None: no such field.
+    ``updated``: when the record was last written (a wait it no longer reports: :data:`WAIT_FROZEN_S`)."""
     if not isinstance(doc, dict):
         return None
     waiting = doc.get("waiting_spare") is True
@@ -360,7 +364,37 @@ def spares_record(doc: Any) -> dict | None:
             "replacements": _int(doc.get("replacements")) or 0,
             "replacements_window": _int(doc.get("replacements_window")),
             "max_replacements": _int(doc.get("max_replacements")),
-            "last_replaced_at": _f(doc.get("last_replaced_at"))}
+            "last_replaced_at": _f(doc.get("last_replaced_at")),
+            "max_wait_s": _f(doc.get("max_wait_s")), "updated": _f(updated)}
+
+
+# a wait for a spare node (yeto.launch.island_spares; no import: the dashboard stands alone)
+SPARE_MAX_WAIT_S = 24 * 3600.0  # --spare-max-wait-s: the island gives up after this long
+SPARE_WAIT_REPORT_S = 3600.0  # island_spares.WAIT_REPORT_S: a waiting island's record is written this often
+WAITING_ABSENT_AFTER_S = 3600.0  # yeto.rl.fleet.DEFAULT_WAITING_ABSENT_AFTER_S (fleet.waiting_absent_after_s)
+# a waiting island whose record (or wait report) is older than this: its launcher no longer reports
+# it (one hourly report missed, plus two health periods and 10 min of slack)
+WAIT_FROZEN_S = SPARE_WAIT_REPORT_S + 2 * 60.0 + 600.0
+
+
+def spare_wait_state(waiting_since: float | None, updated: float | None, now: float, *,
+                     absent_after_s: float | None = None, max_wait_s: float | None = None) -> dict | None:
+    """How a wait for a spare node reads at ``now``: None (an ordinary wait), ``{"state": "absent"}``
+    past ``fleet.waiting_absent_after_s`` (the fleet counts the island absent; still waiting), or
+    ``{"state": "expired" | "frozen", "why"}``: past ``--spare-max-wait-s`` (the island should have
+    given up) or its record not written for :data:`WAIT_FROZEN_S` (no launcher reports the wait):
+    the wait is not believed and the island reads lost or unknown."""
+    limit = SPARE_MAX_WAIT_S if max_wait_s is None else float(max_wait_s)
+    if waiting_since is not None and now - waiting_since > limit:
+        return {"state": "expired", "why": f"waiting for a spare node past --spare-max-wait-s ({limit / 3600:g} h): "
+                                           "the island should have given up; its launcher may be gone"}
+    if updated is not None and now - updated > WAIT_FROZEN_S:
+        return {"state": "frozen", "why": f"waiting for a spare node, but no report for {(now - updated) / 3600:.1f} h"
+                                          ": its launcher may be gone"}
+    absent = WAITING_ABSENT_AFTER_S if absent_after_s is None else float(absent_after_s)
+    if waiting_since is not None and now - waiting_since > absent:
+        return {"state": "absent"}
+    return None
 
 
 HEALTH_REASONS_MAX = 3  # reasons of one node the page carries (its record keeps a few more)

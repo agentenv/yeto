@@ -380,6 +380,17 @@ def config_summary(configs: dict[int, dict]) -> dict | None:
             "step0": _int(c.get("global_step")), "ts": c.get("_ts")}
 
 
+def _replacing(card: dict | None) -> bool:
+    """A resident ssh: island that lost a node: waiting for a spare node or starting on one."""
+    sp = (card or {}).get("spares") or {}
+    return bool(sp.get("waiting") or sp.get("lost"))
+
+
+def _overdue(card: dict | None) -> bool:
+    """A wait for a spare node the page does not believe (past the longest wait, or unreported)."""
+    return ((((card or {}).get("spares") or {}).get("wait_state") or {}).get("state")) in ("expired", "frozen")
+
+
 def _quiet_move(inow: dict | None, now: float) -> bool:
     """Whether a trainer island's record says it is moving or relaunching, for no longer than
     MOVE_QUIET_S (one stuck in ordering or starting longer than that raises the stuck and
@@ -453,8 +464,9 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
     live = [i for i in trainer_ids if (states.get(i) or {}).get("alive")]
     # a resident ssh: island that lost a node (stopped, waiting for a spare or starting on one) is out of the
     # roster: the syncer merges without it until it is back
-    roster = [i for i in live if not ((by_id.get(i) or {}).get("spares") or {}).get("waiting")
-              and not ((by_id.get(i) or {}).get("spares") or {}).get("lost")]
+    roster = [i for i in live if not _replacing(by_id.get(i))]
+    # trainers out of it only while a spare takes a lost node's place (a warning, not a loss)
+    roster_spare = sum(1 for i in trainer_ids if _replacing(by_id.get(i)) and not _overdue(by_id.get(i)))
 
     # rounds in flight: PUSHes of steps the owner shard has not committed yet (a PULL without a
     # PUSH is not on the tapes)
@@ -547,7 +559,7 @@ def view(reducer, cards: list[dict], now: float, kind_: str) -> dict:
         "quorum": sy["quorum"], "versions": versions, "last_merge_ts": sy["last_merge_ts"], "behind": behind,
         "syncer_tape": tape_seen, "inferred_versions": inferred,
         "stuck": stuck, "period_s": sy["period_s"], "merge_gap_s": sy["merge_gap_s"], "quorum_p50_s": sy["quorum_p50_s"],
-        "roster": len(roster), "expected": expected, "shards": shard_rows(p, n, merges, rounds, committed, done),
+        "roster": len(roster), **({"roster_spare": roster_spare} if roster_spare else {}), "expected": expected, "shards": shard_rows(p, n, merges, rounds, committed, done),
         "rounds": rounds, "last_merge_ts_any": sy["last_merge_ts_any"], "running": running, "done": done,
         "traffic": {"push": len(pushes5), "push_bytes": sum(_push_bytes(x) or 0 for x in pushes5),
                     "bcast": len(bcasts5)},

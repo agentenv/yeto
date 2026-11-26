@@ -649,9 +649,11 @@ class FleetController:
 
     @staticmethod
     def _health_key(health):
-        """What a change of the health record is judged by (verdicts and reasons, not times)."""
+        """What a change of the health record is judged by (verdicts and reasons, not times; and
+        whether a node's check is the one kept over a relaunch, ``reset``: the first check of the
+        new job writes the record again, so its time is the new job's)."""
         nodes = (health or {}).get("nodes") or {}
-        return tuple(sorted((name, doc.get("verdict"), tuple(doc.get("reasons") or ()))
+        return tuple(sorted((name, doc.get("verdict"), tuple(doc.get("reasons") or ()), bool(doc.get("reset")))
                             for name, doc in nodes.items()))
 
     def _health_events(self, rec) -> None:

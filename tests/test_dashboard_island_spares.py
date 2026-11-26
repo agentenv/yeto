@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from test_dashboard_diloco import SMOKE
-from test_dashboard_fleet_islands import T0, fleet_reducer
+from test_dashboard_fleet_islands import T0, fleet_reducer, plan_doc
 
 from yeto.dashboard import fleet_islands
 from yeto.dashboard.export import export_html
@@ -25,11 +25,13 @@ from yeto.rl.engine.object_store import DirectoryObjectStore
 
 LEGEND = 'legend: mk("topoLg").innerHTML'
 # the topology smoke, also printing the event stream, trainer 1's tip (a hover on its card) and the dashed boxes
-EV_SMOKE = SMOKE.replace(LEGEND, LEGEND + ''', events: mk("evs").innerHTML,
+# (each colour reads as its CSS variable's name: --warn, --bad, ...)
+EV_SMOKE = "globalThis.getComputedStyle = () => ({ getPropertyValue: (n) => n });\n" + SMOKE.replace(LEGEND, LEGEND + ''', events: mk("evs").innerHTML,
   tip: (function () { const h = Object.values(els).find((n) => n.listeners && n.listeners.mousemove);
     if (!h) return null; h.listeners.mousemove[0]({ target: { closest: () => ({ getAttribute: () => "trn:1" }) },
       clientX: 0, clientY: 0 }); return mk("topoTip").innerHTML; })(),
-  dashed: svg.filter((n) => n.style && n.style.strokeDasharray === "5 4").length''')
+  dashed: svg.filter((n) => n.style && n.style.strokeDasharray === "5 4").length,
+  roster: (svg.find((n) => /^roster /.test(String(n.textContent || ""))) || { style: {} }).style.fill || null''')
 assert EV_SMOKE != SMOKE
 FX = Path(__file__).parent / "fixtures" / "dashboard"
 NEW_KEYS = ("spares", "node_health")
@@ -119,6 +121,8 @@ def test_the_events_mark_the_card_without_a_record():
     assert sp["lost"] == ["gpu-d"] and sp["replacements"] == 0
     r.feed(waiting(T0 + 520, elapsed=90))  # a later report keeps the wait's start
     assert cards(r)["1"]["spares"]["since"] == T0 + 430
+    r.feed(waiting(T0 + 560))  # a report without its elapsed time (it would start the wait at T0 + 560)
+    assert cards(r)["1"]["spares"]["since"] == T0 + 430  # the earliest start stays
     r.feed(replaced(T0 + 600))
     sp = cards(r)["1"]["spares"]
     assert not sp["waiting"] and sp["since"] is None and sp["replacements"] == 1 and sp["last_at"] == T0 + 600
@@ -297,14 +301,16 @@ def test_a_waiting_island_s_card_badge_phase_and_why(tmp_path):
     r = _with_record(tmp_path, "recovering", lost(end - 100), waiting(end - 95),
                      spares=spares_doc(lost=["gpu-d"], waiting_spare=True, wait_reason=WAIT, waiting_since=end - 95))
     out = smoke(tmp_path, r)
-    assert "waiting spare" in out["texts"] and out["dashed"] == 0  # warned, not drawn as a lost trainer
+    assert out["dashed"] == 0  # warned, not drawn as a lost trainer
+    assert "waiting spare" not in out["texts"]  # the phase line says it: no badge saying it again
     assert "waiting for a spare node · 1m35s" in out["texts"]  # how long, not the record's incarnation
-    assert any(t.startswith("no free spare in rack-b · gpu-e: lease") for t in out["texts"])  # cut to the card
+    assert any(t.startswith("gpu-e: lease held by run other · no free spare") for t in out["texts"])  # what to act on first
     # Islands now: the mark in place of the status (no "waiting for a spare node" twice), the reason in the last cell
     assert '<span class="wn" style="white-space:nowrap">waiting spare 1m35s</span>' in out["nodes"]
     assert "waiting for a spare node" not in out["nodes"]
-    short = "no free spare in rack-b · gpu-e: lease held by run other"
-    assert f'<div class="ns spc wt" title="{WAIT}">{short}</div>' in out["nodes"]
+    short = "gpu-e: lease held by run other · no free spare in rack-b"
+    assert f'<td class="spn"><div class="ns wt" title="{WAIT}">{short}</div></td>' in out["nodes"]
+    assert '<th class="spn">Nodes</th><th>Shard · incarnation</th>' in out["nodes"]  # its own column
     assert "waiting for a spare</span><span>1m35s · " + WAIT in out["tip"]  # the whole reason on a touch page
     assert 'title="wait"' in out["events"] and "<b>island_waiting_spare</b>" in out["events"]
 
@@ -313,7 +319,7 @@ def test_a_wait_known_from_its_events_only(tmp_path):
     end = reducer().max_ts
     r = reducer(lost(end + 10), waiting(end + 20, elapsed=40))
     out = smoke(tmp_path, r)
-    assert "waiting spare" in out["texts"] and "waiting for a spare node · 40s" in out["texts"]
+    assert "waiting for a spare node · 40s" in out["texts"]
     assert "lost" not in out["texts"] and out["dashed"] == 0  # the wait, not a lost trainer
     view = r.page_view(now=r.max_ts)["topology"]["diloco"]
     assert view["roster"] == 1  # out of the syncer's roster while it waits
@@ -325,7 +331,8 @@ def test_a_silent_trainer_waiting_for_a_spare_is_not_drawn_lost(tmp_path):
     assert "lost" in gone["texts"] and gone["dashed"] >= 1
     out = smoke(tmp_path / "b", reducer(lost(end + 3590), ev("island_lost", end + 3595, reason=LOST),
                                         waiting(end + 3600, elapsed=10)))
-    assert "waiting spare" in out["texts"] and "lost" not in out["texts"] and out["dashed"] == 0
+    assert any(t.startswith("waiting for a spare node") for t in out["texts"])
+    assert "lost" not in out["texts"] and out["dashed"] == 0
 
 
 @pytest.mark.parametrize("life", ["done", "failed"])
@@ -344,6 +351,7 @@ const a = src.indexOf("// a resident ssh: island with spare nodes (tr.spares"), 
 var D = JSON.parse(process.argv[3]), C = {warn: "W", bad: "B", ink2: "M"};
 function fin(x) { return typeof x === "number" && isFinite(x); }
 function dur(s) { return Math.round(s) + "s"; }
+function spNow() { return 1000; }
 function row(k, v) { return k + "=" + v + ";"; }
 function col(k) { return k; }
 function rich() {}
@@ -374,7 +382,7 @@ def test_a_finished_run_or_island_has_no_spare_badge(tmp_path, d, now):
     out = helpers(tmp_path, d, tr)
     assert out["badge"] is None and out["waiting"] is False and out["note"] is None
     live = helpers(tmp_path / "b", {"done": False}, {**tr, "island_now": {"state": "starting"}})
-    assert live["badge"] == ["waiting spare", "W"] and live["waiting"] is True
+    assert live["badge"] == ["node ✕", "B"] and live["waiting"] is True  # the wait is no badge: its phase line
 
 
 def test_a_lost_node_s_health_reason_and_badge(tmp_path):
@@ -388,7 +396,7 @@ def test_a_lost_node_s_health_reason_and_badge(tmp_path):
     assert "node ✕" in out["texts"] and "gpu-d: GPU 3 XID 79" in out["texts"]
     assert any(t.startswith("replacing lost node gpu-d") for t in out["texts"])
     assert '<span class="bd" style="white-space:nowrap">node ✕</span>' in out["nodes"]
-    assert '<div class="ns spc bd" title="gpu-d: lost · GPU 3 XID 79">gpu-d: GPU 3 XID 79</div>' in out["nodes"]
+    assert '<td class="spn"><div class="ns bd" title="gpu-d: lost · GPU 3 XID 79">gpu-d: GPU 3 XID 79</div></td>' in out["nodes"]
     assert "node gpu-d</span><span>lost · GPU 3 XID 79" in out["tip"]
     assert "<b>node_health</b>" in out["events"] and "reasons=GPU 3 XID 79" in out["events"]
     assert r.page_view(now=r.max_ts)["topology"]["diloco"]["roster"] == 1  # stopped while a spare takes its place
@@ -397,7 +405,10 @@ def test_a_lost_node_s_health_reason_and_badge(tmp_path):
 def test_the_reason_styles_are_on_the_page(tmp_path):
     page = export_html(reducer(), tmp_path / "p.html").read_text()
     assert ".ns.bd{color:var(--bad)}" in page  # a lost node's reason in red, not in the .ns grey
-    assert ".ns.spc{max-width:28ch;margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" in page
+    # the Nodes column: cut by the column's width (no fixed character count), the whole on hover
+    assert "table.nt th.spn,table.nt td.spn{text-align:left;width:14%;max-width:0}" in page
+    assert "table.nt td.spn .ns{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" in page
+    assert "28ch" not in page
 
 
 def test_one_bad_check_is_a_warning_without_badge(tmp_path):
@@ -405,7 +416,7 @@ def test_one_bad_check_is_a_warning_without_badge(tmp_path):
     health = {"verdict": "bad_once", "nodes": {"gpu-c": node("bad_once", now - 5, ["GPU 0 uncorrectable ECC +1"], 1)}}
     out = smoke(tmp_path, _with_record(tmp_path, "running", health=health, updated=now - 5))
     assert "gpu-c: GPU 0 uncorrectable ECC +1 · 1 bad check" in out["texts"] and "node ✕" not in out["texts"]
-    assert 'class="ns spc wt"' in out["nodes"] and "node ✕" not in out["nodes"]
+    assert '<td class="spn"><div class="ns wt"' in out["nodes"] and "node ✕" not in out["nodes"]
 
 
 @pytest.mark.parametrize("verdict, words", [("bad_once", "health bad in 1 check"),
@@ -442,7 +453,7 @@ def test_the_reason_it_gave_up_is_on_its_card(tmp_path):
     end = reducer().max_ts
     out = smoke(tmp_path, reducer(lost(end + 10), waiting(end + 20), limit(end + 30)))
     assert "3 node replacement(s)" in out["texts"] and "waiting spare" not in out["texts"]
-    assert '<div class="ns spc bd" title="3 node replacement(s)">3 node replacement(s)</div>' in out["nodes"]
+    assert '<td class="spn"><div class="ns bd" title="3 node replacement(s)">3 node replacement(s)</div></td>' in out["nodes"]
 
 
 def test_the_reason_a_trainer_left_is_kept(tmp_path):
@@ -452,14 +463,14 @@ def test_the_reason_a_trainer_left_is_kept(tmp_path):
     c = cards(r)["1"]
     assert c["left"]["reason"] and c["spares"]["stopped"]
     out = smoke(tmp_path, r)
-    assert '<div class="ns">' + c["left"]["reason"] in out["nodes"] and "ns spc" not in out["nodes"]
+    assert '<div class="ns">' + c["left"]["reason"] + "</div></td></tr>" in out["nodes"]  # its last cell, as on main
 
 
 @pytest.mark.parametrize("why, short", [
     ("fabric group rack-b has no free healthy spare node (gpu-e: quarantined (XID 79 (GPU 3)); gpu-f: held)",
-     "no free spare in rack-b · gpu-e: quarantined (XID 79 (GPU 3)); gpu-f: held"),
+     "gpu-e: quarantined (XID 79 (GPU 3)); gpu-f: held · no free spare in rack-b"),
     ("the inventory has no free healthy spare node (gpu-e: unhealthy); placement: no group (of 2) has room",
-     "no free spare · gpu-e: unhealthy · placement: no group (of 2) has room"),
+     "gpu-e: unhealthy · no free spare · placement: no group (of 2) has room"),
     ("fabric group rack-b has no free healthy spare node", "no free spare in rack-b"),
     ("spare refused: no rendezvous address", "spare refused: no rendezvous address"),
 ])
@@ -495,3 +506,145 @@ def test_a_card_without_spare_nodes_draws_nothing_new(tmp_path):
     out = smoke(tmp_path, reducer())
     for word in ("waiting spare", "node ✕", "replaced", "no free spare"):
         assert word not in json.dumps(out)
+
+
+# -- review fixes: health over a relaunch / a wait, replaced nodes, give-ups, long waits, the roster ---------
+def test_a_waiting_island_keeps_its_lost_node_s_reason_and_no_stale_check(tmp_path):
+    """Its checks stop on purpose while it recovers (the record is written by the hourly wait report):
+    the lost node still reads lost with its reason, a healthy node is not shown, nothing reads stale."""
+    end = reducer().max_ts
+    health = {"verdict": "lost", "nodes": {"gpu-c": node("ok", end - 3700),
+                                           "gpu-d": node("lost", end - 3700, ["GPU 3 XID 79"], 2)}}
+    r = _with_record(tmp_path, "recovering", lost(end - 3700), waiting(end - 3690),
+                     spares=spares_doc(lost=["gpu-d"], waiting_spare=True, wait_reason=WAIT, waiting_since=end - 3690),
+                     health=health, updated=end - 10)
+    assert cards(r)["1"]["node_health"] == [{"node": "gpu-d", "verdict": "lost", "reasons": ["GPU 3 XID 79"],
+                                             "bad_in_row": 2}]
+    out = smoke(tmp_path / "p", r)
+    assert "node gpu-d</span><span>lost · GPU 3 XID 79" in out["tip"] and "stale" not in out["tip"]
+
+
+def test_a_node_a_spare_replaced_is_no_node_of_the_island(tmp_path):
+    end = reducer().max_ts
+    health = {"verdict": "lost", "nodes": {"gpu-c": node("ok", end - 30),
+                                           "gpu-d": node("lost", end - 30, ["GPU 3 XID 79"], 2)}}
+    r = _with_record(tmp_path, "running", lost(end - 100), replaced(end - 20),
+                     spares=spares_doc(nodes=["gpu-c", "gpu-e"], spare_nodes=["gpu-d"], replacements=1,
+                                       replacements_window=1, last_replaced_at=end - 20),
+                     health=health, updated=end - 5)
+    assert "node_health" not in cards(r)["1"]
+    out = smoke(tmp_path / "p", r)
+    assert "node ✕" not in out["texts"] and "node gpu-d" not in (out["tip"] or "")
+
+
+def test_a_later_wait_or_replacement_ends_a_give_up():
+    sp = _spares_of([("a", lost(T0 + 400)), ("a", limit(T0 + 500)),
+                     ("b", lost(T0 + 9000)), ("b", waiting(T0 + 9001))])
+    assert sp["stopped"] is None and sp["waiting"]  # waiting again: not given up
+    sp = _spares_of([("a", lost(T0 + 400)), ("a", limit(T0 + 500)), ("b", lost(T0 + 9000)), ("b", replaced(T0 + 9100))])
+    assert sp["stopped"] is None and sp["replacements"] == 1
+
+
+def test_a_running_record_shows_no_give_up(tmp_path):
+    end = reducer().max_ts
+    r = _with_record(tmp_path, "running", lost(end - 9000), limit(end - 8000),
+                     spares=spares_doc(replacements=1, replacements_window=1, last_replaced_at=end - 100))
+    assert cards(r)["1"]["spares"]["stopped"] is None
+    out = smoke(tmp_path / "p", r)
+    assert "3 node replacement(s)" not in out["nodes"] and "3 node replacement(s)" not in out["texts"]
+    events_only = cards(reducer(lost(end + 10), limit(end + 20)))["1"]["spares"]
+    assert events_only["stopped"] == "3 node replacement(s)"  # no record: the events' give-up stays
+    # a running record without spares of its own: the events' give-up is over too
+    r = _with_record(tmp_path / "b", "running", lost(end - 9000), limit(end - 8000))
+    sp = cards(r)["1"]["spares"]
+    assert sp["source"] == "events" and sp["stopped"] is None
+
+
+HOUR = 3600.0
+
+
+def _long_wait(tmp_path, waited: float, *, report_age: float = 60.0, plan_absent: float | None = None,
+               max_wait: float | None = None):
+    """Island 1 waiting ``waited`` seconds for a spare node at the page's time, its record written
+    ``report_age`` seconds before it; its tape silent for an hour."""
+    end = reducer().max_ts
+    now = end + HOUR
+    r = reducer(lost(now - 10), ev("island_lost", now - 5, reason=LOST), waiting(now, elapsed=waited))
+    if plan_absent is not None:
+        assert r.load_fleet_plan({**plan_doc(), "roster": {"waiting_absent_after_s": plan_absent}}, "test")
+    doc = spares_doc(lost=["gpu-d"], waiting_spare=True, wait_reason=WAIT, waiting_since=now - waited,
+                     **({"max_wait_s": max_wait} if max_wait is not None else {}))
+    assert r.load_fleet_state(store_state(tmp_path / "s", "recovering", spares=doc, updated=now - report_age))
+    assert r.max_ts == now
+    return r
+
+
+def test_a_wait_past_waiting_absent_after_s_counts_as_absent(tmp_path):
+    r = _long_wait(tmp_path, 2 * HOUR)
+    sp = cards(r)["1"]["spares"]
+    assert sp["waiting"] and sp["wait_state"] == {"state": "absent"}
+    out = smoke(tmp_path / "p", r)
+    assert "waiting for a spare node · counts as absent" in out["texts"] and out["dashed"] == 0
+    assert "counts as absent" in out["nodes"] and "counts as absent for the fleet" in out["tip"]
+    assert out["roster"] == "--warn"  # out of the roster as a warning, not a loss
+    # the plan's fleet.waiting_absent_after_s (3 h): two hours is an ordinary wait
+    r = _long_wait(tmp_path / "b", 2 * HOUR, plan_absent=3 * HOUR)
+    assert "wait_state" not in cards(r)["1"]["spares"]
+    assert "counts as absent" not in json.dumps(smoke(tmp_path / "q", r))
+
+
+@pytest.mark.parametrize("max_wait", [None, 6 * HOUR])
+def test_a_wait_past_spare_max_wait_s_reads_lost(tmp_path, max_wait):
+    waited = 30 * HOUR if max_wait is None else 7 * HOUR  # past the default 24 h, or the record's own limit
+    r = _long_wait(tmp_path, waited, max_wait=max_wait)
+    c = cards(r)["1"]
+    assert not c["spares"]["waiting"] and c["spares"]["wait_state"]["state"] == "expired"
+    assert c["island_now"]["state"] == "lost" and c["status"] in ("lost", "stale")
+    out = smoke(tmp_path / "p", r)
+    assert out["dashed"] >= 1 and "lost" in out["texts"]  # drawn as a lost trainer again
+    assert not any(t.startswith("waiting for a spare node ·") for t in out["texts"])  # no wait phase
+    assert any("past --spare-max-wait-s" in t for t in out["texts"]) and "past --spare-max-wait-s" in out["nodes"]
+    assert out["roster"] == "--bad"  # a loss, not a wait
+
+
+def test_a_wait_no_record_reports_any_more_reads_lost(tmp_path):
+    r = _long_wait(tmp_path, 2 * HOUR, report_age=2 * HOUR)  # the launcher stopped writing it two hours ago
+    c = cards(r)["1"]
+    assert not c["spares"]["waiting"] and c["spares"]["wait_state"]["state"] == "frozen"
+    assert c["island_now"]["state"] == "unknown"  # nobody says what it is
+    out = smoke(tmp_path / "p", r)
+    assert out["dashed"] >= 1 and "lost" in out["texts"] and "no report for 2.0 h" in out["nodes"]
+    # an hourly report one hour and ten minutes old is still a wait
+    ok = _long_wait(tmp_path / "b", 30 * 60, report_age=70 * 60)
+    assert cards(ok)["1"]["spares"]["waiting"] and "wait_state" not in cards(ok)["1"]["spares"]
+
+
+def test_an_events_only_wait_no_event_reports_any_more_reads_lost(tmp_path):
+    end = reducer().max_ts
+    r = reducer(lost(end + 10), waiting(end + 20), ev("island_ready", end + 3 * HOUR, k=0))
+    sp = cards(r)["1"]["spares"]
+    assert sp["source"] == "events" and not sp["waiting"] and sp["wait_state"]["state"] == "frozen"
+
+
+def test_a_fresh_failure_waiting_for_a_spare_is_out_of_the_roster(tmp_path):
+    """Right after the failure its tape is still live: the wait alone (no lost-node event yet) takes
+    it out of the roster, and the layout line counts it the same way."""
+    end = reducer().max_ts
+    base = reducer().page_view(now=end)["topology"]["diloco"]
+    assert base["roster"] == 2 and "roster_spare" not in base
+    r = reducer(waiting(end + 5))
+    view = r.page_view(now=r.max_ts)["topology"]["diloco"]
+    assert cards(r)["1"]["spares"]["lost"] == [] and view["roster"] == 1 and view["roster_spare"] == 1
+    out = smoke(tmp_path, r)
+    assert "1/2 trainer(s) live (1 replacing a lost node)" in out["note"]
+    assert out["roster"] == "--warn"
+
+
+def test_the_wait_reads_the_same_time_on_card_tip_and_table(tmp_path):
+    end = reducer().max_ts
+    r = _with_record(tmp_path, "recovering", lost(end - 100), waiting(end - 95),
+                     spares=spares_doc(lost=["gpu-d"], waiting_spare=True, wait_reason=WAIT, waiting_since=end - 95))
+    out = smoke(tmp_path, r)
+    assert "waiting for a spare node · 1m35s" in out["texts"]  # card
+    assert "waiting for a spare</span><span>1m35s · " in out["tip"]  # its tip
+    assert "waiting spare 1m35s" in out["nodes"]  # Islands now

@@ -524,22 +524,28 @@ function naKpi(x){var t=String(x[0]),v=String(x[1]),y=x.slice();
 function hms(s){return typeof YetoTopo!=="undefined"&&YetoTopo.util?YetoTopo.util.dur(s):dur(s)}
 function spEnded(c){return /^(done|stopped|left)$/.test(c.status)||!!(c.island_now&&/^(stopped|done|down|removed|failed|abandoned)$/.test(c.island_now.state))}
 var TD=function(){return typeof YetoTopoD!=="undefined"&&YetoTopoD.whyNoSpare?YetoTopoD:null};
+// the time spare waits are measured against: the topology's (its cards and tips use it too), else the page's
+function spNow(){var t=TD()&&TD().spNow?TD().spNow():null;return t==null?NOW:t}
+function spWait(c){return (c.spares||{}).wait_state||null}
 // the Island column's mark ([text, class, dot]) in place of its status, as the straggler's
 function spareMark(c){var sp=c.spares;if(spEnded(c))return null;
-  if(sp&&sp.waiting)return ["waiting spare"+(fin(sp.since)?" "+hms(Math.max(0,NOW-sp.since)):""),"wn","y"];
+  if(sp&&sp.waiting)return ["waiting spare"+(fin(sp.since)?" "+hms(Math.max(0,spNow()-sp.since)):"")+((spWait(c)||{}).state==="absent"?" · counts as absent":""),"wn","y"];
   return (c.node_health||[]).some(function(h){return h.verdict==="lost"})?["node ✕","bd","r"]:null}
-// the trainer row's last cell: the reason only ([text, hover, class]) or null
-function spareCell(c){var sp=c.spares,bad=spEnded(c)?[]:c.node_health||[],td=TD(),out=[],tip=[],cls="";
+// the trainer row's Nodes cell: the reason only ([text, hover, class]) or null
+function spareCell(c){var sp=c.spares,bad=spEnded(c)?[]:c.node_health||[],td=TD(),out=[],tip=[],cls="",ws=spWait(c);
   if(sp&&sp.stopped)return [sp.stopped,sp.stopped,"bd"];
+  if(ws&&ws.state!=="absent"&&!spEnded(c))return [ws.why,ws.why,"bd"];  // a wait not believed: lost or unknown
   if(sp&&sp.waiting&&!spEnded(c))return [td?td.whyNoSpare(sp.reason):sp.reason||"no free spare node",sp.reason||"no free spare node","wt"];
   if(bad.length){var h=bad[0],why=function(x){return td?td.healthWhy(x):x.reasons.join("; ")||x.verdict};
     out.push(h.node+": "+why(h)+(bad.length>1?" +"+(bad.length-1):""));
     tip=bad.map(function(x){return x.node+": "+(x.verdict==="lost"?"lost · ":"")+why(x)});cls=bad.some(function(x){return x.verdict==="lost"})?"bd":"wt"}
-  if(sp&&sp.replacements>0){var l=sp.last||{};out.push("replaced "+sp.replacements+"×"+(fin(sp.last_at)?" · "+hms(Math.max(0,NOW-sp.last_at))+" ago":""));
+  if(sp&&sp.replacements>0){var l=sp.last||{};out.push("replaced "+sp.replacements+"×"+(fin(sp.last_at)?" · "+hms(Math.max(0,spNow()-sp.last_at))+" ago":""));
     tip.push((l.lost&&l.spare?l.lost+" → "+l.spare+(l.resume_step!=null?", resumed at step "+l.resume_step:"")+"; ":"")+(fin(sp.window)&&fin(sp.max)?sp.window+" of at most "+sp.max+" replacements in 24 h":sp.replacements+" replacement(s)"))}
   return out.length?[out.join(" · "),tip.join("\n"),cls]:null}
-function spareDiv(c){var why=(c.left||{}).reason||"",t=why?null:spareCell(c);
-  return t?'<div class="ns spc'+(t[2]?" "+t[2]:"")+'" title="'+esc(t[1])+'">'+esc(t[0])+'</div>':'<div class="ns">'+esc(why)+'</div>'}
+// the Nodes column (only on a page with a resident ssh: island that has spare nodes or health checks): one
+// line cut to the column's width with an ellipsis, the whole on hover
+function spareTd(c){var t=spareCell(c);
+  return '<td class="spn">'+(t?'<div class="ns'+(t[2]?" "+t[2]:"")+'" title="'+esc(t[1])+'">'+esc(t[0])+'</div>':"")+'</td>'}
 function rlm(V){
   var O=V.overview||{},A=V.async||{},S=A.samplers||{},TR=A.trainers||{},X=V.islands||{},cs=rlCards(V);
   var t1=END,t0=END-RANGE_H*3600,tp=t0-RANGE_H*3600;
@@ -593,6 +599,8 @@ function rlm(V){
   // a run with a syncer: local step / outer version, last PUSH / BCAST; no HBM column when nothing sampled it
   var dl=typeof YetoTopoD!=="undefined"?YetoTopoD.table(V):null,noHbm=!!dl&&!cs.some(function(c){return fin(hbm(c))});
   var head='<tr><th>Island</th><th>'+(dl?'<span title="local step: this island\'s own steps; outer sweep: every fragment merged at least that many times">Local step / outer sweep</span>':"Round / policy")+'</th><th>Reward</th><th>train-rollout KL</th><th>logprob |diff|</th><th>grad_norm</th><th>Step / round time</th><th>Tokens/s</th>'+(noHbm?"":'<th class="bar">HBM peak</th>')+'<th>'+(dl?"Last PUSH / BCAST applied":"Last release / load")+'</th><th>Shard · incarnation</th></tr>';
+  var spc=cs.some(function(c){return c.role!=="sampler"&&(c.spares||c.node_health)}),nc=(noHbm?9:10)+(spc?1:0);
+  if(spc)head=head.replace("<th>Shard · incarnation</th>",'<th class="spn">Nodes</th><th>Shard · incarnation</th>');
   var flNa=rlMulti(V);
   var rowOf=function(c){var ex=X[c.id]||{},s=S[c.id],rr=RR(c),r=rr[rr.length-1]||{},liv=rlLive(c.status),h=hbm(c),lim=ex.hbm_total_gib,mx=Math.max(64,fin(lim)?lim*1.15:0),pc=fin(h)?Math.min(100,100*h/mx):0;
       // a resident ssh: island waiting for a spare node or with a lost node: its mark in place of its status; else a
@@ -607,12 +615,12 @@ function rlm(V){
       if(c.role==="sampler"&&s){var sr=s.rounds||[],l=s.last_round||sr[sr.length-1]||{},ld=(A.releases||[]).map(function(x){return (x.loads||{})[c.id]?[x.policy_version,x.loads[c.id]]:null}).filter(Boolean).pop();
         return row+'<td title="'+esc(k(s.n_rounds-(s.empty_rounds||0),0)+" rounds wrote groups"+(s.empty_rounds?", "+k(s.empty_rounds,0)+" wrote none (backlog full, all trials lost or drained)":"")+"; generating with policy "+(s.policy_version==null?"n/a":"v"+s.policy_version))+'">'+
           k(s.n_rounds-(s.empty_rounds||0),0)+(s.empty_rounds?' <span class="ns">(+'+k(s.empty_rounds,0)+' empty)</span>':'')+' / '+(s.policy_version==null?"n/a":"v"+s.policy_version)+'<div class="ns">'+ago(l.ts)+' · age p50 '+k(s.lag_p50,1)+'</div></td><td>'+(dl&&!fin(s.reward_mean_last)?'—<div class="ns">not on its tape</div>':k(s.reward_mean_last,3))+(fin(s.reward_last_ts)?'<div class="ns">round '+esc(s.reward_last_rollout_id)+' · '+ago(s.reward_last_ts)+'</div>':"")+'</td>'+'<td title="samplers do not train">—</td>'.repeat(3)+'<td>'+dur(l.generate_s)+'<div class="ns">generate, p50 '+dur(s.generate_p50_s)+'</div></td><td>'+(fin(l.response_tokens)&&l.generate_s?k(l.response_tokens/l.generate_s):dl?'—<div class="ns">no tokens on its rounds</div>':"n/a")+'</td>'+hb+
-          '<td>'+(ld?(ld[1].at_start?"at start":dur(ld[1].load_wall_s))+'<div class="ns">load v'+ld[0]+' · '+ago(ld[1].loaded_at)+' · '+(ld[1].at_start?"loaded when the sampler started":dur(ld[1].latency_s)+' after release')+'</div>'+(ld[1].at_start?"":loadParts(ld[1])):"none yet")+'</td><td>'+esc(s.shard||c.id)+'<div class="ns">'+esc(s.incarnation||"n/a")+(pl?" · pool "+esc(pl.event.replace("nc_elastic_",""))+(pl.ticket?" "+esc(pl.ticket):""):"")+'</div></td></tr>'}
+          '<td>'+(ld?(ld[1].at_start?"at start":dur(ld[1].load_wall_s))+'<div class="ns">load v'+ld[0]+' · '+ago(ld[1].loaded_at)+' · '+(ld[1].at_start?"loaded when the sampler started":dur(ld[1].latency_s)+' after release')+'</div>'+(ld[1].at_start?"":loadParts(ld[1])):"none yet")+'</td>'+(spc?'<td class="spn"></td>':'')+'<td>'+esc(s.shard||c.id)+'<div class="ns">'+esc(s.incarnation||"n/a")+(pl?" · pool "+esc(pl.event.replace("nc_elastic_",""))+(pl.ticket?" "+esc(pl.ticket):""):"")+'</div></td></tr>'}
       var mr=(A.releases||[]).filter(function(x){return String(x.trainer)===String(c.id)}).pop(),kl=lastW(rr,"kl_tr")||lastW(rr,"kl")||{},cw=curWait(V,c),un=c.unreported||{};
       var gn=lastW(rr,"grad_norm")||{},dstep=dl&&dl.step(c);
       return row+'<td>'+(dstep!=null?esc(dstep):(r.round==null?"n/a":r.round)+' / '+(c.policy_version==null?'<span title="no policy version reported by the current launch yet">—</span>':(fin(c.released_version)&&c.released_version!==c.policy_version?"local v":"v")+c.policy_version))+'<div class="ns">'+(dstep==null&&fin(c.released_version)&&c.released_version!==c.policy_version?"released v"+c.released_version+" · ":"")+ago(r.ts)+'</div></td><td>'+k((lastW(rr,"reward")||{}).reward,3)+'</td><td>'+(fin(kl.kl_tr)?k(kl.kl_tr,4)+(fin(kl.kl)?'<div class="ns">PPO '+k(kl.kl,4)+'</div>':un.ppo_kl?'<div class="ns">PPO '+esc(un.ppo_kl)+'</div>':""):fin(kl.kl)?(un.train_rollout_kl?'<span title="'+esc(un.train_rollout_kl)+'">—</span>':'n/a')+'<div class="ns">PPO '+k(kl.kl,4)+'</div>':un.train_rollout_kl?'—<div class="ns">'+esc(un.train_rollout_kl)+'</div>':"n/a")+'</td><td>'+k((lastW(rr,"logprob_diff")||{}).logprob_diff,4)+'</td><td>'+k(gn.grad_norm,3)+(gn.grad_norm===0&&gn.reward_std===0?'<div class="ns">all rewards equal</div>':"")+'</td>'+
-        '<td>'+dur(r.step_s)+(fin(r.round_s)||!flNa?'<div class="ns">round '+dur(r.round_s)+'</div>':'')+(cw&&cw.s>=60?'<div class="ns wt">current round'+(cw.round!=null?" "+cw.round:"")+' waiting for data '+dur(cw.s)+'</div>':"")+'</td><td>'+k(r.tok_s)+'</td>'+hb+'<td>'+(dl&&dl.trainers[c.id]?dl.push(c,NOW):mr?dur(mr.upload_s)+'<div class="ns">release v'+mr.policy_version+' · '+ago(mr.released_at)+'</div>':"none"+(c.status==="left"?"":" by this trainer"))+'</td><td>trainer '+esc(c.id)+spareDiv(c)+'</td></tr>'};
-  var unkRow=function(c){var ex=X[c.id]||{};return '<tr class="off"><td><div class="nn">'+rlDot("unknown")+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">no trainer or sampler events in this tape; not counted</div></td><td colspan="'+(noHbm?9:10)+'">'+
+        '<td>'+dur(r.step_s)+(fin(r.round_s)||!flNa?'<div class="ns">round '+dur(r.round_s)+'</div>':'')+(cw&&cw.s>=60?'<div class="ns wt">current round'+(cw.round!=null?" "+cw.round:"")+' waiting for data '+dur(cw.s)+'</div>':"")+'</td><td>'+k(r.tok_s)+'</td>'+hb+'<td>'+(dl&&dl.trainers[c.id]?dl.push(c,NOW):mr?dur(mr.upload_s)+'<div class="ns">release v'+mr.policy_version+' · '+ago(mr.released_at)+'</div>':"none"+(c.status==="left"?"":" by this trainer"))+'</td>'+(spc?spareTd(c):'')+'<td>trainer '+esc(c.id)+'<div class="ns">'+esc((c.left||{}).reason||"")+'</div></td></tr>'};
+  var unkRow=function(c){var ex=X[c.id]||{};return '<tr class="off"><td><div class="nn">'+rlDot("unknown")+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">no trainer or sampler events in this tape; not counted</div></td><td colspan="'+nc+'">'+
     esc(c.source_lost?"tape source lost: "+String(c.source_lost.error||"").slice(0,120):"")+'</td></tr>'};
   var liveC=act.filter(function(c){return rlLive(c.status)||c.status==="stale"}),endC=act.filter(function(c){return liveC.indexOf(c)<0});
   // a fleet: a value its tapes do not carry is a dash that says so, never a bare n/a (tags and attributes kept)
@@ -620,7 +628,7 @@ function rlm(V){
   var never=function(c){return flNa&&!rlLive(c.status)&&c.status!=="stale"&&!RR(c).length&&!SR(c).length};
   var neverRow=function(c){var why=c.left&&(c.left.reason||c.left.detail),st=c.status==="left"?"left":c.status;
     return '<tr class="off"><td><div class="nn">'+rlDot(c.status)+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">'+esc([c.name,c.gpu?c.gpu+" × "+c.cards:null].filter(Boolean).join(" · "))+'</div></td>'+
-      '<td colspan="'+(noHbm?9:10)+'" class="ns" title="'+esc((c.left&&c.left.detail)||"")+'">'+esc(st+(why?": "+why:"")+" · ended before its first round")+'</td></tr>'};
+      '<td colspan="'+nc+'" class="ns" title="'+esc((c.left&&c.left.detail)||"")+'">'+esc(st+(why?": "+why:"")+" · ended before its first round")+'</td></tr>'};
   var rowNa=function(c){if(never(c))return neverRow(c);var h=rowOf(c);return flNa?h.replace(/(<[^>]*>)|\bn\/a\b/g,function(m,tag){return tag||'<span class="note" title="not on this island\'s tapes">—</span>'}):h};
   $("rNodes").innerHTML=(liveC.length?'<table class="nt">'+head+liveC.map(rowNa).join("")+'</table>':'<div class="empty">no active island</div>')+
     (endC.length?'<details class="ended"'+(liveC.length?"":" open")+'><summary class="ns">'+endC.length+' island(s) that ended (left / lost / finished / stopped): '+esc(endC.map(function(c){return c.label+" "+c.status}).join(", "))+'</summary><table class="nt">'+head+endC.map(rowNa).join("")+'</table></details>':"")+
