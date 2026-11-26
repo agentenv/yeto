@@ -704,21 +704,29 @@ quarantine record back: a stop it confirmed is recorded as a marker of its own
 (`fleet/nodes/<name>/settled/`), and once the marker is written the launcher reads the
 record again; if the record no longer lists that stop (the node was released, or
 quarantined anew), it removes the marker. A stop the launcher confirms during or after
-the release therefore leaves nothing behind. No clocks are compared, so a launcher
-and a release-node whose clocks disagree behave the same. The release also leaves
-`fleet/nodes/<name>/released.json` (who released the node, and when) in the run store.
-The launcher reads the record again before each
-stop it retries, and skips a stop the record no longer owes. A confirmed stop removes
+the release therefore leaves nothing behind. The release removes the record before
+the markers. No clocks are compared, so a launcher and a release-node whose clocks
+disagree behave the same. The release also leaves `fleet/nodes/<name>/released.json`
+(who released the node, and when) in the run store. The launcher reads the record
+again before each stop it retries, and skips a stop the record no longer owes. When the
+store cannot list the markers, every stop the record lists counts as owed (a stop is
+safe to run twice); when it cannot read the record, the launcher runs the stop, does not
+write over the record, and release-node exits 1 asking to be run again later. A confirmed stop removes
 its incarnation's pid file and leaves a `stopped` marker in its state dir, so a later
 stop of that incarnation (release-node, `yeto cleanup`) succeeds without signalling a
 process that reused the pid. A ledger row is closed only after its stop was confirmed.
-A node picked again with open owed rows (it was released elsewhere) has their stops run
-in the background, outside the launcher's lock.
+A candidate spare with open owed rows (it was released elsewhere) has their stops run
+during its checks, outside the launcher's lock and before any island starts on it; one
+whose stop fails is passed over this round, with the reason. One stop runs per node at
+a time.
 
 A spare whose start failed is given back to the pool only once its stop of that start is
 confirmed. If that stop is not confirmed, the spare is treated as a lost node: it is
-quarantined with the stop it owes, the island keeps its claim and its lease, and no
-island of this or another run picks it until `yeto cluster release-node`.
+quarantined with the stop it owes, that stop gets a ledger row of its own (open until
+the stop is confirmed), its lease is kept, and no island of this or another run picks
+it until `yeto cluster release-node`. A failed start keeps its incarnation number: the
+next try starts the next one, after stopping the failed one on any node where its stop
+was not confirmed.
 
 ### Known limits
 

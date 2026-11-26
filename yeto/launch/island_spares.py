@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shlex
 import sys
 import threading
 import time
@@ -439,7 +440,9 @@ class NodeRecords:
 
     def own_quarantine(self, name: str) -> dict[str, Any] | None:
         """The node's quarantine record in this run store (None: not quarantined here); its
-        ``owed`` leaves out every stop a :meth:`settle` marker says went through."""
+        ``owed`` leaves out every stop a :meth:`settle` marker says went through. A record the
+        store fails to read is ``unreadable`` (with ``read_error``); when only its markers cannot
+        be listed, the record comes back unfiltered (every stop it lists owed) with ``read_error``."""
         try:
             doc = self._read(self.key(name, QUARANTINE_NAME))
         except Exception as error:  # noqa: BLE001 - unknown is not free
@@ -448,9 +451,9 @@ class NodeRecords:
             return doc
         try:
             done = self._settled(name)
-        except Exception as error:  # noqa: BLE001 - the stops it owes are not known
-            return {**unreadable(f"its settled stops not listed: {type(error).__name__}: {error}"),
-                    **{k: doc[k] for k in ("run", "island", "lease_holder") if k in doc}}
+        except Exception as error:  # noqa: BLE001 - every listed stop counts as owed (each is idempotent)
+            return {**doc, "read_error": True,
+                    "settled_unread": f"its settled stops not listed: {type(error).__name__}: {error}"[:300]}
         if not done:
             return doc
         return {**doc, "owed": [o for o in doc["owed"] if _owed_key(o) not in done]}
@@ -478,9 +481,16 @@ class NodeRecords:
         """Keep ``name`` out of every pick; ``owed``: the stops it never got (run by release);
         ``lease_holder``: who holds its cross-run lease (kept until release-node ends it)."""
         earlier = self.own_quarantine(name) or {}
+        if earlier.get("unreadable") and earlier.get("read_error"):  # its owed stops would be lost
+            raise SpareError(f"node {name}: its quarantine record could not be read ({earlier.get('reason')}); "
+                             "not written over")
         doc = {"schema": QUARANTINE_SCHEMA, "node": name, "run": self.run_id, "island": island,
                "reason": str(reason)[:500], "at": self.wall(),
                "owed": [*list(earlier.get("owed") or ()), *map(dict, owed)]}
+        if earlier.get("unreadable"):  # a broken record: what it held is not known
+            doc["earlier_unreadable"] = str(earlier.get("reason") or "")[:300]
+            self.log(f"[launcher] WARN: node {name}: its quarantine record was broken ({earlier.get('reason')}); "
+                     "written anew, the stops it listed are not known (check the node for the run's containers)")
         holder = lease_holder or earlier.get("lease_holder")
         if holder:
             doc["lease_holder"] = str(holder)
@@ -516,7 +526,12 @@ class NodeRecords:
         if not self._create(marker, {"run_id": mine[0], "island": mine[1], "incarnation": mine[2],
                                      "at": self.wall()}):
             return  # settled already
-        if not lists():
+        try:
+            listed = lists()
+        except BaseException:  # not known whether the record still lists it: no marker left behind
+            self._delete(marker)
+            raise
+        if not listed:
             self._delete(marker)
 
     @staticmethod
@@ -531,11 +546,11 @@ class NodeRecords:
         """Remove the node's quarantine (run store and lease store) and its settle markers; a
         ``released.json`` (who, when) stays in the run store. Raises when the store fails."""
         self._write(self.key(name, RELEASED_NAME), {"node": name, "run": self.run_id, "at": self.wall()})
-        for key in self._list(f"{NODES_DIR}/{name}/{SETTLED_DIR}/"):
-            self._delete(key)
-        self._delete(self.key(name, QUARANTINE_NAME))
+        self._delete(self.key(name, QUARANTINE_NAME))  # first: a settle from now on removes its own marker
         if self.shared is not None:
             self.shared.delete(self.shared_key(name))
+        for key in self._list(f"{NODES_DIR}/{name}/{SETTLED_DIR}/"):
+            self._delete(key)
 
 
 def _owed_key(row: Mapping[str, Any]) -> tuple[str, str, int]:
@@ -559,12 +574,18 @@ def owed_kill_script(run_id: str, island: str, incarnation: int, grace_s: int, c
 
     paths = remote_paths(run_id, island, int(incarnation))
     pinned = _pin_state_home(paths)
-    pid, sdir = pinned["pid"], pinned["dir"]
-    body = (f"rc=$?; if [ $rc -eq 0 ] && [ -d \"{sdir}\" ]; then rm -f \"{pid}\"; "
-            f": > \"{sdir}/{STOPPED_MARKER}\"; fi; exit $rc")
-    quoted = "'" + body.replace("'", "'\\''") + "'"  # one shell word, whatever the run and island names hold
+    var = "$" + STATE_HOME_VAR
+
+    def word(path: str) -> str:  # the state home expands at the trap, the rest is literal
+        if path.startswith(var):
+            return f'"{var}"' + shlex.quote(path[len(var):])
+        return shlex.quote(path)
+
+    sdir = word(pinned["dir"])
+    body = (f"rc=$?; if [ $rc -eq 0 ] && [ -d {sdir} ]; then rm -f {word(pinned['pid'])}; "
+            f": > {word(pinned['dir'] + '/' + STOPPED_MARKER)}; fi; exit $rc")
     return (f"{STATE_HOME_VAR}=\"$HOME\"\n"
-            f"trap {quoted} EXIT\n"
+            f"trap {shlex.quote(body)} EXIT\n"  # one word: a name with quotes, $(...) or `...` expands nothing
             + kill_script(paths, int(grace_s), container=container or None))
 
 
@@ -724,6 +745,11 @@ def release_node_main(*, inventory: str, name: str, store: str, ssh: Any = None,
     if doc is None:
         say(f"[yeto] node {name} is not quarantined in {store}")
         return 0
+    if doc.get("read_error"):  # the store did not answer: nothing is known, nothing is forced
+        say(f"[yeto] node {name}: its quarantine records could not be read "
+            f"({doc.get('settled_unread') or doc.get('reason')}): the store did not answer; run "
+            "`yeto cluster release-node` again later")
+        return 1
     if doc.get("unreadable"):  # a broken record: which stops the node owes is not known
         say(f"[yeto] node {name}: its quarantine record is unreadable ({doc.get('reason')}): the stops it still owes "
             "cannot be known")
@@ -1043,7 +1069,9 @@ def check_candidates(spares: IslandSpares, island: str, current: Sequence[Node],
                      ops: Any, need: int = 1, known: Iterable[str] = ()) -> dict[str, tuple[bool, str]]:
     """The health checks of a pick, run before it (outside ``SshIslandOps``' lock: each is
     an SSH call): the candidates in ``fabric_groups.pick_placement`` order, but ``known``
-    (checked before), until ``need`` pass. Node name -> ``(ok, why)`` (:func:`node_check`)."""
+    (checked before), until ``need`` pass. Node name -> ``(ok, why)`` (:func:`node_check`).
+    A healthy candidate's open owed stops (:func:`close_owed_elsewhere`) run here too; one
+    whose stop fails is not a candidate this round (``why`` says so)."""
     candidates, _group, skipped, multi, keep = spare_candidates(spares, island, current, lost)
     checked: dict[str, tuple[bool, str]] = {}
     out = {**skipped, **{k: "health checked before" for k in known}}
@@ -1052,8 +1080,12 @@ def check_candidates(spares: IslandSpares, island: str, current: Sequence[Node],
         node, _why = _place(spares, candidates, keep, {**out, **{k: why for k, (_ok, why) in checked.items()}})
         if node is None:
             break
-        checked[node.name] = node_check(node, ops, multi=multi, env=spares.job_env)
-        passed += bool(checked[node.name][0])
+        ok, why = node_check(node, ops, multi=multi, env=spares.job_env)
+        if ok:  # the stops it owes from a release elsewhere, before any island starts on it
+            ok, owed_why = close_owed_elsewhere(spares, node, ops)
+            why = why if ok else owed_why
+        checked[node.name] = (ok, why)
+        passed += bool(ok)
     return checked
 
 
@@ -1068,8 +1100,8 @@ def pick_spare(spares: IslandSpares, island: str, current: Sequence[Node], lost:
     excluded and the pick runs again. A lost node itself is a candidate again once released
     from its quarantine. The pick is claimed (and its lease taken) before it is returned;
     :func:`unpick` gives it back. A claim whose lease step fails (refused, or the lease store
-    raised) is given back before the next candidate is tried. The stops a picked node still
-    owes elsewhere are the caller's (:func:`close_owed_elsewhere`, outside the ops lock)."""
+    raised) is given back before the next candidate is tried. The stops a candidate still
+    owes from a release elsewhere ran in :func:`check_candidates`, outside the ops lock."""
     candidates, group, skipped, multi, keep = spare_candidates(spares, island, current, lost, chosen=chosen)
     unchecked: list[str] = []
     while True:
@@ -1113,23 +1145,45 @@ def pick_spare(spares: IslandSpares, island: str, current: Sequence[Node], lost:
         return Pick(node, group, skipped)
 
 
-def close_owed_elsewhere(spares: IslandSpares, node: Node, ops: Any) -> None:
-    """A picked node has no quarantine record (a release-node elsewhere, a ``--force`` over
-    a broken record, or a run store kept in memory): the stops its open owed ledger rows
-    name are run on it now, and each row closes (``released elsewhere``) only once its stop
-    went through, so the node is billed once and nothing of the old incarnation is left."""
+_OWED_LOCKS: dict[tuple[str, str], threading.Lock] = {}  # (run, node): one owed stop at a time
+_OWED_LOCKS_GUARD = threading.Lock()
+
+
+def _owed_lock(run_id: str, node: str) -> threading.Lock:
+    with _OWED_LOCKS_GUARD:
+        return _OWED_LOCKS.setdefault((str(run_id), str(node)), threading.Lock())
+
+
+def close_owed_elsewhere(spares: IslandSpares, node: Node, ops: Any) -> tuple[bool, str]:
+    """A candidate with no quarantine record (a release-node elsewhere, a ``--force`` over a
+    broken record, or a run store kept in memory) and open owed ledger rows of this run: the
+    stops they name run on it now (SSH; no ops lock), and each row closes (``released
+    elsewhere``) only once its stop went through, so the node is billed once and nothing of
+    the old incarnation runs when an island starts there. One stop per node at a time (two
+    islands' checks of one candidate stop it once). ``(ok, why)``: ok when no row is left open."""
     from . import ssh_trainer_ledger  # noqa: PLC0415
+
+    failed: list[str] = []
 
     def stopped(row: Any) -> bool:
         ok, action, _ = ssh_trainer_ledger.cleanup_release(row, ssh=ops)
         if not ok:
+            failed.append(f"{row.id}: {action}")
             spares.records.log(f"[launcher] node {node.name}: {action}; its owed ledger row {row.id} stays open")
         return ok
 
-    closed = ssh_trainer_ledger.release_owed_elsewhere(run_id=spares.records.run_id, node=node.name, stop=stopped)
+    run_id = spares.records.run_id
+    try:
+        with _owed_lock(run_id, node.name):
+            closed = ssh_trainer_ledger.release_owed_elsewhere(run_id=run_id, node=node.name, stop=stopped)
+    except Exception as error:  # noqa: BLE001 - not known whether it still runs: not a candidate now
+        return False, f"its owed stops not run ({type(error).__name__}: {error})"[:300]
     if closed:
         spares.records.log(f"[launcher] node {node.name} is picked again with no quarantine record: its owed "
                            f"stop(s) went through and ledger row(s) {closed} are closed (released elsewhere)")
+    if failed:
+        return False, ("an owed stop of an earlier incarnation failed there (" + "; ".join(failed) + ")")[:300]
+    return True, "no owed stop left"
 
 
 def unpick(spares: IslandSpares, island: str, node: Node) -> None:

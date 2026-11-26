@@ -148,9 +148,9 @@ def trainer_pick_excluded(names: Iterable[str], *, lease_objects: Any = None, ru
     unreadable record counts. ``quarantines``: name -> record; ``note``:
     :func:`quarantine_note` (None: none). The launch's trainer pick
     (``ssh_trainer_island.lease_trainer_nodes``) calls it with the run's ``NodeLeases``
-    (``lease_objects=leases.objects``, ``assigned=leases.assigned``, no ``run_objects``: with a
-    lease store every quarantine is there too); a prediction of that pick calls it with the
-    same arguments."""
+    (``lease_objects=leases.objects``, ``assigned=leases.assigned``, ``run_objects``: the
+    object API of the run's ``--rl-checkpoint-store``, ``ssh_trainer_island._run_store_objects``);
+    a prediction of that pick calls it with the same arguments."""
     names = set(names)
     docs = dict(shared_quarantines(lease_objects, names, log=log))
     for name, doc in run_store_quarantines(run_objects, names, log=log).items():
