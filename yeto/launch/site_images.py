@@ -36,10 +36,12 @@ that names its image.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import re
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -318,7 +320,8 @@ def load(path: str | os.PathLike[str] | None = None) -> list[SiteImage]:
 
 
 def save(records: Sequence[SiteImage], path: str | os.PathLike[str] | None = None) -> Path:
-    """Write ``records`` to the catalog (a temporary file renamed over it)."""
+    """Write ``records`` to the catalog: a temporary file, flushed to disk, renamed over
+    it, and the directory flushed, so a crash leaves the old catalog or the new one."""
     import yaml  # noqa: PLC0415
 
     file = catalog_path(path)
@@ -328,20 +331,59 @@ def save(records: Sequence[SiteImage], path: str | os.PathLike[str] | None = Non
     try:
         with os.fdopen(fd, "w") as handle:
             handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, file)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+    _fsync_dir(file.parent)
     return file
+
+
+def _fsync_dir(directory: Path) -> None:
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:  # a directory some filesystems cannot flush
+        pass
+    finally:
+        os.close(fd)
+
+
+def lock_path(path: str | os.PathLike[str] | None = None) -> Path:
+    """The lock file next to the catalog (``.<name>.lock``)."""
+    file = catalog_path(path)
+    return file.parent / f".{file.name}.lock"
+
+
+@contextlib.contextmanager
+def locked(path: str | os.PathLike[str] | None = None) -> Iterator[Path]:
+    """Hold the catalog's exclusive lock (``flock`` on :func:`lock_path`): two
+    ``yeto image adopt`` runs writing the same catalog take turns, so neither loses the
+    other's record."""
+    lock = lock_path(path)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield catalog_path(path)
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def add(record: SiteImage | Mapping[str, Any], path: str | os.PathLike[str] | None = None) -> Path:
     """Add ``record`` (validated) to the catalog; it replaces a record of the same image
-    (:meth:`SiteImage.same_image`). A broken catalog is refused, never overwritten."""
+    (:meth:`SiteImage.same_image`). The read and the write happen under the catalog's
+    lock (:func:`locked`). A broken catalog is refused, never overwritten."""
     new = record if isinstance(record, SiteImage) else parse_record(record)
     parse_record(new.to_doc())  # the record as it will be read back
-    records = [r for r in load(path) if not r.same_image(new)]
-    return save([*records, new], path)
+    with locked(path):
+        records = [r for r in load(path) if not r.same_image(new)]
+        return save([*records, new], path)
 
 
 # --- matching ----------------------------------------------------------------------

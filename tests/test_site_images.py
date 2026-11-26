@@ -121,7 +121,56 @@ def test_add_replaces_the_same_image_keeps_the_others_and_never_overwrites_a_bro
     with pytest.raises(si.SiteImagesError, match="not valid YAML"):
         si.add(record(ref=REF3), path)
     assert path.read_text() == "images: ["
-    assert not [p for p in path.parent.iterdir() if p.name.startswith(".")]  # no temporary file left
+    leftovers = [p.name for p in path.parent.iterdir() if p.name.startswith(".")]
+    assert leftovers == [si.lock_path(path).name]  # no temporary file left, only the lock
+
+
+def _add_one(path: str, index: int) -> None:
+    si.add(record(ref=f"registry.example/site/miles-new@sha256:{index:064x}"), path)
+
+
+def test_concurrent_adds_from_separate_processes_keep_every_record(tmp_path):
+    import multiprocessing  # noqa: PLC0415
+
+    path = tmp_path / "site-images.yaml"
+    ctx = multiprocessing.get_context("spawn")
+    procs = [ctx.Process(target=_add_one, args=(str(path), i)) for i in range(8)]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(60)
+    assert [proc.exitcode for proc in procs] == [0] * 8
+    assert sorted(r.ref for r in si.load(path)) == sorted(
+        f"registry.example/site/miles-new@sha256:{i:064x}" for i in range(8))
+
+
+def test_an_add_waits_for_the_catalog_lock(tmp_path):
+    import threading  # noqa: PLC0415
+
+    path = tmp_path / "site-images.yaml"
+    si.add(record(), path)
+    done = threading.Event()
+
+    def writer():
+        si.add(record(ref=REF2), path)
+        done.set()
+
+    with si.locked(path) as held:
+        assert held == path
+        thread = threading.Thread(target=writer)
+        thread.start()
+        assert not done.wait(0.5)  # blocked on the lock another holder has
+        assert [r.ref for r in si.load(path)] == [REF1]
+    thread.join(10)
+    assert done.is_set() and [r.ref for r in si.load(path)] == [REF1, REF2]
+
+
+def test_save_flushes_the_file_and_its_directory(tmp_path, monkeypatch):
+    synced = []
+    real = si.os.fsync
+    monkeypatch.setattr(si.os, "fsync", lambda fd: (synced.append(fd), real(fd))[1])
+    si.save([si.parse_record(record())], tmp_path / "site-images.yaml")
+    assert len(synced) == 2  # the temporary file before the rename, the directory after
 
 
 # -- matching (7.1) ------------------------------------------------------------------
