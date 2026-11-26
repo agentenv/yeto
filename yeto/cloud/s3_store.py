@@ -284,6 +284,16 @@ INDEPENDENT_DIRS = ("policy-releases",)
 # error codes of a conditional write that lost to an existing object (S3; OSS
 # answers FileAlreadyExists to x-oss-forbid-overwrite)
 _CREATE_LOST = frozenset({"PreconditionFailed", "ConditionalRequestConflict", "FileAlreadyExists"})
+# a PutObject with If-Match: the object changed (412) / the endpoint takes no such write
+_REPLACE_LOST = frozenset({"PreconditionFailed", "ConditionalRequestConflict"})
+_REPLACE_UNSUPPORTED = frozenset({"501", "NotImplemented", "InvalidArgument", "InvalidRequest"})
+# whether an endpoint's bucket applies If-Match on PutObject (S3ObjectStore.replace_if), by
+# (endpoint URL, bucket): probed once per process. Some S3-compatible endpoints answer such a
+# write 200 and ignore the condition; only a 412 to a wrong ETag shows that they apply it.
+_REPLACE_IF_USABLE: dict[tuple[str | None, str], bool] = {}
+_REPLACE_IF_LOCK = threading.Lock()
+REPLACE_IF_PROBE_PREFIX = ".yeto/replace-if-probe"
+_WRONG_ETAG = '"00000000000000000000000000000000"'
 _MISSING = frozenset({"404", "NoSuchKey", "NotFound"})
 _MIB = 1 << 20
 MIN_PART_BYTES = 5 * _MIB  # S3 and OSS: every part but the last is at least 5 MiB
@@ -327,6 +337,15 @@ def _warn_part_checksums_off(uri: str, error: Exception) -> None:
     print(f"yeto: warning: {uri} does not take SHA-256 part checksums ({error.__class__.__name__}: "
           f"NotImplemented); uploading without them (set {PART_CHECKSUM_ENV}=0 to skip this probe)",
           file=sys.stderr, flush=True)
+
+
+def _replace_unsupported(error: BaseException) -> bool:
+    """A conditional PutObject the endpoint does not take (by code, or an HTTP 501)."""
+    if error_code(error) in _REPLACE_UNSUPPORTED:
+        return True
+    response = getattr(error, "response", None)
+    meta = response.get("ResponseMetadata") if isinstance(response, Mapping) else None
+    return isinstance(meta, Mapping) and meta.get("HTTPStatusCode") == 501
 
 
 def error_code(error: BaseException) -> str:
@@ -897,9 +916,12 @@ class S3ObjectStore:
         """Write ``data`` as ``key`` only while the object still holds ``expected`` (its bytes):
         a GET for its ETag, then a PutObject with ``If-Match`` on it (the conditional write the
         lock's ``If-None-Match`` create comes with). True: written; False: the object changed
-        or is gone; None: this endpoint takes no conditional write, or the object is too large
-        for one PutObject (the caller falls back)."""
+        or is gone; None: this endpoint takes no conditional write (or ignores ``If-Match``:
+        :meth:`replace_if_usable`), or the object is too large for one PutObject (the caller
+        falls back)."""
         if not self.conditional_writes or len(data) > self.transfer.multipart_bytes:
+            return None
+        if not self.replace_if_usable():
             return None
         full = self._key(key)
         try:
@@ -915,12 +937,55 @@ class S3ObjectStore:
             self.client.put_object(Bucket=self.bucket, Key=full, Body=data, IfMatch=etag)
             return True
         except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
-            code = self._code(error)
-            if code in ("PreconditionFailed", "ConditionalRequestConflict"):
+            if self._code(error) in _REPLACE_LOST:
                 return False
-            if code == "NotImplemented":
+            if _replace_unsupported(error):
+                self._set_replace_if_usable(False)
                 return None
             raise
+
+    def _replace_if_key(self) -> tuple[str | None, str]:
+        meta = getattr(self.client, "meta", None)
+        return getattr(meta, "endpoint_url", None), self.bucket
+
+    def _set_replace_if_usable(self, usable: bool) -> None:
+        with _REPLACE_IF_LOCK:
+            _REPLACE_IF_USABLE[self._replace_if_key()] = bool(usable)
+
+    def replace_if_usable(self) -> bool:
+        """Whether this endpoint's bucket applies ``If-Match`` on PutObject. Probed on first use
+        (once per endpoint and bucket in this process): a probe object is written, then written
+        again with a wrong ETag. Only a 412 (``PreconditionFailed``) says the condition is
+        applied; a write that goes through (the endpoint ignored it) or an "unsupported"
+        answer (501, ``NotImplemented``, ``InvalidArgument``, ``InvalidRequest``) marks it
+        unusable, and :meth:`replace_if` then answers None (the caller's fallback). The
+        probe object is deleted afterwards. Another error is raised and nothing is cached."""
+        cache_key = self._replace_if_key()
+        with _REPLACE_IF_LOCK:
+            known = _REPLACE_IF_USABLE.get(cache_key)
+        if known is not None:
+            return known
+        import uuid  # noqa: PLC0415
+
+        probe = self._key(f"{REPLACE_IF_PROBE_PREFIX}/{uuid.uuid4().hex}")
+        try:
+            self.client.put_object(Bucket=self.bucket, Key=probe, Body=b"probe")
+            try:
+                self.client.put_object(Bucket=self.bucket, Key=probe, Body=b"ignored", IfMatch=_WRONG_ETAG)
+                usable = False  # written over a wrong ETag: the endpoint ignores If-Match
+            except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
+                if self._code(error) == "PreconditionFailed":
+                    usable = True
+                elif _replace_unsupported(error):
+                    usable = False
+                else:
+                    raise
+        finally:
+            with contextlib.suppress(Exception):
+                self.client.delete_object(Bucket=self.bucket, Key=probe)
+        with _REPLACE_IF_LOCK:
+            _REPLACE_IF_USABLE[cache_key] = usable
+        return usable
 
     def _absent_condition(self) -> dict[str, Any]:
         """The CompleteMultipartUpload argument of a create-if-absent."""

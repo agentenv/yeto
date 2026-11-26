@@ -1153,11 +1153,12 @@ syncer listens on its own ports, 29400 and up). With it:
   fleet's syncer on that host. A syncer process that dies is started again at once and resumes
   from its checkpoint, on the same address and at the same term.
 - **One service at a time.** The service holds a lease in the run store
-  (`fleet/syncer_service/lock`, 120 s, renewed with each heartbeat). A second service, on this
+  (`fleet/syncer_service/lock`, 570 s, renewed with each heartbeat). A second service, on this
   host or another, refuses to start (exit 2) while that lease runs. A service restarted on the
   same host takes its own lease back at once. The lease's token is the service's generation. A
-  service that cannot renew its lease and is within 12 s of its end stops its syncer and exits 2
-  (another host's service may take the lease from then on).
+  service that cannot renew its lease stops its syncer and exits 1 (restarted) once its lease
+  had at most 374 s left before a renewal that failed (see "How the units restart"); another
+  host's service may take the lease once it ends.
 - **Its state.** The syncer's checkpoint and tape (`~/yeto-output/`) are under the unit's working
   directory (`HOME=<workdir>/home` for the syncer), and every run has its own working directory.
   A checkpoint there while the run store's syncer record is missing or names another run is
@@ -1165,14 +1166,16 @@ syncer listens on its own ports, 29400 and up). With it:
 - **Its records.** The service writes the syncer's record (`fleet/island_syncer.json`, with its
   generation) and a heartbeat every 30 s (`fleet/island_syncer_service.json`). The heartbeat says
   `starting` until the record is written, then `running`, and at the end `finished`, `failed` or
-  `stopped`.
+  `stopped`. On a directory run store the record is written under the lock of the store's
+  conditional write, so the syncer launch's rewrite of it never overwrites a newer one.
 - **Its term** (`syncer_epoch`): the fleet's last record's when that record is this host's
   service's (a restart goes on at the same term), one more when another host wrote it (a syncer
   that starts over elsewhere fences the islands of the old one).
 - the **syncer launch** of `yeto run up` orders no syncer machine. It waits for the service (up to
   20 minutes) and takes it only when the heartbeat is `running`, names the record's generation,
   and has moved at least once while it watched (a heartbeat left by a service that is gone does
-  not move). It checks that it reads the same island HMAC key, records the syncer for its
+  not move). A final heartbeat (`finished`, `failed`, `stopped`) that was already there when it
+  began to wait is an earlier service's: only one of a newer generation ends the wait. It checks that it reads the same island HMAC key, records the syncer for its
   islands, then watches the heartbeat. Whether a heartbeat is fresh is timed on the control
   host's own clock: the two hosts' clocks are never compared. The launch ends with the service:
   0 when the run is finished, 9 when it stopped, 1 when it failed, or when its heartbeat did not
@@ -1265,28 +1268,33 @@ unit is started at most 5 times an hour (`StartLimitBurst`).
 |---|---|---|---|
 | control | 0 | `run up` ended the run | no; ended marker |
 | control | 75 | `run up` exited 1: it ended the run after a breaker trip or a failure it handled | no (`RestartPreventExitStatus=10 75`); ended marker |
-| control | 10 | a configuration error (the run config does not load, `rollout.drain_on_exit: true`, not an on-site control plane) | no: fix the run config, then `systemctl start` |
+| control | 10 | a configuration error (the run config does not load, `rollout.drain_on_exit: true`, not an on-site control plane, no `YETO_ISLAND_HMAC_KEY` in the environment file) | no: fix the run config or the environment file, then `systemctl start` |
 | control | 2 | `run up` refused before ordering anything (a preflight that failed, another `run up` of the run) | yes, every 30 s, without limit: a refusal orders nothing |
 | control | 70, a signal | a crash | yes |
 | syncer | 0 | the run is finished | no; ended marker |
 | syncer | 9 | stopped by the fleet's STOP | no; ended marker |
 | syncer | 11 | a strict failure of the syncer | no; ended marker |
 | syncer | 2 | a refusal: another service holds the lease (or took it over), a checkpoint here that is not this run's, or no checkpoint here while the run store's record says this host's service ran the syncer (see `fresh` below) | no |
-| syncer | 10 | a configuration error (the run config, the island HMAC key) | no |
+| syncer | 10 | a configuration error (the run config, the island HMAC key, the run store's credentials, a run store with no object API on this host) | no |
 | syncer | 1 | the syncer failed, or the service fenced itself: it could not renew its lease for a while and stopped its syncer before the lease ended | yes; it resumes from its checkpoint (a lease another service holds then is refused) |
 | syncer | 70, a signal | the service crashed | yes, and it resumes from its checkpoint |
 | both | 143 | the unit was stopped | no (a success) |
 
-The syncer service's lease (`fleet/syncer_service/lock`) is renewed with every heartbeat
-(30 s). It is long enough that a service whose renewals fail fences itself (exit 1) with
-enough of it left to stop its syncer (its checkpoint written, up to 170 s), and only after at
-least two renewals that failed.
+The syncer service's lease (`fleet/syncer_service/lock`, 570 s) is renewed with every heartbeat
+(30 s). The heartbeat has a store client of its own (S3: connect 3 s, read 5 s, 2 requests per
+call), and each of its calls is cut off after 34 s whatever the store does. A service whose
+renewal fails fences itself (exit 1) when its lease had at most 374 s left before that
+renewal: the lock's margin (57 s), a beat, a poll of the service (15 s), the syncer's stop
+(its checkpoint written, up to 170 s) and three heartbeat calls that hang until they are cut
+off. A store that hangs therefore never keeps a syncer running past the lease. Before the
+fence the lease leaves room for two heartbeat rounds that fail as slowly as they can.
 
 ### The ended marker
 
-A service that ended its run (the exits with an ended marker above) writes a marker to its
-state directory (`<workdir>/rl-up/<run>/onsite-<role>.ended`) and to the run store
-(`fleet/onsite/<role>.ended`): the exit code, the reason and the time. Each start reads it
+A service that ended its run (the exits with an ended marker above) writes a marker to the run
+store (`fleet/onsite/<role>.ended`), then to its state directory
+(`<workdir>/rl-up/<run>/onsite-<role>.ended`): the exit code, the reason and the time. A write
+that fails is logged and the service still exits with its own code. Each start reads it
 first, on this host and in the run store. While it exists, the service exits 0 at once and
 starts nothing. A reboot of the host, or the unit started on another host, never orders the
 run again after a breaker trip or a strict failure. A run store that does not answer (it may
@@ -1344,6 +1352,10 @@ removes the fleet's STOP from the run store. Then start the unit (`systemctl sta
   syncer at the next term, which the islands rejoin, run
   `yeto fleet service fresh <syncer-host> --config run.json --role syncer --env-file /etc/yeto/<run>.env`
   (it runs `service-run --fresh` there as the unit runs), then `systemctl start` the unit.
+  `fresh` is refused (exit 2, nothing marked) on a host that is not the record's
+  `service_node`, and when the run store has no syncer record of this run. The marker stays
+  until the service's record at the new term is in the run store, so a start that fails before
+  that is fresh again.
 - `stop`, `clear-ended` and `fresh` need `sudo -n systemd-run` on the host (systemd 240 or later).
 - Logs: `journalctl -u yeto-<run>-<role>`; the syncer's own log is `yeto-syncer.log` in the
   syncer unit's working directory.

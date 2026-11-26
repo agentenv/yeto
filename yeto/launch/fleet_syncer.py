@@ -471,7 +471,14 @@ SERVICE_SCHEMA = "yeto.fleet.syncer-service/v1"
 SERVICE_BEAT_S = 30.0  # the service rewrites its heartbeat (and renews its lock) this often
 SERVICE_STALE_S = 3 * SERVICE_BEAT_S  # no new heartbeat seen this long (this host's clock): not up
 SERVICE_LOCK = "fleet/syncer_service/lock"  # one syncer service at a time (StoreLock)
-SERVICE_LOCK_TTL_S = 4 * SERVICE_BEAT_S
+# the service's heartbeat (its lock renewals) goes through a store client of its own with short
+# timeouts (``fleet_service.heartbeat_objects``, S3), and each heartbeat call is cut off after
+# HEARTBEAT_CALL_S whatever the client does (``fleet_service.Heartbeat``): a store that hangs
+# costs the lease a known time per call, which the lock's lease and fence budget count
+HEARTBEAT_CONNECT_TIMEOUT_S, HEARTBEAT_READ_TIMEOUT_S, HEARTBEAT_MAX_ATTEMPTS = 3.0, 5.0, 2
+HEARTBEAT_REQUEST_S = HEARTBEAT_MAX_ATTEMPTS * (HEARTBEAT_CONNECT_TIMEOUT_S + HEARTBEAT_READ_TIMEOUT_S) + 1.0  # + a backoff
+HEARTBEAT_CALL_S = 2 * HEARTBEAT_REQUEST_S  # a renewal: a LIST of the lock's tokens and the lease's PUT
+SERVICE_LOCK_TTL_S = 4 * SERVICE_BEAT_S + 7 * HEARTBEAT_CALL_S  # at least (fleet_service.service_lock_ttl_s)
 ONSITE_STOP = "fleet/onsite/STOP"  # the fleet's STOP in the run store: the on-site services end on it
 ONSITE_STOP_SCHEMA = "yeto.fleet.onsite-stop/v1"
 SERVICE_STARTING, SERVICE_RUNNING = "starting", "running"
@@ -621,10 +628,19 @@ def watch_service(args: Any, *, objects: Any = None, sleep: Callable[[float], No
     started, said, beats = clock(), False, _Beats(clock)
     log(f"[launcher] fleet syncer: an on-site service on {host} (fleet.syncer_service); this launch starts no "
         "syncer, it waits for the service's record in the run store")
+    left_over: list[Any] = []  # the final heartbeat an earlier service left when this wait began
     while True:
         status, rec = read_service_status(objects), read_syncer_record(objects)
         ours = status is not None and status.get("host") == host
         beats.see(status if ours else None)
+        if not left_over:
+            left_over.append(status.get("generation") if ours and status.get("state") in SERVICE_FINAL else _NOT_FINAL)
+        if ours and status.get("state") in SERVICE_FINAL and not _newer_final(status, left_over[0]):
+            if not said:
+                log(f"[launcher] fleet syncer: the syncer service heartbeat on {host} is an earlier service's final "
+                    f"one ({status.get('state')}, generation {status.get('generation')}): not this run's, waiting "
+                    "for a newer generation")
+            ours = False
         if ours:
             refused = key_mismatch(mine, status.get("key_id"))
             if refused:
@@ -711,17 +727,35 @@ def watch_service(args: Any, *, objects: Any = None, sleep: Callable[[float], No
     return code
 
 
+_NOT_FINAL = object()  # the heartbeat was not final when the wait began
+
+
+def _newer_final(status: dict[str, Any], left_over: Any) -> bool:
+    """A final heartbeat the syncer launch may act on while it waits: any when the heartbeat it
+    first saw was not final, else only one of a newer generation than that left-over one."""
+    if left_over is _NOT_FINAL:
+        return True
+    generation = status.get("generation")
+    if generation is None:
+        return False
+    return left_over is None or int(generation) > int(left_over)
+
+
 def _rerecord(objects: Any, status: dict[str, Any], args: Any) -> dict[str, Any] | None:
     """The syncer record written again for this run up (a fresh ``at``, this host's wall clock:
     the trainer worker dials a record newer than its syncer launch), only over the service's
     own record of ``status``'s generation: a service that restarted meanwhile (a new
     generation) wrote its own, which is never overwritten. The write is the store's
-    conditional one (``replace_if``: only while the object still holds the bytes read). A
-    store without it is read again right before a plain write; the window left there is that
-    one write: a service generation that records itself between that read and the write is
-    overwritten, and the islands dial its address (the same host) under the older generation
-    until its syncer next restarts and records itself again. None: not written (read again at
-    the next poll)."""
+    conditional one (``replace_if``: only while the object still holds the bytes read). On S3
+    that is a PutObject with ``If-Match``, which the store applies against every other write
+    of the key, the service's plain one too (an endpoint that ignores ``If-Match`` is found by
+    a probe and takes the fallback). A directory store's ``replace_if`` holds a lock file the
+    service's own record write takes as well (``write_syncer_record`` through
+    ``write_exclusive``). A store without either is read again right before a plain write;
+    the window left there is that one write: a service generation that records itself
+    between that read and the write is overwritten, and the islands dial its address (the
+    same host) under the older generation until its syncer next restarts and records itself
+    again. None: not written (read again at the next poll)."""
     import json
 
     from ..rl.island_launches import SYNCER_RECORD, syncer_record_doc

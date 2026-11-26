@@ -1893,7 +1893,7 @@ class Run:
         if plan is not None and plan.syncer_service:  # never generated: the syncer service has its own
             from yeto.launch.fleet_syncer import key_mismatch  # noqa: PLC0415
 
-            raise RunUpRefused(f"fleet.syncer_service: {key_mismatch(None, None)}")
+            raise RunUpConfigRefused(f"fleet.syncer_service: {key_mismatch(None, None)}")
         path = self.dir / "island_hmac.key"
         if not path.exists():
             import secrets  # noqa: PLC0415
@@ -3290,7 +3290,8 @@ class Run:
 
             refused = key_mismatch(environ_key_id(self.env), None)
             if refused:
-                return f"fleet.syncer_service: {refused}"
+                self.config_refusal = f"fleet.syncer_service: {refused}"  # a configuration error (the env file)
+                return self.config_refusal
         members = list(trainers(self.desired_doc).values())
         if not members:
             members = [{**m, "argv": [*m["argv"], *island_launches.member_table_flags(m["learner_id"])]}
@@ -4828,6 +4829,11 @@ class RunUpRefused(RuntimeError):
     """``run up`` must not go on; the message says why and what to do."""
 
 
+class RunUpConfigRefused(RunUpRefused):
+    """:class:`RunUpRefused` for a configuration error (the on-site control unit does not
+    restart it: ``args.config_refused``), such as a missing island HMAC key."""
+
+
 def forced_stop_refusal(run: Run, allow: bool, *, record: bool = True) -> str | None:
     """A breaker of an earlier ``run up`` forced the NC pool down (``nc_forced_stop``,
     spend or wall time past ``FORCE_FACTOR`` x the budget): a new ``run up`` would order
@@ -4951,6 +4957,8 @@ def main(args: Any) -> int:
         return 2
     run.log_fleet_plan()
     if not args.skip_preflight and not run.preflight(dry_run=args.dry_run):
+        if getattr(run, "config_refusal", None):
+            args.config_refused = run.config_refusal  # the on-site control unit does not restart it
         log = run.dir / "preflight.log"
         _log("preflight failed: nothing ordered" + (f" (see {log})" if log.exists() else
                                                      " (the reason is the preflight line above)"))
@@ -4990,6 +4998,8 @@ def main(args: Any) -> int:
         decided = True
     except RunUpRefused as error:
         _log(f"CRITICAL: run up refused: {error}")
+        if isinstance(error, RunUpConfigRefused):
+            args.config_refused = str(error)  # the on-site control unit does not restart it
         rc = 2
     finally:
         if run.in_process and not run.drain_controller(decided=decided):
