@@ -1812,6 +1812,11 @@ def main(args: argparse.Namespace, *, ops: SshOps | None = None) -> int:
     except (InventoryError, SshIslandError, ValueError) as exc:
         print(f"[yeto] preflight: {exc}", file=sys.stderr)
         return 2
+    if not image and not (args.no_pull and args.no_container) and any(
+            n.runtime == "docker" and not n.image for n in nodes):
+        print("[yeto] preflight: the docker nodes have no image to pull and probe: pass --image (the trainer "
+              "image), or set image: in the inventory", file=sys.stderr)
+        return 2
     if args.run_dir:
         out_dir = Path(args.run_dir).expanduser()
     else:

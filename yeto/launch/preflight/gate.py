@@ -71,9 +71,39 @@ def preflight_commands(gpu: str | None, inventory: str | None, prefix: str | Non
 
 
 def commands_for_launch_argv(argv: Sequence[str]) -> list[list[str]]:
-    """The preflight commands of a ``yeto launch`` argv (``yeto run up``'s trainer)."""
-    return preflight_commands(argv_value(argv, "--gpu"), argv_value(argv, "--rl-node-inventory"),
-                              argv_value(argv, "--cluster-prefix"), argv_value(argv, "--rl-image"))
+    """The preflight commands of a ``yeto launch`` argv (``yeto run up``'s trainer). The
+    image is the argv's ``--rl-image``, else the one the launch resolves for it
+    (:func:`launch_image`): the preflight pulls and probes what the trainer runs."""
+    gpu = argv_value(argv, "--gpu")
+    image = argv_value(argv, "--rl-image")
+    if image is None and ssh_entries(gpu):
+        image = launch_image(argv)
+    return preflight_commands(gpu, argv_value(argv, "--rl-node-inventory"), argv_value(argv, "--cluster-prefix"),
+                              image)
+
+
+def launch_image(argv: Sequence[str]) -> str | None:
+    """The trainer image ``yeto launch`` resolves for an argv without ``--rl-image``
+    (``rl_backend.resolve_default_rl_image``: the site image catalog for an all-``ssh:``
+    trainer whose inventory names no image, else the engine's pinned default). None when
+    the argv is not an RL launch or the resolution fails (the launch names the problem)."""
+    import contextlib
+    import io
+    from types import SimpleNamespace
+
+    from ..rl_backend import resolve_default_rl_image
+
+    args = SimpleNamespace(
+        training_mode=argv_value(argv, "--training-mode") or "sft", rl_image=None,
+        rl_backend=argv_value(argv, "--rl-backend"), gpu=argv_value(argv, "--gpu"),
+        rl_node_inventory=argv_value(argv, "--rl-node-inventory"), model=argv_value(argv, "--model"),
+        tuning=argv_value(argv, "--tuning"), rl_model_recipe=argv_value(argv, "--rl-model-recipe"))
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):  # the launch prints its own image line
+            resolve_default_rl_image(args)
+    except Exception:  # noqa: BLE001 - the launch's own checks report a bad backend, catalog or inventory
+        return None
+    return args.rl_image or None
 
 
 DOCKER_HUB = "registry-1.docker.io"

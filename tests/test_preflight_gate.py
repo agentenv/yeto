@@ -274,3 +274,45 @@ def test_gate_checks_the_image_the_trainer_runs(tmp_path, runs_dir):
     assert all(IMAGE in s for _, s in ops.scripts if s.startswith("docker pull"))
     argv = [*SSH_ARGV, "--rl-image", "docker:" + IMAGE]
     assert gate.commands_for_launch_argv(argv)[0][5:7] == ["--image", "docker:" + IMAGE]
+
+
+def _imageless_inventory(tmp_path):
+    import yaml
+
+    inv = _inventory(tmp_path)
+    doc = yaml.safe_load(inv.read_text())
+    doc.pop("images")
+    inv.write_text(yaml.safe_dump(doc))
+    return inv
+
+
+def test_run_up_preflight_pulls_the_image_the_launch_resolves(tmp_path, monkeypatch):
+    """An rl trainer argv without --rl-image: run up's cluster preflight names the image
+    the launch resolves (the pinned default here), not no image at all."""
+    from yeto.rl import default_rl_image
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # no site image catalog
+    inv = _imageless_inventory(tmp_path)
+    argv = ["--training-mode", "rl", "--gpu", "ssh:2x8xb300", "--rl-node-inventory", str(inv),
+            "--cluster-prefix", "own", "--model", "Qwen/Qwen3-0.6B", "--tuning", "full"]
+    (command,) = gate.commands_for_launch_argv(argv)
+    assert command[5:7] == ["--image", default_rl_image(tuning="full")]
+    # an explicit --rl-image stays the one named; a non-rl argv resolves nothing
+    assert gate.commands_for_launch_argv([*argv, "--rl-image", "docker:x/y@sha256:" + "0" * 64])[0][5:7] == [
+        "--image", "docker:x/y@sha256:" + "0" * 64]
+    assert "--image" not in gate.commands_for_launch_argv(SSH_ARGV)[0]
+
+
+def test_preflight_cli_refuses_docker_nodes_without_an_image(tmp_path, capsys):
+    inv = _imageless_inventory(tmp_path)
+    args = cli.build_parser().parse_args(["preflight", "--gpu", f"ssh:{inv}", "--run-dir", str(tmp_path / "r"),
+                                          "--no-bench"])
+    ops = _fake()
+    assert cp.main(args, ops=ops) == 2
+    assert "pass --image" in capsys.readouterr().err and not ops.scripts
+    # host checks only (no pull, no container) need no image
+    args = cli.build_parser().parse_args(["preflight", "--gpu", f"ssh:{inv}", "--run-dir", str(tmp_path / "r2"),
+                                          "--no-pull", "--no-container"])
+    ops = _fake()
+    cp.main(args, ops=ops)
+    assert not any("pull" in s for _, s in ops.scripts)
