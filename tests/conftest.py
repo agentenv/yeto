@@ -88,6 +88,11 @@ def ports_v1_pin(monkeypatch):
 # decoupling 7.7a: islands must declare a compat_group (no default in code).
 # Unit tests that build identities at import time run as one H100 island;
 # tests of the missing-value error delete it with monkeypatch.
+# RISK (as every production default this file changes for every test: DEFAULT_INNER_LR,
+# YETO_PREFLIGHT_MODEL, YETO_IMAGE_MANIFEST_CHECK, YETO_SKY_SERVER_CHECK): an island
+# env or a rendered argv that lacks it still passes here. A test of an argv handed to
+# another process takes the production_defaults fixture (tests/prod_defaults.py;
+# tests/test_prod_defaults_argv.py).
 _os.environ.setdefault("YETO_RL_COMPAT_GROUP", "nvidia-h100")
 
 
@@ -220,7 +225,11 @@ def _no_real_nebius_sg_cleanup(request, monkeypatch):
 @_pytest.fixture(autouse=True)
 def _no_real_model_preflight(monkeypatch):
     """The launch's model preflight asks the Hub / Modal / the bucket; unit tests
-    never reach them. Tests of the check set --preflight-model and fake the probes."""
+    never reach them. Tests of the check set --preflight-model and fake the probes.
+
+    RISK: a rendered launch argv that a real run refuses without --preflight-model off
+    passes every test (an image smoke's trainer argv did). production_defaults below
+    turns the check back on with stub probes."""
     monkeypatch.setenv("YETO_PREFLIGHT_MODEL", "off")
 
 
@@ -492,9 +501,25 @@ def pytest_sessionfinish(session, exitstatus):
 # (yeto.launch.rl_args.refuse_unset_inner_lr). Before any test module builds a
 # parser (some at import), the CLI default reads as an explicit value here;
 # tests/test_rl_inner_lr_guard.py puts the marked default back.
+# RISK: an argv yeto renders without --inner-lr for another `yeto launch` (run up, a
+# fleet island, an image smoke) passes here and is refused on the real run. Not made
+# opt-in: about 70 % of tests/test_rl_launcher.py alone build RL argv without it. The
+# rendered-argv tests take production_defaults instead (tests/test_prod_defaults_argv.py).
 import yeto.cli as _yeto_cli  # noqa: E402
 
 _yeto_cli.DEFAULT_INNER_LR = 3e-4
+
+
+@_pytest.fixture
+def production_defaults(monkeypatch):
+    """Opt-in: undo, for this test, every production default this file changes that a
+    rendered argv's own process does not get (the --inner-lr default, the model / image
+    manifest / sky server checks, the compat group), with stub Hub, store, registry and
+    sky server probes that answer "present" (tests/prod_defaults.py). Returns the record
+    of the probes asked."""
+    import prod_defaults
+
+    return prod_defaults.apply(monkeypatch)
 
 
 @_pytest.fixture(autouse=True)
