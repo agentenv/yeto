@@ -8,21 +8,26 @@ Checkers are registered by device family (:func:`register`, :func:`checker_for`)
 ``cuda`` checker (:class:`CudaChecker`) reads in one shell call (:meth:`Checker.script`),
 in this order:
 
-* the ``NVRM: Xid`` lines of the kernel log (``dmesg``, else ``journalctl -k``) and the
-  boot id, so that only the XIDs since the previous check count (first: a hung
-  ``nvidia-smi`` does not hide them);
+* the ``NVRM: Xid`` lines of the kernel log (``dmesg``, else ``journalctl -k``; its last
+  :data:`XID_TAIL_BYTES`) and the boot id, so that only the XIDs since the previous check
+  count (first: a hung ``nvidia-smi`` does not hide them, and they are judged when
+  ``nvidia-smi`` does not answer);
 * ``nvidia-smi --query-gpu``: the GPUs that answer, their memory and their volatile
   uncorrectable ECC count; a GPU ``nvidia-smi`` names but cannot open (``Unable to
   determine the device handle``) is a GPU gone;
 * the NVSwitch ``Fabric`` state of ``nvidia-smi -q`` and ``systemctl is-active
   nvidia-fabricmanager``;
-* ``ibstat`` (else ``ibv_devinfo -v``): the state and rate of the IB / RoCE ports.
+* ``ibstat`` (``ibv_devinfo -v`` when ``ibstat`` fails): the state and rate of the IB /
+  RoCE ports.
 
-The script is bounded on the node (:func:`bounded`): every tool runs under ``timeout``
-(:data:`TOOL_TIMEOUT_S`), and the whole check runs in the background and is killed
-(``kill -9`` of its process group) past :data:`HEALTH_LIMIT_S`; its output is printed
-either way, and a check that was killed is a read failure. A caller that adds the check
-to another command (a status query) waits at most that much longer.
+The script is bounded on the node: every section runs under ``timeout -k 5``
+(:data:`SECTION_TIMEOUT_S`; a section past it is killed and reads as timed out), and the
+whole check runs in the background and is killed (``kill -9`` of its process group) past
+:data:`HEALTH_LIMIT_S` (:func:`bounded`); its output is printed either way. A check that
+was killed is a read failure, but for the sections that completed: their hardware XIDs
+still count. At worst a check takes :data:`HEALTH_LIMIT_S` on the node, less than its
+period (:data:`HEALTH_EVERY_S`); a caller that adds the check to another command (a
+status query) waits at most that much longer.
 
 Every family without a checker gets :class:`NullChecker` (``enabled`` False, nothing
 checked): its callers run nothing and write nothing.
@@ -41,16 +46,21 @@ XID cursor). It judges two jobs at once (:class:`HealthResult`):
   tools did not read (a read failure of the multi-node job: ``IB tools unread``).
 
 ``checked`` False (``ok_*`` None): ``nvidia-smi`` did not answer (a timeout, missing, an
-ssh that failed, the check killed past its limit): a read failure, which says nothing
-about the node.
+ssh that failed, the check killed past its limit) and the kernel log shows no new
+hardware XID: a read failure, which says nothing about the node. ``nvidia-smi`` that
+cannot talk to the driver, a new hardware XID and a node with no GPU at all are bad
+(``ok_single`` False), whatever else read.
 
 :class:`HealthTracker` turns the checks into a verdict: ``ok``, ``read_failed`` (counts
 neither way: a bad streak goes on after it), ``bad_once`` (one bad check), ``lost`` (two
 bad checks in a row, or more). :class:`HealthWatch` keeps a checker, a tracker and the
 previous facts for one node and says which event a reading asks for: ``node_health``
-when the node turns ``lost``, ``node_health_read_failed`` when a read starts failing, and
-once per node ``node_health_degraded`` when part of the check cannot judge (the kernel
-log is not readable, the IB tools did not read, a multi-node job names no HCA).
+when the bad streak first reaches the limit (a read failure inside it does not start it
+again), ``node_health_read_failed`` when a read starts failing, and
+``node_health_degraded`` once per node when part of the check cannot judge (the kernel
+log is not readable, the IB tools did not read, a multi-node job names no HCA) and once
+per streak of :data:`READ_FAILED_DEGRADE` read failures in a row (never a loss: a node
+that stops answering is the caller's to judge).
 
 ``python -m yeto.hw.node_health [--hca mlx5_0,...] [--multi] [--dry-run]`` runs one check
 on this host (``--dry-run``: prints the script only).
@@ -82,8 +92,10 @@ from .host_probe import (
 
 HEALTH_EVERY_S = 60.0  # the period of the check on a node runtime and a resident ssh island
 BAD_CHECKS = 2  # bad checks in a row that make a node lost
-TOOL_TIMEOUT_S = 15  # each tool of the check (timeout(1) on the node)
-HEALTH_LIMIT_S = 30  # the whole check on the node: killed past this (a read failure)
+SECTION_TIMEOUT_S = 10  # each section of the check (timeout -k 5 on the node: killed 5 s later)
+HEALTH_LIMIT_S = 45  # the whole check on the node: killed past this (< HEALTH_EVERY_S)
+READ_FAILED_DEGRADE = 5  # read failures in a row that write a node_health_degraded event
+XID_TAIL_BYTES = 1 << 20  # the kernel log's XID lines read (the last MiB)
 STALE_PERIODS = 3  # a check older than this many periods reads as a read failure
 MAX_REASONS = 20  # reasons / notes kept in a record or an event
 MAX_PORTS = 32  # ports kept in a record's facts
@@ -100,24 +112,31 @@ EVENT_READ_FAILED = "node_health_read_failed"
 EVENT_DEGRADED = "node_health_degraded"
 
 GPU_QUERY = "index,pci.bus_id,name,memory.total,ecc.errors.uncorrected.volatile.total"
-_T = "__yeto_t"  # the script's tool wrapper: timeout(1) when the node has it
-TOOL_WRAPPER = f'{_T}() {{ if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }}\n'
-_TT = f"{_T} {TOOL_TIMEOUT_S}"
+_T = "__yeto_t"  # the script's section wrapper: timeout -k 5 (timeout, no -k: without it) when the node has it
+TOOL_WRAPPER = (
+    "if command -v timeout >/dev/null 2>&1; then "
+    f'if timeout -k 1 5 true >/dev/null 2>&1; then {_T}() {{ timeout -k 5 "$@"; }}; '
+    f'else {_T}() {{ timeout "$@"; }}; fi; '
+    f'else {_T}() {{ shift; "$@"; }}; fi\n'
+)
 XID_SCRIPT = (
     "cat /proc/sys/kernel/random/boot_id 2>/dev/null | sed 's/^/boot=/'; "
-    f"if {_TT} dmesg >/dev/null 2>&1; then echo source=dmesg; {_TT} dmesg | grep -E 'NVRM: Xid' | tail -n 200; "
-    f"elif {_TT} journalctl -k -b -n 1 --no-pager >/dev/null 2>&1; then echo source=journal; "
-    f"{_TT} journalctl -k -b -o short-monotonic --no-pager | grep -E 'NVRM: Xid' | tail -n 200; "
+    f"if dmesg >/dev/null 2>&1; then echo source=dmesg; dmesg | grep -E 'NVRM: Xid' | tail -c {XID_TAIL_BYTES}; "
+    "elif journalctl -k -b -n 1 --no-pager >/dev/null 2>&1; then echo source=journal; "
+    f"journalctl -k -b -o short-monotonic --no-pager | grep -E 'NVRM: Xid' | tail -c {XID_TAIL_BYTES}; "
     "else echo source=none; fi; true"
 )
-CUDA_SECTIONS = (
+_SECTIONS = (
     ("xid", XID_SCRIPT),
-    ("gpus", f"{_TT} nvidia-smi --query-gpu={GPU_QUERY} --format=csv,noheader,nounits"),
-    ("fabric", f"{_TT} nvidia-smi -q | grep -A3 -E '^ *Fabric *$'"),
-    ("fabricmanager", f"{_TT} systemctl is-active nvidia-fabricmanager"),
-    ("ibstat", f"{_TT} ibstat"),
-    ("ibv_devinfo", f"command -v ibstat >/dev/null 2>&1 && exit 3; {_TT} ibv_devinfo -v"),
+    ("gpus", f"nvidia-smi --query-gpu={GPU_QUERY} --format=csv,noheader,nounits"),
+    ("fabric", "set -o pipefail; nvidia-smi -q | grep -A3 -E '^ *Fabric *$'"),
+    ("fabricmanager", "systemctl is-active nvidia-fabricmanager"),
+    ("ibstat", "ibstat"),
+    ("ibv_devinfo", "ibstat >/dev/null 2>&1 && exit 3; ibv_devinfo -v"),  # only when ibstat fails
 )
+# every section bounded on the node (the preflight's own sections stay as they are)
+CUDA_SECTIONS = tuple((name, f"{_T} {SECTION_TIMEOUT_S} bash -c {shlex.quote(cmd)}") for name, cmd in _SECTIONS)
+DRIVER_DOWN = "couldn't communicate with the NVIDIA driver"
 
 
 def bounded(script: str, limit_s: int = HEALTH_LIMIT_S) -> str:
@@ -221,7 +240,7 @@ def _read_error(sec: Any) -> str:
     if sec is None:
         return "nvidia-smi: no output (the check did not run)"
     if sec.rc in (124, 137):
-        return f"nvidia-smi: timed out after {TOOL_TIMEOUT_S}s"
+        return f"nvidia-smi: timed out after {SECTION_TIMEOUT_S}s"
     if sec.rc == 127:
         return "nvidia-smi: not found"
     tail = " ".join(sec.text.split())[-200:]
@@ -245,20 +264,25 @@ class CudaChecker(Checker):
     def parse(self, text: str, hcas: Sequence[str], prev: Mapping[str, Any] | None) -> HealthResult:
         prev = dict(prev or {})
         carried = {k: prev[k] for k in CARRIED if k in prev}
-        if TIMEOUT_MARK in str(text or ""):  # killed past its limit: nothing it read counts
-            error = f"node health check timed out after {HEALTH_LIMIT_S}s (killed)"
-            return HealthResult(checked=False, reasons=[error], facts={**carried, "read_error": error})
         sections = parse_sections(text)
+        if TIMEOUT_MARK in str(text or ""):  # killed past its limit: only its completed XID section counts
+            error = ("node health check cut off: its SSH call ran past its timeout"
+                     if f"{TIMEOUT_MARK} ssh" in str(text) else
+                     f"node health check timed out after {HEALTH_LIMIT_S}s (killed)")
+            return self._unread(error, sections, prev, carried)
         gpus = sections.get("gpus")
+        if gpus is not None and DRIVER_DOWN in gpus.text:  # nvidia-smi answers, the driver does not (rc 9)
+            return self._unread("", sections, prev, carried, driver_down=True)
         rows, gone = self._gpu_rows(gpus)
         if gpus is None or (not rows and not gone and not self._no_devices(gpus)):
-            error = _read_error(gpus)
-            return HealthResult(checked=False, reasons=[error], facts={**carried, "read_error": error})
+            return self._unread(_read_error(gpus), sections, prev, carried)
         facts: dict[str, Any] = dict(carried)
         gpu_reasons: list[str] = []
         bus = {**dict(prev.get("bus") or {}), **{key: idx for idx, key, _, _ in rows if key}}
         facts["bus"] = bus
         index_of = lambda key: bus.get(key or "", key)  # noqa: E731 - a GPU by its PCI address
+        if not rows and not gone:  # a cuda node with no GPU at all ("No devices were found")
+            gpu_reasons.append("no GPU visible (nvidia-smi: No devices were found)")
         # count: the inventory's, else the most this node showed
         baseline = self.expect_gpus if self.expect_gpus is not None else max(
             int(prev.get("gpu_count") or 0), len(rows))
@@ -266,28 +290,28 @@ class CudaChecker(Checker):
         facts["gpus"] = len(rows)
         for key, detail in gone:
             gpu_reasons.append(f"GPU {index_of(key)} unreachable ({detail or 'no device handle'})")
-        if len(rows) < baseline and not gone:
+        if rows and len(rows) < baseline and not gone:
             gpu_reasons.append(f"{len(rows)} of {baseline} GPUs visible")
-        # memory: none may shrink from what it showed
+        # memory: none may shrink from what it showed (by PCI address: an index can move)
         mem = dict(prev.get("mem") or {})
-        for idx, _, mib, _ in rows:
+        for idx, key, mib, _ in rows:
             if mib is None:
                 continue
-            base = mem.get(idx)
+            base = mem.get(key or idx)
             if base is not None and mib < 0.99 * float(base):
                 gpu_reasons.append(f"GPU {idx} memory {mib} MiB < {base} MiB")
             else:
-                mem[idx] = max(mib, int(base or 0))
+                mem[key or idx] = max(mib, int(base or 0))
         facts["mem"] = mem
-        # uncorrectable ECC since the previous check
+        # uncorrectable ECC since the previous check (a count that went down: the new baseline)
         ecc = dict(prev.get("ecc") or {})
-        for idx, _, _, count in rows:
+        for idx, key, _, count in rows:
             if count is None:
                 continue
-            before = ecc.get(idx)
+            before = ecc.get(key or idx)
             if before is not None and "ecc" in prev and count > int(before):
                 gpu_reasons.append(f"GPU {idx} uncorrectable ECC +{count - int(before)}")
-            ecc[idx] = count
+            ecc[key or idx] = count
         facts["ecc"] = ecc
         gpu_reasons += self._fabric(sections, prev, facts)
         gpu_reasons += self._xids(sections.get("xid"), prev, facts, index_of)
@@ -305,6 +329,25 @@ class CudaChecker(Checker):
             ok_multi = not ib_reasons
         return HealthResult(checked=True, ok_single=ok_single, ok_multi=ok_multi,
                             reasons=gpu_reasons + ib_reasons, facts=facts)
+
+    def _unread(self, error: str, sections: Mapping[str, Any], prev: Mapping[str, Any],
+                carried: dict[str, Any], *, driver_down: bool = False) -> HealthResult:
+        """``nvidia-smi`` did not read (``error``): a read failure, unless the driver is down
+        or the completed XID section shows a new hardware XID (both bad: ``ok_single`` False)."""
+        facts = dict(carried)
+        xid = sections.get("xid")
+        bus = dict(prev.get("bus") or {})
+        reasons = []
+        if xid is not None and xid.rc is not None:  # the section completed: its XIDs count
+            reasons = self._xids(xid, prev, facts, lambda key: bus.get(key or "", key))
+        if driver_down:
+            reasons = [f"nvidia-smi: {DRIVER_DOWN}"] + reasons
+        if not reasons:
+            return HealthResult(checked=False, reasons=[error], facts={**facts, "read_error": error})
+        facts["gpu_reasons"], facts["ib_reasons"] = reasons, []
+        if error:
+            facts["read_error"] = error
+        return HealthResult(checked=True, ok_single=False, ok_multi=False, reasons=reasons, facts=facts)
 
     @staticmethod
     def _no_devices(sec: Any) -> bool:
@@ -360,11 +403,12 @@ class CudaChecker(Checker):
         facts["xid_source"] = source
         if source == "none":
             return []
-        found = []
+        found, texts = [], []
         for line in lines:
             m = _XID.search(line)
             if m:
                 found.append((float(m.group(1)) if m.group(1) else None, pci_key(m.group(2)), int(m.group(3))))
+                texts.append(line.strip())
         cursor = dict(prev.get("xid") or {})
         boot = head.get("boot", "")
         if "xid" not in prev:  # the first check: what is in the log already is history
@@ -374,10 +418,15 @@ class CudaChecker(Checker):
         elif all(ts is not None for ts, _, _ in found):
             last = float(cursor.get("ts") or 0.0)
             new = [x for x in found if x[0] > last]
-        else:
-            new = found[int(cursor.get("count") or 0):]
+        else:  # no timestamps: after the cursor's line (its n-th time; the log's head may have gone)
+            at = [i for i, t in enumerate(texts) if t == cursor.get("last")]
+            n = int(cursor.get("last_n") or 0)
+            start = at[n - 1] + 1 if n and len(at) >= n else (at[-1] + 1 if at else 0)
+            new = found[start:]
         stamps = [ts for ts, _, _ in found if ts is not None]
-        facts["xid"] = {"boot": boot, "ts": max(stamps) if stamps else cursor.get("ts"), "count": len(found)}
+        facts["xid"] = {"boot": boot, "ts": max(stamps) if stamps else cursor.get("ts"), "count": len(found),
+                        "last": texts[-1] if texts else None,
+                        "last_n": texts.count(texts[-1]) if texts else 0}
         out, seen = [], set()
         other = []
         for _, key, code in new:
@@ -454,7 +503,7 @@ class HealthTracker:
     go on); one good check clears the streak; a read failure (``checked`` False, or the
     job's ``ok`` None) counts neither way."""
 
-    def __init__(self, *, multi: bool = False, bad_checks: int = BAD_CHECKS) -> None:
+    def __init__(self, *, multi: bool, bad_checks: int = BAD_CHECKS) -> None:
         self.multi = bool(multi)
         self.bad_checks = max(1, int(bad_checks))
         self.bad_in_row = 0
@@ -520,6 +569,7 @@ class HealthWatch:
         self.last: Reading | None = None
         self.at: float | None = None
         self.degraded: list[str] | None = None  # set once (the node_health_degraded event)
+        self.read_failed_in_row = 0
 
     @property
     def enabled(self) -> bool:
@@ -539,15 +589,19 @@ class HealthWatch:
         verdict = self.tracker.update(result)
         before = self.last.verdict if self.last is not None else None
         event = None
-        if verdict == "lost" and before != "lost":
+        if verdict == "lost" and self.tracker.bad_in_row == self.tracker.bad_checks:  # the streak reached it
             event = EVENT_LOST
         elif verdict == "read_failed" and before != "read_failed":
             event = EVENT_READ_FAILED
-        degraded = None
+        degraded: list[str] | None = None
         if self.degraded is None:
             found = degraded_of(result, multi=self.multi, hcas=self.hcas)
             if found:
                 self.degraded = degraded = found
+        self.read_failed_in_row = self.read_failed_in_row + 1 if verdict == "read_failed" else 0
+        if self.read_failed_in_row == READ_FAILED_DEGRADE:  # once per streak: it says so, it loses nothing
+            why = "; ".join(result.job_reasons(self.multi)) or "unread"
+            degraded = (degraded or []) + [f"read failed {READ_FAILED_DEGRADE} checks in a row: {why}"]
         self.prev = dict(result.facts)
         self.last = Reading(verdict, result, event, degraded)
         self.at = float(self.clock())
@@ -567,6 +621,8 @@ class HealthWatch:
             doc["notes"] = notes[:MAX_REASONS]
         if self.degraded:
             doc["degraded"] = list(self.degraded)
+        if self.read_failed_in_row:
+            doc["read_failed_in_row"] = self.read_failed_in_row
         facts = {k: r.facts[k] for k in ("gpus", "gpu_count", "fabric", "fm", "ports", "xid_source", "xid_other")
                  if k in r.facts}
         if "ports" in facts:
