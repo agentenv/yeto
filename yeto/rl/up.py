@@ -4857,16 +4857,20 @@ def ack_forced_stop(run: Run) -> None:
 
 
 def open_run(config: str, create: bool = True, missing: str | None = None, *,
-             strict_breakers: bool = True) -> Run:
+             strict_breakers: bool = True, adjust: Callable[[dict[str, Any]], None] | None = None) -> Run:
     """``Run(load_config(config))``; a config or state directory that cannot be used raises
     :class:`RunConfigError` naming the file (the CLI prints it, without a traceback).
     ``create=False`` (read-only commands) refuses a run whose state directory does not exist
     instead of creating it: the run name is most likely misspelled. ``missing="temp"``
     (``run down``) neither refuses nor creates it: the run is opened on a fresh temporary
     state directory, so the stop steps the config drives (trainer down, pool-stop, sandbox
-    teardown) still run on a control host that lost (or never had) the run's state."""
+    teardown) still run on a control host that lost (or never had) the run's state.
+    ``adjust(cfg)``: changes the compiled config before the run opens on it (the on-site
+    control unit's ``rollout.drain_on_exit``, :mod:`yeto.rl.fleet_service`)."""
     try:
         cfg = load_config(config) if strict_breakers else load_config(config, strict_breakers=False)
+        if adjust is not None:
+            adjust(cfg)
     except RunConfigError:
         raise
     except ValueError as error:  # a check of the config's content
@@ -4898,7 +4902,7 @@ def main(args: Any) -> int:
     try:
         run = open_run(args.config, create=args.rl_command != "status",
                        missing="temp" if args.rl_command == "down" else None,
-                       strict_breakers=breakers_strict(args))
+                       strict_breakers=breakers_strict(args), adjust=getattr(args, "config_adjust", None))
     except RunConfigError as error:
         print(f"{_now()} [rl up] {error}", file=sys.stderr, flush=True)
         return 2

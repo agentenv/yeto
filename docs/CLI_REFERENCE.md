@@ -247,11 +247,15 @@ on-site syncer (`--role syncer`, `fleet.syncer_service`). See
 |---|---|
 | `yeto fleet service --config F --role R --env-file E --print` | write the unit to stdout |
 | `yeto fleet service --config F --role R --env-file E --install HOST` | write the unit on HOST over SSH and run `systemctl enable --now` there |
-| `yeto fleet service-run --role R --config F` | what the unit runs, in the foreground |
+| `yeto fleet service stop HOST --config F --role control --env-file E` | `yeto stop-run` of the fleet on the control host HOST, as the unit runs it (its user, env file, `YETO_STATE_DIR`, `YETO_RUNS_DIR`; `sudo -n systemd-run`) |
+| `yeto fleet service clear-ended HOST --config F --role R --env-file E` | remove the role's ended marker on HOST and in the run store (the syncer's also lifts the fleet's STOP), so that the unit starts the run again |
+| `yeto fleet service-run --role R --config F` | what the unit runs, in the foreground (`--clear-ended`: remove the ended marker here; `--stop-grace-s`: the syncer's SIGTERM-to-SIGKILL grace) |
 
 Options: `--remote-config`, `--python`, `--yeto-dir`, `--user`, `--workdir` (the paths on the
 service host). Exit 2: refused (a fleet that is not per-island on the store control plane, a
-syncer role without `fleet.syncer_service`, a path the unit cannot hold).
+syncer role without `fleet.syncer_service`, a control role with `rollout.drain_on_exit` true,
+a run name or path the unit cannot hold). The exits of `service-run`: OWN_CLUSTERS.md, "How the
+units restart".
 
 ### `yeto merge`
 
