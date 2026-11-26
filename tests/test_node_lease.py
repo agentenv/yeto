@@ -775,12 +775,23 @@ FAKE_AS_ROOT=1 exec "$@"
 """
 
 
+FAKE_PS = """#!/bin/sh
+# The node's process table (ps -eo pid=,args=): the rows of $FAKE_STATE_DIR/ps.txt and the
+# probe itself (the shell that runs this ps), never the processes of the test host.
+[ -f "$FAKE_STATE_DIR/ps.txt" ] && cat "$FAKE_STATE_DIR/ps.txt"
+exec {ps} -o pid=,args= -p "$PPID"
+"""
+
+
 def _node_bin(tmp_path, *, sudo=True):
     """A node's PATH: a fake podman that records what the real start command runs (its
     ``--name`` and ``--label`` flags) and answers ``ps --filter label=... --format``;
     a fake ``sudo -n`` whose containers are a separate (rootful) set (no ``sudo``: one
-    that always refuses). A fake ``docker`` with no containers shadows a real one."""
+    that always refuses). A fake ``docker`` with no containers shadows a real one. A fake
+    ``ps`` lists the processes a test writes to ``ps.txt`` (none by default): the
+    sampler scan must not see the processes of other tests on the host."""
     import os
+    import shutil
     import sys
 
     bin_dir = tmp_path / "bin"
@@ -790,6 +801,8 @@ def _node_bin(tmp_path, *, sudo=True):
         (bin_dir / engine).chmod(0o755)
     (bin_dir / "sudo").write_text(FAKE_SUDO if sudo else "#!/bin/sh\nexit 1\n")
     (bin_dir / "sudo").chmod(0o755)
+    (bin_dir / "ps").write_text(FAKE_PS.format(ps=shutil.which("ps")))
+    (bin_dir / "ps").chmod(0o755)
     return {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "HOME": str(tmp_path / "home"),
             "FAKE_STATE_DIR": str(tmp_path)}
 
@@ -902,7 +915,6 @@ def test_an_unlabelled_sampler_container_is_possibly_the_runs(tmp_path, monkeypa
 def test_the_probe_finds_trainer_process_groups_and_venv_samplers(tmp_path):
     import os
     import subprocess
-    import time
 
     from yeto.launch.ssh_trainer_island import STATE_DIR
 
@@ -913,7 +925,9 @@ def test_the_probe_finds_trainer_process_groups_and_venv_samplers(tmp_path):
     gone = subprocess.Popen(["true"], start_new_session=True)
     gone.wait()  # a process group that ended
     group = subprocess.Popen(["sleep", "30"], start_new_session=True)
-    sampler = subprocess.Popen(["bash", "-c", "exec -a yeto-ssh-sampler:run-a:s3:t3 sleep 30"])
+    # the node's venv samplers: one of run-a, one of a run whose name run-a prefixes
+    (tmp_path / "ps.txt").write_text("4242 yeto-ssh-sampler:run-a:s3:t3 python -m yeto.node.sampler\n"
+                                     "4343 yeto-ssh-sampler:run-ab:s0:t0 python -m yeto.node.sampler\n")
     try:
         for island, pgid, rc in (("isl-i0", group.pid, False), ("isl-i1", group.pid, True),
                                  ("isl-i2", gone.pid, False), ("isl-i3", 1, False)):
@@ -922,19 +936,12 @@ def test_the_probe_finds_trainer_process_groups_and_venv_samplers(tmp_path):
             (d / "pgid").write_text(str(pgid))
             if rc:
                 (d / "rc").write_text("0")
-        for _ in range(50):  # the exec -a has happened
-            if "yeto-ssh-sampler:run-a:s3" in subprocess.run(["ps", "-o", "args=", "-p", str(sampler.pid)],
-                                                             capture_output=True, text=True).stdout:
-                break
-            time.sleep(0.05)
         found = _probe("run-a", env)
         other = _probe("run-z", env)
     finally:
         group.kill()
-        sampler.kill()
         group.wait()
-        sampler.wait()
-    assert found == (True, sorted(["container:yeto-run-a-isl-i0-n0", "process:isl-i0", f"sampler:{sampler.pid}"]))
+    assert found == (True, sorted(["container:yeto-run-a-isl-i0-n0", "process:isl-i0", "sampler:4242"]))
     assert other == (True, [])  # nothing of another run; the probe does not find itself
     assert os.environ.get("FAKE_STATE_DIR") is None
 

@@ -153,6 +153,7 @@ ABANDON_GRACE_S = 120.0
 WAIT_EVENT = "rl_agentic_waiting"
 WAIT_BEAT_S = 60.0
 CLOSE_WAIT_S = 2.0  # close(): the longest wait for the cancelled trials to end
+LOOP_CLOSE_WAIT_S = 2.0  # LoopThread.close(): the longest wait for the loop's other tasks to end
 RETRY_EVENT = "rl_agentic_trial_retry"
 LOST_EVENT = "rl_agentic_trial_lost"  # one token_alignment loss: error, call, token window, trial_dir
 DEFAULT_INFRA_RETRIES = 2  # per trial slot (spec agentic.infra_retries)
@@ -182,9 +183,38 @@ class LoopThread:
     def run(self, coro: Any) -> Any:
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
 
+    def cancel_pending(self, timeout_s: float) -> None:
+        """Cancel every task still pending on the loop (a recorder request still in the
+        engine: aiohttp does not cancel a handler whose client left) and give them up to
+        ``timeout_s`` to end."""
+
+        async def cancel() -> None:
+            tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.wait(tasks, timeout=timeout_s)
+
+        if self._thread.is_alive() and not self.loop.is_closed():
+            asyncio.run_coroutine_threadsafe(cancel(), self.loop).result(timeout=timeout_s + 5)
+
     def close(self) -> None:
+        """Cancel what still runs on the loop, stop it and close it. A loop that is only
+        stopped keeps its tasks and its selector until the garbage collector finds them,
+        in whatever runs then ("Task was destroyed but it is pending!", unclosed loop)."""
+        if self.loop.is_closed():
+            return
+        try:
+            self.cancel_pending(LOOP_CLOSE_WAIT_S)
+            if self._thread.is_alive():
+                asyncio.run_coroutine_threadsafe(self.loop.shutdown_asyncgens(), self.loop).result(
+                    timeout=LOOP_CLOSE_WAIT_S)
+        except Exception:  # noqa: BLE001 - still stop the loop
+            pass
         self.loop.call_soon_threadsafe(self.loop.stop)
         self._thread.join(timeout=10)
+        if not self._thread.is_alive():
+            self.loop.close()
 
 
 def session_id(*parts: Any) -> str:
@@ -627,7 +657,10 @@ class AgenticRound(EngineRound):
     def close(self) -> int:
         """End of the island: cancel the trials still running, delete the pooled
         boat sandboxes (the account returns to the sandboxes other runs hold) and
-        stop the loop; returns the VMs deleted."""
+        stop the loop; returns the VMs deleted. A second close finds the loop closed and
+        does nothing."""
+        if self.loop.loop.is_closed():
+            return 0
         deleted = 0
         try:
             try:
@@ -635,6 +668,7 @@ class AgenticRound(EngineRound):
                 self.loop.run(self._wait_cancelled(CLOSE_WAIT_S))
             except Exception:  # noqa: BLE001 - the loop may be gone already
                 pass
+            self._stop_recorder_server()
             from yeto.rl.harness.harbor.boat_pool import close_pools_now
 
             deleted = int(close_pools_now() or 0)
@@ -643,6 +677,19 @@ class AgenticRound(EngineRound):
         self.emit("rl_agentic_close", boat_vms_deleted=deleted, lost_total=dict(sorted(self.lost.items())),
                   trials_total=self.trials)
         return deleted
+
+    def _stop_recorder_server(self) -> None:
+        """Stop the recorder's HTTP server, which runs on this round's loop (its listening
+        socket and connections close with it). The requests still in it are cancelled
+        first: the server's shutdown would wait for them."""
+        aclose = getattr(self.recorder, "aclose", None)
+        if aclose is None:
+            return
+        try:
+            self.loop.cancel_pending(CLOSE_WAIT_S)
+            self.loop.run(asyncio.wait_for(aclose(), CLOSE_WAIT_S))
+        except Exception:  # noqa: BLE001 - the loop closes anyway
+            pass
 
     # ------------------------------------------------------------------ trials
     def _task(self, item: PromptItem, session: str) -> Any:

@@ -28,8 +28,11 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import gc
+import logging
 import threading
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +44,7 @@ from yeto.rl.adapters.sampler_engines.fake import FakeEngine
 from yeto.rl.agentic import TrialVerdict
 from yeto.rl.compaction import CompactionConfig
 from yeto.rl.engine.agentic_round import (DRAIN_EVENT, GROUP_EVENT, LOST_DRAIN, LOST_VERSION, RETRY_EVENT,
-                                          AgenticRound, infra_failure)
+                                          AgenticRound, LoopThread, infra_failure)
 from yeto.rl.engine.buffer_payload import GroupWriter, decode_group
 from yeto.rl.engine.engine_sampler import PromptItem
 from yeto.rl.engine.resume import CheckpointStore
@@ -467,9 +470,12 @@ def test_finished_compacted_trials_leave_nothing_in_the_recorder(tmp_path, glm, 
     assert len(_samples(tmp_path)) == 8  # two groups of two trials, two segments each
 
 
-def test_closing_the_island_during_a_summary_turn_forgets_the_trial(tmp_path, glm, budget):
+def test_closing_the_island_during_a_summary_turn_forgets_the_trial(tmp_path, glm, budget, caplog):
     """No suspension on this path: a sampler that stops (or restarts) with a trial in its
-    summary turn loses it with every segment; nothing of it is left in the recorder."""
+    summary turn loses it with every segment; nothing of it is left in the recorder. Nor on
+    the round's loop: the recorder request still in the engine is cancelled, the recorder's
+    server stopped and the loop closed, so the garbage collector, in whatever test runs
+    next, finds no pending task ("Task was destroyed but it is pending!")."""
     model = Model(glm)
     model.release.clear()
     world = _world(glm, budget, model)
@@ -482,6 +488,145 @@ def test_closing_the_island_during_a_summary_turn_forgets_the_trial(tmp_path, gl
         model.release.set()
     assert world.held() == EMPTY and _samples(tmp_path) == []
     assert not _events(events, GROUP_EVENT)  # never settled: its round is not in the buffer
+    assert rnd.loop.loop.is_closed() and world.recorder._runner is None
+    caplog.set_level(logging.DEBUG, logger="asyncio")
+    del rnd, world
+    gc.collect()
+    assert [r.getMessage() for r in caplog.records if r.name == "asyncio"] == []
+
+
+class CleanupAgent(Agent):
+    """An agent whose cancelled trial still awaits its own cleanup (a sandbox teardown)
+    on the round's loop before it ends."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleaned = threading.Event()
+
+    async def run(self, task, endpoint):
+        try:
+            return await super().run(task, endpoint)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)  # on the loop the close is about to close
+            self.cleaned.set()
+            raise
+
+
+def _listening(url: str) -> bool:
+    import socket
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    with socket.socket() as sock:
+        sock.settimeout(2)
+        return sock.connect_ex((parts.hostname, parts.port)) == 0
+
+
+def test_close_after_finished_rounds_stops_the_recorder_server_and_closes_the_loop(tmp_path, glm, budget, caplog):
+    model = Model(glm)
+    world = _world(glm, budget, model)
+    rnd, events = _round(tmp_path, world, Agent())
+    try:
+        rnd(0)
+        rnd.flush()
+        url = world.recorder._base_url
+        assert url and _listening(url) and not rnd.loop.loop.is_closed()  # running: nothing closed early
+    finally:
+        deleted = rnd.close()
+    assert deleted == 0 and len(_samples(tmp_path)) == 2  # the finished trial's two segments were written
+    assert rnd.loop.loop.is_closed() and world.recorder._runner is None and not _listening(url)
+    assert [f["trials_total"] for f in _events(events, "rl_agentic_close")] == [1]
+    caplog.set_level(logging.DEBUG, logger="asyncio")
+    del rnd, world
+    gc.collect()
+    assert [r.getMessage() for r in caplog.records if r.name == "asyncio"] == []
+
+
+def test_close_waits_for_a_cancelled_trials_cleanup_before_it_closes_the_loop(tmp_path, glm, budget):
+    model = Model(glm)
+    model.release.clear()
+    world = _world(glm, budget, model)
+    agent = CleanupAgent()
+    rnd, _ = _round(tmp_path, world, agent)
+    try:
+        rnd(0)
+        _wait(model.summary_started.is_set)
+    finally:
+        rnd.close()
+        model.release.set()
+    assert agent.cleaned.is_set()  # its cleanup ran to the end on the loop before the loop closed
+    assert rnd.loop.loop.is_closed() and world.held() == EMPTY
+
+
+def test_close_closes_the_loop_when_stopping_the_recorder_or_deleting_the_pools_fails(tmp_path, glm, budget,
+                                                                                       monkeypatch):
+    from yeto.rl.harness.harbor import boat_pool
+
+    world = _world(glm, budget, Model(glm))
+    rnd, events = _round(tmp_path, world, Agent())
+    rnd(0)
+    rnd.flush()
+
+    async def broken_aclose():
+        raise OSError("the server did not stop")
+
+    monkeypatch.setattr(world.recorder, "aclose", broken_aclose)
+    assert rnd.close() == 0  # the recorder's failure does not fail the close
+    assert rnd.loop.loop.is_closed()
+
+    world = _world(glm, budget, Model(glm))
+    rnd, events = _round(tmp_path / "b", world, Agent())
+    rnd(0)
+    rnd.flush()
+
+    def broken_pools():
+        raise RuntimeError("boat API down")
+
+    monkeypatch.setattr(boat_pool, "close_pools_now", broken_pools)
+    with pytest.raises(RuntimeError, match="boat API down"):  # as before: the pool error is the caller's
+        rnd.close()
+    assert rnd.loop.loop.is_closed() and world.recorder._runner is None
+
+
+def test_a_second_close_is_safe_and_changes_nothing(tmp_path, glm, budget, monkeypatch):
+    from yeto.rl.harness.harbor import boat_pool
+
+    deletes = []
+    monkeypatch.setattr(boat_pool, "close_pools_now", lambda: deletes.append("pools") or 3)
+    world = _world(glm, budget, Model(glm))
+    rnd, events = _round(tmp_path, world, Agent())
+    rnd(0)
+    rnd.flush()
+    assert rnd.close() == 3
+    gc.collect()  # what earlier tests left for the collector is not this close's
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert rnd.close() == 0  # the loop is closed already: nothing to cancel, stop or close
+        gc.collect()
+    assert [str(w.message) for w in caught] == []  # no coroutine handed to the closed loop
+    assert deletes == ["pools"]  # the pooled sandboxes are deleted once
+    assert [f["trials_total"] for f in _events(events, "rl_agentic_close")] == [1]
+    assert rnd.loop.loop.is_closed() and world.recorder._runner is None
+    assert len(_samples(tmp_path)) == 2
+
+
+def test_closing_the_loop_thread_cancels_its_tasks_and_closes_the_loop(caplog):
+    loop = LoopThread(workers=1)
+    started = threading.Event()
+
+    async def pending():
+        started.set()
+        await asyncio.sleep(3600)
+
+    task = asyncio.run_coroutine_threadsafe(pending(), loop.loop)
+    assert started.wait(10)
+    loop.close()
+    assert loop.loop.is_closed() and task.cancelled()
+    loop.close()  # a second close does nothing
+    caplog.set_level(logging.DEBUG, logger="asyncio")
+    del loop
+    gc.collect()
+    assert [r.getMessage() for r in caplog.records if r.name == "asyncio"] == []
 
 
 def test_a_request_for_a_forgotten_trajectory_recreates_no_state(glm, budget):
