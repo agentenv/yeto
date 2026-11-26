@@ -3191,9 +3191,7 @@ class Run:
         elif wall_h is None:
             off = "budget.wall_h is null" if "wall_h" in b else "breakers.run.wall_clock is off"
             _log(f"preflight: {off}: no wall-clock cap; only budget.usd (if set) stops the run")
-        priced = (up_consistency.number_or_default(self.cfg["trainer"], "usd_per_h", 0) > 0
-                  or up_consistency.number_or_default(b, "nc_usd_per_h", _nc_node_usd_h()) > 0)
-        if usd is not None and usd <= 0 and priced:
+        if usd is not None and usd <= 0 and self.budget_priced(b):
             shown = f"budget.usd is {b['usd']}" if b.get("usd") is not None else f"breakers.run.budget.usd is {usd:g}"
             return (f"{shown} while prices are set (trainer.usd_per_h / budget.nc_usd_per_h): "
                     "the first estimated dollar would stop the run; set the spend cap")
@@ -3251,6 +3249,21 @@ class Run:
         found = fleet_session.synced_shape_problems(self.trainer_argv(), [str(i.name) for i in plan.islands])
         return ("fleet: the trainer islands differ in shape (the syncer would refuse them at HELLO): "
                 + "; ".join(found)) if found else None
+
+    def budget_priced(self, b: dict[str, Any]) -> bool:
+        """Whether the run bills anything a ``budget.usd`` of 0 would stop at once: a
+        ``trainer.usd_per_h`` above 0, or the National Compute node rate
+        (``budget.nc_usd_per_h``, else the price table's) when the run has an NC pool or
+        is a fleet (as before). A single-trainer run without an NC pool: a pool at a node
+        price above 0 (:meth:`node_usd_per_h`: own ``kind: ssh`` nodes bill 0, a pool
+        config that cannot be read counts at the NC rate), so a run all on own nodes may
+        set ``budget.usd`` to 0."""
+        if up_consistency.number_or_default(self.cfg["trainer"], "usd_per_h", 0) > 0:
+            return True
+        kinds = [ref.kind() for ref in self.pools]
+        if "nc" in kinds or self.fleet_plan() is not None:
+            return up_consistency.number_or_default(b, "nc_usd_per_h", _nc_node_usd_h()) > 0
+        return any(self.node_usd_per_h(i) > 0 for i in range(len(self.pools)))
 
     def island_price_problem(self) -> str | None:
         """A run budget and a per-island fleet whose trainer island has no price: neither
