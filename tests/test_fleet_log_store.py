@@ -694,3 +694,91 @@ def test_the_store_status_is_ok_since_the_oldest_clean_poll():
     status = failed.status()
     assert (status["last_error"], status["last_error_at"], status["errors"], status["failing"]) == ("new", 5.0, 3, 1)
     assert fleet_store.StoreReaders(_Status(), _Status(polled=False)).status()["polled"] is False
+
+
+# -- a corrupt copy record -------------------------------------------------------------------------
+
+CORRUPT = {
+    "start-not-int": json.dumps({"schema": fleet_store.COPY_SCHEMA, "store": "s3://x", "start": "12", "run": None}),
+    "start-bool": json.dumps({"schema": fleet_store.COPY_SCHEMA, "store": "s3://x", "start": True, "run": None}),
+    "start-negative": json.dumps({"schema": fleet_store.COPY_SCHEMA, "store": "s3://x", "start": -1, "run": None}),
+    "not-json": "{not json",
+    "not-an-object": "[1, 2]",
+    "no-start": json.dumps({"schema": fleet_store.COPY_SCHEMA, "store": "s3://x", "run": None}),
+    "no-run": json.dumps({"schema": fleet_store.COPY_SCHEMA, "store": "s3://x", "start": 0}),
+    "other-schema": json.dumps({"schema": "x/v9", "store": "s3://x", "start": 0, "run": None}),
+}
+
+
+@pytest.mark.parametrize("text", CORRUPT.values(), ids=CORRUPT.keys())
+def test_a_corrupt_record_is_no_record_and_the_copy_starts_at_the_file_s_start(tmp_path, text, capsys):
+    path = tmp_path / "r" / "fleet.jsonl"
+    path.parent.mkdir()
+    path.write_bytes(_text(A_ROWS))
+    fleet_store.copy_record_path(path).write_text(text)
+    assert fleet_store.read_copy_record(path) is None
+    assert "fleet.store.json is corrupt" in capsys.readouterr().err
+    assert fleet_store.copy_start(path, "s3://x", run="r@1.0") == 0
+    err = capsys.readouterr().err
+    assert err.count("WARN") == 1 and "the copy starts at the file's start" in err
+    assert fleet_store.read_copy_record(path)["start"] == 0  # a sound record from here on
+
+
+def test_a_launch_with_a_corrupt_record_copies_the_whole_file(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+    store = tmp_path / "s"
+    path = tmp_path / "run-i1" / "fleet.jsonl"
+    path.parent.mkdir()
+    path.write_bytes(_text(A_ROWS))  # an earlier launch's lines
+    fleet_store.copy_record_path(path).write_text(CORRUPT["start-not-int"])
+    _new_run()
+    log = _launch(tmp_path, store)
+    assert log.uploader is not None and log.close() is True
+    assert _uploaded(store) == log.path.read_bytes()  # from 0: the readers fold each record once
+    assert "is corrupt" in capsys.readouterr().err
+
+
+def test_a_failing_record_read_never_fails_the_launch(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+
+    def broken(path):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(fleet_store, "_load_copy_record", broken)
+    assert fleet_store.copy_start(tmp_path / "x" / "fleet.jsonl", "s3://x", run="r@1.0") == 0
+    monkeypatch.setattr(fleet_store, "copy_start", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    _new_run()
+    log = _launch(tmp_path, tmp_path / "s")  # the launch goes on, its fleet.jsonl local
+    assert log is not None and log.uploader is None and _records(log.path)[-1]["event"] == "island_ready"
+    assert "store copy disabled: RuntimeError: boom" in capsys.readouterr().err
+
+
+def test_yeto_down_with_a_corrupt_record_copies_nothing(tmp_path, monkeypatch, capsys):
+    cli, path, store = _down_run(tmp_path, monkeypatch)
+    fleet_store.copy_record_path(path).write_text(CORRUPT["not-json"])
+    assert cli._close_fleet_islands("r") == [ISLAND]  # noqa: SLF001
+    assert not store.exists() and "is corrupt" in capsys.readouterr().err
+
+
+# -- a copied run directory ------------------------------------------------------------------------
+
+def test_yeto_down_of_a_copied_run_directory_leaves_the_original_s_store_alone(tmp_path, monkeypatch):
+    """The run directory copied under another name (meta.json, fleet.jsonl and its copy record
+    with it): the copy's yeto down copies nothing into the original run's store; the
+    original's does."""
+    import shutil
+
+    from yeto import cli
+
+    monkeypatch.setattr("yeto.runs.run_dir", lambda run: tmp_path / run)
+    s1 = tmp_path / "s1"
+    _new_run()
+    log = _launch(tmp_path, s1)  # the island stays open: its launcher is gone
+    assert log.close() is True
+    shutil.copytree(tmp_path / "run-i1", tmp_path / "run-copy")
+    assert fleet_store.run_identity("run-copy") != fleet_store.run_identity("run-i1")
+    before = _folders(s1)
+    assert cli._close_fleet_islands("run-copy") == [ISLAND]  # noqa: SLF001
+    assert _folders(s1) == before
+    assert cli._close_fleet_islands("run-i1") == [ISLAND]  # noqa: SLF001
+    assert len(_folders(s1)) == len(before) + 1  # the original's island_stop line

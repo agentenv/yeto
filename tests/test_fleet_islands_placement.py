@@ -97,6 +97,30 @@ def test_islands_of_two_shapes_keep_the_shape_message_alone():
                                                    ["a", "b"])
     assert len(problems) == 1 and SHAPE in problems[0] and PLACEMENT not in problems[0]
     assert "DP4, island a (learner 0) trains on TP1 PP1 EP1 CP1 DP8" in problems[0]
+    # their placements differ too: a shape-free layout would not help, so it is not offered
+    assert "or set --rl-sync-layout shape-free" not in problems[0]
+    assert "the same nodes x GPUs per node and parallel flags" in problems[0] and "does not help here" in problems[0]
+
+
+@pytest.mark.parametrize("extra", [
+    # one placement (per-island placement: TP2 on the same machines): shape-free takes the shape out
+    [*FLEET, "--rl-island-placement", "1:tensor-parallel=2", "--gpu", f"{ONE_BY_EIGHT},{ONE_BY_EIGHT}"],
+    # an island that binds no placement (verl): shape-free is the way out it was
+    [*FLEET, "--rl-backend", "verl", "--gpu", f"{ONE_BY_EIGHT},nebius:1x4xh100"],
+], ids=["per-island-placement", "verl"])
+def test_shape_free_is_offered_where_it_helps(extra):
+    from yeto.rl.fleet_session import LaunchSession, shape_problems
+    from yeto.rl.up_consistency import trainer_args as parsed
+
+    found = fleet_session.synced_shape_problems([*BASE, *extra], ["a", "b"])
+    if not found:  # a launch whose layout is not shape-bound: the shape check itself, with shapes given
+        args = parsed([*BASE, *extra])
+        placements = fleet_session.launch_placements_of(args) or [None, None]
+        found = shape_problems([LaunchSession(name=n, learner_id=i, profile={}, profile_sha256="", learners=0,
+                                              hello="", syncer_epoch=0, max_learners=None, shape=shape,
+                                              placement=placements[i])
+                                for i, (n, shape) in enumerate(zip("ab", [(1, 1, 1, 1, 8), (1, 1, 1, 1, 4)]))])
+    assert len(found) == 1 and "or set --rl-sync-layout shape-free for the whole fleet" in found[0]
 
 
 def test_each_island_is_compared_with_the_first_of_its_shape():
@@ -353,10 +377,57 @@ def test_a_move_is_compared_with_the_running_island_as_it_was_started(fleet_stor
     assert "compat_group nvidia-h100" in err and "nvidia-h200" in err and "island(s) mixed" in err
 
 
-def test_a_stopped_island_s_record_is_not_its_running_launch(fleet_store):  # noqa: F811
+@pytest.mark.parametrize("state", ["down", "moving", "stopping"])
+def test_a_record_that_is_not_a_running_launch_is_not_compared(fleet_store, state):  # noqa: F811
+    """DOWN, MOVING, STOPPING: the desired state's member is compared (for MOVING its new target)."""
     _cfg, objects, store, run_cli, _ = fleet_store
-    _started(objects, store, "mixed", "modal:1x2xh200", state="down")
+    _started(objects, store, "mixed", "modal:1x2xh200", state=state)
     assert run_cli("move", "--name", "sglang", "--gpu", "modal:1x2xh100", "--usd-per-h", "4", "--dry-run") == 0
+
+
+def _unparsable(objects, store, name="mixed"):
+    from yeto.launch.pool import desired as dz
+    from yeto.rl import trainer_worker
+
+    member = dz.trainers(store.read())[name]
+    trainer_worker.save_record(objects, int(member["learner_id"]), {
+        "name": name, "prefix": member["prefix"], "state": "running",
+        "argv": ["--training-mode", "rl", "--no-such-flag"]}, 0.0)
+
+
+@pytest.mark.parametrize("moved", ["sglang", "mixed"], ids=["another-island", "the-island-itself"])
+def test_an_unparsable_running_record_is_refused_unless_allowed(fleet_store, capsys, moved):  # noqa: F811
+    """mixed's recorded launch does not compile: a move of another island, or of mixed itself
+    (its old machines), is refused by default with the reason and both ways out; the narrow
+    --allow-unparsable-running makes it a WARN and the change goes on."""
+    from yeto.rl import island_launches as il
+
+    _cfg, objects, store, run_cli, _ = fleet_store
+    _unparsable(objects, store)
+    # a syncer holds the session: a moved island's old machines are compared too
+    il.write_syncer_record(objects, addr="SYNCER:29400", syncer_epoch=None, learners=2, max_learners=4, run="r")
+    before = store.read()["generation"]
+    move = ("move", "--name", moved, "--gpu", "modal:1x2xh100", "--usd-per-h", "4")
+    capsys.readouterr()
+    assert run_cli(*move) == 2
+    err = capsys.readouterr().err
+    assert "island mixed" in err and "its launch as started does not compile" in err
+    assert "written when the incarnation started: a changed config does not change it" in err
+    assert "Pass --allow-unparsable-running" in err and "yeto fleet island remove --name mixed)" in err
+    assert store.read()["generation"] == before
+    assert run_cli(*move, "--allow-unparsable-running", "--dry-run") == 0
+    err = capsys.readouterr().err
+    assert "fleet session: WARN:" in err and "the island is left out of the comparison" in err
+
+
+def test_the_narrow_way_out_does_not_cover_an_island_whose_desired_launch_does_not_compile(tmp_path):
+    """--allow-unparsable-running is about a recorded launch only: a running member rebuilt
+    from the desired state that does not compile stays a refusal (its config is to be fixed)."""
+    cfg, members = _members(tmp_path)
+    with pytest.raises(ValueError, match="fix that island's configuration"):
+        fleet_session.check(cfg["trainer"]["argv"], [members[0]],
+                            running=[{**members[0], "name": "broken", "gpu": "nowhere:9xq"}],
+                            allow_unparsable_running=True)
 
 
 def test_a_running_island_whose_launch_does_not_compile_refuses_the_change(fleet_store, capsys):  # noqa: F811

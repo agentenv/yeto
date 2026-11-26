@@ -165,8 +165,18 @@ yeto fleet show --config run.json
 | Exit | Meaning |
 |---|---|
 | 0 | Written (or, with `--dry-run`, the change is valid). |
-| 2 | Refused, nothing written: a bad name or samplers file, no learner id left, no `--usd-per-h` while the run has a budget, a trainer shape that differs from the fleet's, an island's launch that fails its dry run. |
+| 2 | Refused, nothing written: a bad name or samplers file, no learner id left, no `--usd-per-h` while the run has a budget, a trainer shape that differs from the fleet's, an island's launch that fails its dry run, a running island whose recorded launch does not compile (see below). |
 | 3 | The desired state changed under the command three times in a row. Run it again. |
+
+`add` and `move` compare the island with the running ones as they were started: a
+starting or running island's trainer worker record holds the launch it was started with.
+That record is written when the island's incarnation starts, so changing the config does
+not change it. When it no longer compiles (an option removed since, a file it read gone),
+the change is refused: pass `--allow-unparsable-running` to check without that island (a
+`WARN`), or stop or remove that island first (`yeto fleet island remove --name <island>`).
+The option covers only a recorded launch; an island whose desired launch does not compile
+is refused until its config is fixed. A moving or stopping island is compared as the desired
+state has it (for a move, its new target).
 
 ### Adding an island
 
