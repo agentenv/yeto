@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_own_cluster_templates import kit  # noqa: F401 - the own-cluster kit fixture
 from yeto.rl import up, up_consistency
 
 GUIDE = Path(__file__).resolve().parents[1] / "docs" / "KIMI_K31_ASYNC_RL_GUIDE.md"
@@ -252,3 +253,84 @@ def test_a_pool_spend_that_is_not_an_amount_counts_its_hours_at_the_mi355x_rate(
         spend = run.spend_usd()
         assert math.isfinite(spend) and spend == pytest.approx(2 * rate, rel=1e-3)
     assert _warnings(capsys, "is not an amount") == 1
+
+
+# -- budget.usd 0: refused only when something is priced (REV-903 L1) -----------------
+
+def _ssh(**entry):
+    section = {"kind": "ssh", "inventory": "inventory.yaml", "nodes": ["own-smp-0"]}
+    return {"name": "own", "provider": section, "shard_base": "o", "slots": [1], **entry}
+
+
+def _own(run_with, samplers, budget, trainer_usd=0):
+    run = run_with(samplers, budget)
+    run.cfg["trainer"] = {"argv": ["--gpu", "ssh:1x8xb300"], "usd_per_h": trainer_usd}
+    return run
+
+
+@pytest.mark.parametrize("budget", [{"usd": 0}, {"usd": 0, "nc_usd_per_h": 24}])
+def test_a_run_all_on_own_nodes_may_set_budget_usd_zero(run_with, budget):
+    """An ssh trainer and an ssh pool bill nothing: no NC pool, so the NC node rate (the
+    price table's, or a budget.nc_usd_per_h left in the template) is not a price here."""
+    run = _own(run_with, [_ssh()], budget)
+    assert run.pools[0].kind() == "ssh" and run.node_usd_per_h(0) == 0
+    assert run.budget_problem() is None
+
+
+def test_an_own_run_with_a_priced_trainer_or_pool_keeps_the_refusal(run_with):
+    problem = _own(run_with, [_ssh()], {"usd": 0}, trainer_usd=8).budget_problem()
+    assert problem is not None and "budget.usd is 0 while prices are set" in problem
+    problem = _own(run_with, [_ssh(), _modal(70.0)], {"usd": 0}).budget_problem()
+    assert problem is not None and "budget.usd is 0 while prices are set" in problem
+    problem = _own(run_with, [_ssh(usd_per_h=3)], {"usd": 0}).budget_problem()  # an own node with a declared price
+    assert problem is not None and "budget.usd is 0 while prices are set" in problem
+
+
+def test_with_an_nc_pool_budget_usd_zero_is_judged_as_before(run_with):
+    """An NC pool: its node rate counts (the price table's when budget.nc_usd_per_h is
+    unset), as on main; budget.nc_usd_per_h 0 with an unpriced trainer passes, as before."""
+    problem = _own(run_with, [run_with.nc], {"usd": 0}).budget_problem()
+    assert problem is not None and "budget.usd is 0 while prices are set" in problem
+    problem = _own(run_with, [run_with.nc, _ssh()], {"usd": 0}).budget_problem()
+    assert problem is not None and "budget.usd is 0 while prices are set" in problem
+    assert _own(run_with, [run_with.nc], {"usd": 0, "nc_usd_per_h": 0}).budget_problem() is None
+    problem = run_with([run_with.nc], {"usd": 0, "nc_usd_per_h": 0}).budget_problem()  # trainer $100/h
+    assert problem is not None and "budget.usd is 0 while prices are set" in problem
+    assert run_with([run_with.nc], {"usd": 450}).budget_problem() is None
+    # an NC pool's entry price does not hide the NC node rate (as before)
+    problem = _own(run_with, [{**run_with.nc, "usd_per_h": 0}], {"usd": 0}).budget_problem()
+    assert problem is not None and "budget.usd is 0 while prices are set" in problem
+
+
+def test_a_fleet_counts_the_nc_rate_as_before(run_with, monkeypatch):
+    run = _own(run_with, [_ssh()], {"usd": 0})
+    monkeypatch.setattr(up.Run, "fleet_plan", lambda self: object())  # a fleet: its islands price themselves
+    problem = run.budget_problem()
+    assert problem is not None and "budget.usd is 0 while prices are set" in problem
+
+
+def test_an_unreadable_pool_config_counts_the_nc_rate_as_before(run_with, tmp_path):
+    gone = tmp_path / "gone.json"
+    gone.write_text(json.dumps({"shard_base": "g"}))
+    run = _own(run_with, [{"name": "gone", "provider": "nc", "config": str(gone)}], {"usd": 0})
+    Path(run.pools[0].config).unlink()  # read at run up, gone by the preflight
+    assert run.pools[0].kind() == "?"
+    problem = run.budget_problem()
+    assert problem is not None and "budget.usd is 0 while prices are set" in problem
+
+
+def test_the_own_cluster_kit_all_on_own_nodes_passes_with_budget_usd_zero(kit, capsys):
+    """The own-cluster templates' ssh trainer with their ssh sampler pool, budget.usd 0:
+    the dry run passes (it was refused for the NC node rate of a run without an NC pool)."""
+    from tests.test_own_cluster_templates import _dry_run
+
+    own = json.loads(kit.files["run.own-trainer-sky-sampler.json"].read_text())["trainer"]
+    path = kit.files["run.own-sampler-pool.json"]
+    cfg = json.loads(path.read_text())
+    cfg["trainer"] = {**cfg["trainer"], "argv": own["argv"], "usd_per_h": 0}
+    cfg["budget"] = {**cfg.get("budget", {}), "usd": 0}
+    path.write_text(json.dumps(cfg))
+    rc, out = _dry_run(kit, "run.own-sampler-pool.json", capsys, check_nodes=False)
+    assert "while prices are set" not in out
+    assert rc == 0, out.why
+    assert "dry run: spend estimate $0.00/h = pools $0.00/h" in out
