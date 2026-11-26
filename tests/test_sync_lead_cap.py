@@ -296,6 +296,31 @@ async def test_with_k_1_the_wait_answers_its_window_late_and_holds_the_next_wind
 
 
 @pytest.mark.asyncio
+async def test_with_k_1_the_next_round_waits_until_every_step_of_its_window_merged(lead_clock):
+    """Step 1 merged and nothing is in flight, but step 2 of the window has no
+    PULL yet: the island trains on only once step 2, pushed from this cut, merged.
+    The K >= 2 rule (no blocker, no unpushed round) would train on here and push
+    step 2 from the next cut, one round late: the lead then grows with the run."""
+    role = _PeerPacedRole([_candidate(1, 1)])
+    pairing = _pairing(role, max_local_rounds_ahead=1)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    role.peer_pushed.add(1)  # step 1 merges first
+    served = []
+
+    async def serve():
+        served.append(len(served))
+        if len(served) == 4:  # step 2's PULL arrives late; the peer pushes it too
+            role.candidates.append(_candidate(2, 1))
+            role.peer_pushed.add(2)
+        return 0
+
+    assert await pairing.wait_for_lead(serve) > 0
+    assert len(served) >= 4 and _pushed(role) == [1, 2] and role.fragment_versions == (1, 2)
+    assert pairing.lead_wait_escapes == 0
+
+
+@pytest.mark.asyncio
 async def test_with_k_1_a_wait_entered_before_any_pull_answers_each_pull_of_its_window(lead_clock):
     """The window is decided once per round: a wait entered with nothing pushed
     pushes the first PULL of its window, keeps answering the window's PULLs as
@@ -394,6 +419,19 @@ def test_with_k_1_a_caught_up_island_takes_the_window_of_its_first_open_step():
     role.fragment_versions = (7, 8)
     pairing.local_round = 2
     assert pairing.lead_window() == (9, 10)
+
+
+def test_with_k_1_windows_stay_aligned_to_multiples_of_the_pipeline_depth():
+    """Versions (7, 6): step 7 merged, step 8 is the first open step. The window
+    is the fixed window 7..8 that holds it, not 8..9: every island cuts the same
+    windows, whichever of its steps closed first."""
+    role = _PeerPacedRole([_candidate(8, 1), _candidate(9, 1)])
+    pairing = _pairing(role, max_local_rounds_ahead=1)
+    role.fragment_versions = (7, 6)
+    pairing.local_round = 1
+    assert pairing.lead_window() == (7, 8)
+    pairing.submit_ready()
+    assert _pushed(role) == [8]  # step 9 belongs to window 9..10
 
 
 @pytest.mark.asyncio
@@ -495,18 +533,21 @@ async def test_with_k_1_a_held_pull_is_not_materialized_ahead(lead_clock):
     pairing.local_round = 1
     await pairing.prepare_submissions()
     pairing.submit_ready()
+    role.peer_pushed.add(1)  # step 1 merges at the first poll: two pipeline slots are free
     served = []
 
     async def serve():
         served.append(len(served))
         if len(served) == 1:
+            assert pairing.inflight == {}
             role.candidates.extend([_candidate(3, 1), _candidate(2, 1)])  # next window, this window
         if len(served) == 3:
-            role.peer_pushed.update({1, 2})
+            role.peer_pushed.add(2)
         return 0
 
     await pairing.wait_for_lead(serve)
-    # Cut 1 materialized fragment 0 (step 1) and fragment 1 (step 2), never step 3's.
+    # Cut 1 materialized fragment 0 (step 1) and fragment 1 (step 2), never step 3's,
+    # although a slot was free for it.
     assert role.materialized == [(1, (0,)), (1, (1,))]
     pairing.local_round = 2
     await pairing.prepare_submissions()
@@ -519,6 +560,25 @@ def test_a_pair_reads_the_injected_clock_when_it_is_retained(lead_clock):
     before = lead_clock()
     pair = PairedSubmission({"actor": _candidate(1, 1)})
     assert pair.retained_at == before  # read at construction, before any push
+
+
+@pytest.mark.asyncio
+async def test_with_k_2_rounds_trained_after_the_last_retained_push_still_count():
+    """K >= 2 keeps the blocker rule: after a merge and before the next PULL
+    nothing is in flight, yet the rounds trained since the island last retained
+    a pair land in its next push, so K of them stop the next round."""
+    role = _PairedRole("actor", [_candidate(1, 1)], [])
+    pairing = _pairing(role, max_local_rounds_ahead=2)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    await pairing.commit_staged_broadcasts()
+    assert pairing.inflight == {} and role.fragment_versions == (1, 0)
+    pairing.local_round = 2  # one round on top of the push: allowed
+    assert pairing.lead_blockers() == [] and not pairing.lead_unpushed()
+    assert await pairing.wait_for_lead() == 0.0
+    pairing.local_round = 3  # a second one: the next round waits for a push
+    assert pairing.lead_blockers() == [] and pairing.lead_unpushed()
+    assert pairing.lead_window() is None
 
 
 @pytest.mark.asyncio

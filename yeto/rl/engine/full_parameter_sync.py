@@ -1063,8 +1063,9 @@ class RolePairing:
         there.  The lead wait gives up (and the island trains on, the old
         behaviour) once the oldest pair in flight has waited half of
         ``wait_timeout`` since its last push, or, with none in flight, half of
-        it since the island last retained a pair, before a pair could time
-        out.
+        it since the first pair the island retained in the last round it
+        retained one (``retained_round_at``), before a pair could time out.
+        After a give-up the lead is no longer bounded.
 
         Returns the seconds this boundary waited."""
 

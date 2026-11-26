@@ -1488,7 +1488,10 @@ _SYNC = (
         "deadline or islands leaving, a window can close without an island and the "
         "lead is not bounded). Cost of K=1: one window of steps is in flight per local "
         "round, also with several --syncer-shards. The wait gives up (and trains on) "
-        "after half of --rl-sync-wait-timeout-s since the island's last push. "
+        "after half of --rl-sync-wait-timeout-s, counted from the last push of the "
+        "oldest pair in flight or, with none in flight, from the first pair the island "
+        "retained in the last round it retained one; after a give-up the lead is no "
+        "longer bounded. "
         "Island-local: the layout, syncer profile and training contract hashes do not change",
     ),
     cli_flag(
