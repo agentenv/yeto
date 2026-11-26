@@ -7,12 +7,15 @@ inventory in five steps, each one an existing module of yeto:
 1. **manifest**: the registry has the image (:mod:`.image_manifest`, a manifest HEAD
    with the registry login of the pull); a tag is pinned to its digest. Nothing is
    asked of a node before this step passed;
-2. **probe**: one node runs the image once (``docker run --rm`` with the node's device
-   flags) and prints what it carries: CPU architecture, Python, torch, CUDA / HIP, the
-   card architectures its kernels were built for, the engine packages and the yeto
-   image lock (``/opt/yeto/image``);
+2. **probe**: one node, after its host checks (ssh, the host probe, room in its image
+   root) and a check that its cards are idle (:func:`busy_script`), runs the image once
+   (``<container engine> run --rm``, no cards: the built card architectures are read
+   from torch's build flags) and prints what it carries: CPU architecture, Python,
+   torch, CUDA / HIP, the card architectures its kernels were built for, the engine
+   packages and the yeto image lock (``/opt/yeto/image``);
 3. **fit**: the image against every node of the role: CPU architecture, device
-   runtime, card architecture (the image's built architectures; a trainer image's
+   runtime, card architecture (the image's built architectures under the CUDA binary
+   compatibility rules, :func:`card_arch_fit`; a trainer image's
    verified floor, :mod:`.trainer_image_check`; a catalog sampler image's record,
    :func:`.engine_images.image_mismatch`) and the engine the role runs;
 4. **pull**: every node of the role pulls the image in parallel after its image root
@@ -22,7 +25,8 @@ inventory in five steps, each one an existing module of yeto:
 5. **smoke**: the role's smoke on one node (:mod:`.image_smoke`).
 
 Every step that fails stops the adoption with its name and the reason
-(:class:`AdoptError`); the catalog is written only after the smoke passed, with the
+(:class:`AdoptError`, which names the nodes the image was already pulled on: it stays
+there for a retry); the catalog is written only after the smoke passed, with the
 versions the probe read and the evidence of the run (:mod:`.site_images`).
 """
 
@@ -55,15 +59,21 @@ ENGINE_PACKAGES = {("trainer", "miles"): ("miles", "megatron-core"), ("trainer",
                    ("sampler", "vllm"): ("vllm",), ("sampler", "sglang"): ("sglang",),
                    ("sampler", "vllm-ascend"): ("vllm-ascend",)}
 PROBE_TIMEOUT_S = 3600.0  # the probe node pulls the image first
+BUSY_MARK = "YETO_BUSY"
+MINOR_RULE_NOTE = "compatible by CUDA minor-version rule; the smoke test is the final check"
+PTX_RULE_NOTE = "compatible by PTX JIT; the smoke test is the final check"
+CUDA_RULE = ("CUDA binary compatibility: a cubin sm_XY runs on compute capability X.Z with Z >= Y, sm_XYa only "
+             "on exactly X.Y; PTX compute_XY is JIT-compiled on any X.Y or newer card, compute_XYa only on X.Y")
 
 
 class AdoptError(RuntimeError):
     """An adoption step failed; ``step`` is one of :data:`STEPS`."""
 
-    def __init__(self, step: str, reason: str):
+    def __init__(self, step: str, reason: str, *, holding: Sequence[str] = ()):
         super().__init__(f"image adopt: step {step} failed: {reason}")
         self.step = step
         self.reason = reason
+        self.holding = tuple(holding)
 
 
 @dataclass(frozen=True)
@@ -73,8 +83,11 @@ class AdoptRequest:
     the ``engine`` (trainer: the ``--rl-backend``; sampler: ``vllm`` / ``sglang`` /
     ``vllm-ascend``; None: the default backend, or the engine the probe finds), the node
     that probes and smokes (None: the first of the role), the catalog path (None: the
-    default), the image root's free space a pull needs and the trainer's attention
-    backend (the trainer floor of :mod:`.trainer_image_check`)."""
+    default), the image root's free space a pull needs, the trainer's attention
+    backend (the trainer floor of :mod:`.trainer_image_check`), ``strict_arch`` (the
+    image must carry a cubin of exactly the node's card architecture: no minor-version
+    or PTX compatibility) and ``allow_busy`` (probe and smoke a node whose cards run
+    something, with a warning)."""
 
     ref: str
     model: str
@@ -85,6 +98,8 @@ class AdoptRequest:
     catalog: str | None = None
     min_image_free_gib: float = 120.0
     attention_backend: str = "auto"
+    strict_arch: bool = False
+    allow_busy: bool = False
 
     def __post_init__(self) -> None:
         if self.role not in site_images.ROLES:
@@ -113,6 +128,7 @@ class ImageFacts:
     arch_list: tuple[str, ...]
     packages: Mapping[str, str]
     lock: Mapping[str, Any] | None = None
+    arch_source: str | None = None  # "build_flags" (no card needed) / "cards"
 
     def versions(self) -> dict[str, str]:
         """The catalog record's ``versions``: the interpreter, torch, the device runtime and
@@ -218,26 +234,49 @@ try:
     fact("torch", torch.__version__)
     fact("cuda", getattr(torch.version, "cuda", None))
     fact("hip", getattr(torch.version, "hip", None))
-    archs = []
+    archs, source = [], None
     try:
-        archs = list(torch.cuda.get_arch_list())
+        flags = torch._C._cuda_getArchFlags()
+        if flags:
+            archs, source = flags.replace(";", " ").split(), "build_flags"
     except Exception:
         pass
+    if not archs:
+        try:
+            archs, source = list(torch.cuda.get_arch_list()), "cards"
+        except Exception:
+            pass
     fact("arch_list", archs)
+    fact("arch_source", source)
 except Exception as error:
     fact("torch_error", f"{type(error).__name__}: {error}")
 """.replace("PACKAGES", repr(PACKAGES))
 
 
-def probe_script(image: str, node: Node) -> str:
-    """The node's ``docker run --rm`` of ``image`` that prints the image's facts
-    (:data:`FACT` lines): ``uname -m``, the image lock and, under the first interpreter of
-    :data:`PYTHONS` that imports torch (else the first that runs), the Python facts. The
-    container gets the node's device flags (the image's built card architectures need
-    the cards: ``torch.cuda.get_arch_list`` is empty without them)."""
+def container_engine(node: Node) -> str:
+    """The container engine the node runs images with (its profile's ``container``:
+    ``docker`` / ``podman``); a node that runs no container is refused (step ``probe``)."""
     from .node_inventory import profile_of  # noqa: PLC0415
 
-    devices = profile_of(node).devices(None).args
+    engine = profile_of(node).container
+    if engine not in ("docker", "podman"):
+        raise AdoptError("probe", f"node {node.name} runs no container engine (container {engine!r}): an image is "
+                                  "adopted on a docker or podman node")
+    return engine
+
+
+def probe_script(image: str, node: Node, *, cards: bool = False) -> str:
+    """The node's ``<engine> run --rm`` of ``image`` that prints the image's facts
+    (:data:`FACT` lines): ``uname -m``, the image lock and, under the first interpreter of
+    :data:`PYTHONS` that imports torch (else the first that runs), the Python facts.
+    The built card architectures come from torch's build flags
+    (``torch._C._cuda_getArchFlags``), which need no card: the container gets the
+    node's device flags only with ``cards`` (the fallback for a torch whose flags are
+    not readable; ``torch.cuda.get_arch_list`` is empty without cards)."""
+    from .node_inventory import profile_of  # noqa: PLC0415
+
+    engine = container_engine(node)
+    devices = profile_of(node).devices(None, engine=engine).args if cards else ()
     inner = (f"echo {FACT} uname_m \\\"$(uname -m)\\\"; "
              f"if [ -f {LOCK_PATH} ]; then printf '%s lock ' {FACT}; tr -d '\\n' < {LOCK_PATH}; echo; fi; "
              "PY=; for p in " + " ".join(PYTHONS) + "; do "
@@ -247,8 +286,80 @@ def probe_script(image: str, node: Node) -> str:
              "if command -v \"$p\" >/dev/null 2>&1; then PY=$p; break; fi; done; fi; "
              f"if [ -z \"$PY\" ]; then echo {FACT} no_python true; exit 0; fi; "
              f"\"$PY\" -c {shlex.quote(_PROBE_PY)}")
-    argv = ["docker", "run", "--rm", "--network", "host", *devices, "--entrypoint", "bash", image, "-c", inner]
+    argv = [engine, "run", "--rm", "--network", "host", *devices, "--entrypoint", "bash", image, "-c", inner]
     return shlex.join(argv)
+
+
+# the card tool that lists the processes on the cards, per unified family
+_BUSY_TOOLS = {
+    "cuda": (("nvidia-smi",), "nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader"),
+    "rocm": (("amd-smi", "rocm-smi"), "if command -v amd-smi >/dev/null 2>&1; then amd-smi process --csv; "
+                                      "else rocm-smi --showpids; fi"),
+    "ascend": (("npu-smi",), "npu-smi info"),
+}
+
+
+def busy_script(node: Node) -> str:
+    """What runs on the node's cards: the family's card tool (:data:`_BUSY_TOOLS`: the
+    compute processes of ``nvidia-smi``, ``amd-smi process`` / ``rocm-smi --showpids``,
+    the process rows of ``npu-smi info``) and the node's running yeto containers. Each
+    line of the output is tagged (``YETO_BUSY tool|apps|containers ...``)."""
+    from .node_inventory import profile_of  # noqa: PLC0415
+
+    profile = profile_of(node)
+    found = _BUSY_TOOLS.get(profile.family)
+    engine = profile.container if profile.container in ("docker", "podman") else "docker"
+    parts = []
+    if found:
+        names, tool = found
+        have = " || ".join(f"command -v {n} >/dev/null 2>&1" for n in names)
+        parts.append(f"if {have}; then echo {BUSY_MARK} tool {profile.family}; "
+                     f"( {tool} ) 2>&1 | sed 's/^/{BUSY_MARK} apps /'; else echo {BUSY_MARK} tool none; fi")
+    else:
+        parts.append(f"echo {BUSY_MARK} tool none")
+    parts.append(f"{engine} ps --filter name=^yeto- --format '{{{{.Names}}}} {{{{.Image}}}}' 2>/dev/null "
+                 f"| sed 's/^/{BUSY_MARK} containers /'")
+    return "; ".join(parts)
+
+
+_NPU_PROCESS_ROW = re.compile(r"^\|\s*\d+\s+\d+\s*\|\s*(\d+)\s*\|\s*(\S+)")
+
+
+def parse_busy(text: str, family: str) -> tuple[list[str], list[str], bool]:
+    """``(processes, containers, readable)`` of a :func:`busy_script` output: the
+    processes on the cards (``pid name``), the running yeto containers and whether a
+    card tool was read at all."""
+    apps: list[str] = []
+    containers: list[str] = []
+    readable = False
+    for line in (text or "").splitlines():
+        parts = line.rstrip().split(" ", 2)
+        if len(parts) < 3 or parts[0] != BUSY_MARK:
+            continue
+        kind, value = parts[1], parts[2].strip()
+        if kind == "tool":
+            readable = value != "none"
+        elif kind == "containers" and value:
+            containers.append(value)
+        elif kind == "apps" and value:
+            apps += _busy_rows(value, family)
+    return apps, containers, readable
+
+
+def _busy_rows(line: str, family: str) -> list[str]:
+    if family == "cuda":  # pid, process_name, used_memory
+        cells = [c.strip() for c in line.split(",")]
+        return [f"{cells[0]} {cells[1] if len(cells) > 1 else '?'}"] if cells[0].isdigit() else []
+    if family == "ascend":
+        m = _NPU_PROCESS_ROW.match(line)
+        return [f"{m.group(1)} {m.group(2)}"] if m else []
+    if family == "rocm":  # amd-smi process --csv: gpu,name,pid,...; rocm-smi --showpids: PID NAME GPU(s) ...
+        cells = [c.strip() for c in line.split(",")]
+        if len(cells) >= 3 and cells[0].isdigit() and cells[2].isdigit():
+            return [f"{cells[2]} {cells[1]}"]
+        words = line.split()
+        return [f"{words[0]} {words[1]}"] if len(words) >= 2 and words[0].isdigit() and len(cells) == 1 else []
+    return []
 
 
 def parse_probe(text: str) -> ImageFacts:
@@ -269,55 +380,112 @@ def parse_probe(text: str) -> ImageFacts:
         pass
     packages = facts.get("packages") if isinstance(facts.get("packages"), dict) else {}
     archs = facts.get("arch_list") if isinstance(facts.get("arch_list"), list) else []
+    source = facts.get("arch_source") if isinstance(facts.get("arch_source"), str) else None
     lock = facts.get("lock") if isinstance(facts.get("lock"), dict) else None
     return ImageFacts(cpu_arch=cpu, python=facts.get("python"), python_path=facts.get("python_path"),
                       torch=facts.get("torch"), cuda=facts.get("cuda"), hip=facts.get("hip"),
                       arch_list=tuple(str(a).lower() for a in archs),
-                      packages={str(k): str(v) for k, v in packages.items()}, lock=lock)
+                      packages={str(k): str(v) for k, v in packages.items()}, lock=lock, arch_source=source)
 
 
 # --- step 3: fit ---------------------------------------------------------------------
 
 
-def _sm(arch: str) -> int | None:
-    m = re.fullmatch(r"(?:sm|compute)_?(\d+)[a-z]?", arch)
-    return int(m.group(1)) if m else None
+_CUDA_ARCH = re.compile(r"(sm|compute)_?(\d{2,3})([af]?)")
 
 
-def card_arch_problem(facts: ImageFacts, node: Node) -> str | None:
-    """Why the image's built card architectures do not serve ``node``'s cards (None: they
-    do, or the node's architecture is unknown). CUDA: the node's ``sm_N`` is built, or a
-    ``compute_M`` (PTX, compiled on the card at load) with M <= N; ROCm: its ``gfx``
-    target is built. An image whose probe saw no architecture is refused: nothing says
-    it runs there."""
-    arch = card_arch_of(node.card)
-    if not arch:
+def _cc(arch: str) -> tuple[str, tuple[int, int], str] | None:
+    """``(kind, (major, minor), suffix)`` of ``sm_103`` / ``sm103`` / ``compute_90a``."""
+    m = _CUDA_ARCH.fullmatch(arch)
+    if not m:
         return None
+    digits = m.group(2)
+    return m.group(1), (int(digits[:-1]), int(digits[-1])), m.group(3)
+
+
+def _gfx(arch: str) -> str:
+    """A ROCm target without its feature suffix (``gfx90a:sramecc+:xnack-`` -> ``gfx90a``)."""
+    return arch.split(":", 1)[0]
+
+
+def node_card_arch(node: Node) -> str | None:
+    """The node's card architecture: its profile's ``card_arch`` (an inventory may set
+    it), else the catalog's for its card."""
+    from .node_inventory import profile_of  # noqa: PLC0415
+
+    arch = profile_of(node).card_arch or card_arch_of(node.card)
+    return str(arch).lower() if arch else None
+
+
+def card_arch_fit(facts: ImageFacts, node: Node, *, strict: bool = False) -> tuple[str | None, str | None]:
+    """``(problem, note)`` of the image's built card architectures on ``node``'s cards
+    (problem None: they serve them, or the node's architecture is unknown; note: how).
+
+    CUDA, the binary compatibility rules (:data:`CUDA_RULE`): a cubin of exactly the
+    node's ``sm_XY`` serves it; otherwise a cubin ``sm_XW`` (no ``a`` suffix) of the same
+    major with W <= the node's minor (note :data:`MINOR_RULE_NOTE`), or a PTX
+    ``compute_XY`` the node's capability reaches (``compute_XYa``: only exactly X.Y;
+    note :data:`PTX_RULE_NOTE`). With ``strict`` only the exact cubin counts. ROCm:
+    the node's ``gfx`` target is built (feature suffixes after ``:`` ignored). An image
+    whose probe saw no architecture is refused: nothing says it runs there."""
+    arch = node_card_arch(node)
+    if not arch:
+        return None, None
     built = facts.arch_list
     have = f"{node.card} ({arch})"
     if not built:
-        return (f"the probe read no card architecture from the image (torch.cuda.get_arch_list() is empty: no "
-                f"cards in the container, or no device build of torch); node {node.name} has {have}")
-    sms = sorted(n for n in (_sm(a) for a in built if a.startswith("sm")) if n is not None)
-    ptx = sorted(n for n in (_sm(a) for a in built if a.startswith("compute")) if n is not None)
-    node_sm = _sm(arch)
-    if node_sm is not None:
-        if node_sm in sms or any(p <= node_sm for p in ptx):
-            return None
-        lowest = min(sms + ptx) if sms + ptx else None
-        floor = f"sm{lowest}" if lowest is not None else "no CUDA architecture"
-        return (f"the image is built for {'/'.join(built)} (lowest {floor}); node {node.name} has {have}")
-    if arch in built:
-        return None
-    return f"the image is built for {'/'.join(built)}; node {node.name} has {have}"
+        return (f"the probe read no card architecture from the image (torch's build flags and "
+                f"torch.cuda.get_arch_list() are empty: no device build of torch); node {node.name} has {have}"), None
+    node_cc = _cc(arch)
+    if node_cc is not None:
+        want = node_cc[1]
+        exact = minor = ptx = None
+        for entry in built:
+            cc = _cc(entry)
+            if cc is None:
+                continue
+            kind, version, suffix = cc
+            if kind == "sm":
+                if version == want:
+                    exact = exact or entry
+                elif suffix != "a" and version[0] == want[0] and version[1] <= want[1]:
+                    minor = minor or entry
+            elif suffix == "a":
+                ptx = ptx or (entry if version == want else None)
+            elif suffix == "f":
+                ptx = ptx or (entry if version[0] == want[0] and version[1] <= want[1] else None)
+            elif version <= want:
+                ptx = ptx or entry
+        if exact:
+            return None, None
+        if strict:
+            return (f"--strict-arch: the image is built for {'/'.join(built)}, no cubin of exactly {arch}; "
+                    f"node {node.name} has {have}"), None
+        if minor:
+            return None, f"node {node.name} ({arch}) runs the {minor} cubin: {MINOR_RULE_NOTE}"
+        if ptx:
+            return None, f"node {node.name} ({arch}) JIT-compiles the {ptx} PTX: {PTX_RULE_NOTE}"
+        return f"the image is built for {'/'.join(built)}; node {node.name} has {have} ({CUDA_RULE})", None
+    if _gfx(arch) in {_gfx(a) for a in built}:
+        return None, None
+    return (f"the image is built for {'/'.join(built)}; node {node.name} has {have} (ROCm: the node's gfx target "
+            "must be built)"), None
 
 
-def fit_problems(request: AdoptRequest, ref: str, facts: ImageFacts, engine: str) -> tuple[list[str], list[str]]:
-    """``(problems, warnings)`` of the image on every node of the role (each problem names
-    the node). The trainer floor and a catalog sampler image's record are the existing
-    rules (:func:`.trainer_image_check.image_problem`, :func:`.engine_images.image_mismatch`)."""
+def card_arch_problem(facts: ImageFacts, node: Node, *, strict: bool = False) -> str | None:
+    """The problem of :func:`card_arch_fit` (None: the image serves the node's cards)."""
+    return card_arch_fit(facts, node, strict=strict)[0]
+
+
+def fit_problems(request: AdoptRequest, ref: str, facts: ImageFacts,
+                 engine: str) -> tuple[list[str], list[str], list[str]]:
+    """``(problems, warnings, notes)`` of the image on every node of the role (each names
+    the node; a note says a node passed by a compatibility rule, :func:`card_arch_fit`).
+    The trainer floor and a catalog sampler image's record are the existing rules
+    (:func:`.trainer_image_check.image_problem`, :func:`.engine_images.image_mismatch`)."""
     problems: list[str] = []
     warnings: list[str] = []
+    notes: list[str] = []
     need = ENGINE_PACKAGES.get((request.role, engine), ())
     if need and not any(p in facts.packages for p in need):
         problems.append(f"the image has no {request.role} engine {engine} (none of {list(need)} is installed; "
@@ -336,20 +504,22 @@ def fit_problems(request: AdoptRequest, ref: str, facts: ImageFacts, engine: str
                             f"{node.name} is a ROCm node")
             continue
         if family in ("cuda", "rocm"):
-            why = card_arch_problem(facts, node)
+            why, note = card_arch_fit(facts, node, strict=request.strict_arch)
             if why:
                 problems.append(why)
                 continue
+            if note:
+                notes.append(note)
         if request.role == "trainer":
             found = trainer_image_check.image_problem(ref, node.card, attention_backend=request.attention_backend)
             if found:
                 (problems if found[1] else warnings).append(f"node {node.name}: {found[0]}")
         else:
             why = engine_images.image_mismatch(ref, cpu_arch=node.cpu_arch, device_family=node.device_family,
-                                               card_arch=card_arch_of(node.card), model=request.model)
+                                               card_arch=node_card_arch(node), model=request.model)
             if why:
                 problems.append(f"node {node.name}: {why}")
-    return problems, warnings
+    return problems, warnings, notes
 
 
 def default_engine(request: AdoptRequest, facts: ImageFacts | None) -> str:
@@ -392,6 +562,24 @@ class Adopter:
         self.clock = clock
         self.log = log or (lambda m: print(m, file=sys.stderr, flush=True))
         self.report = AdoptReport(request)
+        self.holding: list[str] = []  # the nodes the image was pulled on so far
+
+    def _held(self, error: AdoptError) -> AdoptError:
+        """``error`` naming the nodes that hold the image (:attr:`holding`): the image
+        stays there, a retry reuses it, ``<engine> rmi`` frees the room."""
+        if not self.holding or error.holding:
+            return error
+        from .node_inventory import profile_of  # noqa: PLC0415
+
+        ref = self.report.pinned or self.request.ref
+        nodes = ", ".join(self.holding)
+        engine = profile_of(self.request.probe_node).container
+        engine = engine if engine in ("docker", "podman") else "docker"
+        return AdoptError(error.step, f"{error.reason}; the image stays pulled on {nodes} (a retry reuses it; "
+                                      f"`{engine} rmi {ref}` there frees the room)", holding=self.holding)
+
+    def _hold(self, *names: str) -> None:
+        self.holding += [n for n in names if n not in self.holding]
 
     def _step(self, name: str, fn: Callable[[], tuple[str, dict[str, Any]]]) -> dict[str, Any]:
         self.log(f"[image adopt] {name} ...")
@@ -400,7 +588,7 @@ class Adopter:
             detail, data = fn()
         except AdoptError as error:
             self.report.steps.append(StepResult(name, False, error.reason, self.clock() - t0))
-            raise
+            raise self._held(error) from None
         self.report.steps.append(StepResult(name, True, detail, self.clock() - t0, data))
         return data
 
@@ -413,12 +601,12 @@ class Adopter:
         assert facts is not None
         engine = default_engine(req, facts)
         if self.smoke is None:
-            raise AdoptError("smoke", f"no {req.role} smoke is wired for this adoption")
+            raise self._held(AdoptError("smoke", f"no {req.role} smoke is wired for this adoption"))
         self.log("[image adopt] smoke ...")
         result = self.smoke(self, pinned, facts, engine)
         self.report.steps.append(result)
         if not result.ok:
-            raise AdoptError("smoke", result.detail)
+            raise self._held(AdoptError("smoke", result.detail))
         self.report.record = self._record(pinned, facts, engine, result)
         self.report.catalog = site_images.add(self.report.record, req.catalog)
         return self.report
@@ -441,45 +629,105 @@ class Adopter:
 
     def _probe(self, ref: str) -> tuple[str, dict[str, Any]]:
         node = self.request.probe_node
-        try:
-            done = self.ops.run(node, probe_script(ref, node), timeout=PROBE_TIMEOUT_S)
-        except Exception as error:  # noqa: BLE001 - a dead ssh or a timeout is the step's failure
-            raise AdoptError("probe", f"node {node.name}: {type(error).__name__}: {error}") from None
-        text = (getattr(done, "stdout", "") or "") + "\n" + (getattr(done, "stderr", "") or "")
-        if done.returncode != 0:
-            failure = image_pull.pull_failure(f"docker pull\n{text}")
-            why = failure.line if failure else text.strip()[-400:]
-            raise AdoptError("probe", f"node {node.name}: docker run of {ref} failed (rc {done.returncode}): {why}")
-        facts = parse_probe(text)
-        if not facts.python:
-            raise AdoptError("probe", f"node {node.name}: the image has no Python interpreter yeto can run "
-                                      f"(tried {list(PYTHONS)})")
+        self._probe_host(node, ref)
+        self.check_idle(node, "probe")
+        facts = self._run_probe(node, ref, cards=False)
+        family = engine_images.canonical_device_family(node.device_family)
+        if not facts.arch_list and family in ("cuda", "rocm"):
+            self.log(f"[image adopt] torch's build flags name no card architecture; probing {node.name} again "
+                     "with its cards")
+            facts = self._run_probe(node, ref, cards=True)
         self.report.facts = facts
         what = ", ".join(f"{k} {v}" for k, v in (("python", facts.python), ("torch", facts.torch),
                                                  ("cuda", facts.cuda), ("hip", facts.hip)) if v)
         archs = "/".join(facts.arch_list) or "no card architecture"
         return f"on {node.name}: {facts.cpu_arch or '?'}, {what}, built for {archs}", {"facts": facts}
 
+    def _probe_host(self, node: Node, ref: str) -> None:
+        """ssh, the host probe and room in the image root on the probe node, before the
+        probe pulls the image there (the cluster preflight's checks)."""
+        from .preflight.cluster import FAIL, ClusterPreflight, Requirements  # noqa: PLC0415
+
+        req = Requirements(min_image_root_free_gib=float(self.request.min_image_free_gib))
+        checks = ClusterPreflight([node], image=ref, ops=self.ops, req=req, log=self.log, clock=self.clock).hosts()
+        failed = [c for c in checks if c.status == FAIL and c.name in ("ssh", "host_probe", "disk_images")]
+        if failed:
+            raise AdoptError("probe", "; ".join(f"node {c.scope}: {c.name}: {c.detail}" + (f" ({c.fix})" if c.fix
+                                                                                           else "")
+                                                for c in failed))
+
+    def check_idle(self, node: Node, step: str) -> None:
+        """Refuse (step ``step``) a node whose cards run a process or that runs a yeto
+        container (:func:`busy_script`); with ``allow_busy`` it is a warning."""
+        from .node_inventory import profile_of  # noqa: PLC0415
+
+        family = profile_of(node).family
+        try:
+            done = self.ops.run(node, busy_script(node), timeout=120.0)
+            text = (getattr(done, "stdout", "") or "") + "\n" + (getattr(done, "stderr", "") or "")
+        except Exception as error:  # noqa: BLE001 - a dead ssh is the step's failure
+            raise AdoptError(step, f"node {node.name}: cannot read what runs on its cards: "
+                                   f"{type(error).__name__}: {error}") from None
+        apps, containers, readable = parse_busy(text, family)
+        if not readable:
+            self.log(f"[image adopt] WARNING: node {node.name}: no card tool to read its processes ({family}); "
+                     "its cards are taken as idle")
+        busy = [f"process {a}" for a in apps] + [f"container {c}" for c in containers]
+        if not busy:
+            return
+        why = f"node {node.name} is in use: {', '.join(busy[:8])}"
+        if not self.request.allow_busy:
+            raise AdoptError(step, f"{why}; stop it, pick another node with --node, or pass --allow-busy")
+        self.log(f"[image adopt] WARNING: {why}; --allow-busy: the {step} runs there anyway")
+
+    def _run_probe(self, node: Node, ref: str, *, cards: bool) -> ImageFacts:
+        try:
+            done = self.ops.run(node, probe_script(ref, node, cards=cards), timeout=PROBE_TIMEOUT_S)
+        except AdoptError:
+            raise
+        except Exception as error:  # noqa: BLE001 - a dead ssh or a timeout is the step's failure
+            raise AdoptError("probe", f"node {node.name}: {type(error).__name__}: {error}") from None
+        text = (getattr(done, "stdout", "") or "") + "\n" + (getattr(done, "stderr", "") or "")
+        if done.returncode != 0:
+            failure = image_pull.pull_failure(f"docker pull\n{text}")
+            why = failure.line if failure else text.strip()[-400:]
+            raise AdoptError("probe", f"node {node.name}: {container_engine(node)} run of {ref} failed "
+                                      f"(rc {done.returncode}): {why}")
+        self._hold(node.name)
+        facts = parse_probe(text)
+        if not facts.python:
+            raise AdoptError("probe", f"node {node.name}: the image has no Python interpreter yeto can run "
+                                      f"(tried {list(PYTHONS)})")
+        return facts
+
     def _fit(self, ref: str, facts: ImageFacts, engine: str) -> tuple[str, dict[str, Any]]:
-        problems, warnings = fit_problems(self.request, ref, facts, engine)
+        problems, warnings, notes = fit_problems(self.request, ref, facts, engine)
         node = self.request.probe_node
-        if not card_arch_of(node.card):
+        if not node_card_arch(node):
             problems.append(f"node {node.name} has {node.card} cards of no known architecture: the catalog "
                             "matches records by card architecture")
         for warning in warnings:
             self.log(f"[image adopt] WARNING: {warning}")
+        for note in notes:
+            self.log(f"[image adopt] note: {note}")
         if problems:
             raise AdoptError("fit", "; ".join(problems))
-        return (f"{engine} {self.request.role} image fits {len(self.request.nodes)} node(s)",
-                {"warnings": warnings})
+        detail = f"{engine} {self.request.role} image fits {len(self.request.nodes)} node(s)"
+        return detail + "".join(f"; {n}" for n in notes), {"warnings": warnings, "notes": notes}
 
     def _pull(self, ref: str) -> tuple[str, dict[str, Any]]:
-        from .preflight.cluster import FAIL, ClusterPreflight, Requirements  # noqa: PLC0415
+        from .preflight.cluster import FAIL, PASS, ClusterPreflight, Requirements  # noqa: PLC0415
 
+        docker = [n for n in self.request.nodes if n.runtime == "docker"]
+        if not docker:
+            raise AdoptError("pull", f"no {self.request.role} node runs docker (runtimes "
+                                     f"{sorted({n.runtime for n in self.request.nodes})}): the pre-pull pulls on "
+                                     "docker nodes")
         req = Requirements(min_image_root_free_gib=float(self.request.min_image_free_gib))
         pf = ClusterPreflight(list(self.request.nodes), image=ref, ops=self.ops, req=req, log=self.log,
                               clock=self.clock)
         checks, pulled = pf.pull()
+        self._hold(*(c.scope for c in checks if c.name == "image_pull" and c.status == PASS))
         failed = [c for c in checks if c.status == FAIL and c.name in ("ssh", "host_probe", "disk_images",
                                                                        "image_pull")]
         if failed or not pulled:
@@ -487,7 +735,9 @@ class Adopter:
                                                                                           else "")
                                                for c in failed) or "the pull did not run")
         took = {c.scope: c.detail for c in checks if c.name == "image_pull"}
-        return f"pulled on {len(took)} node(s)", {"pulled": sorted(took)}
+        skipped = [n.name for n in self.request.nodes if n.runtime != "docker"]
+        return (f"pulled on {len(took)} node(s)" + (f"; not pulled (no docker): {skipped}" if skipped else ""),
+                {"pulled": sorted(took)})
 
     def _record(self, ref: str, facts: ImageFacts, engine: str, smoke: StepResult) -> site_images.SiteImage:
         node = self.request.probe_node
@@ -497,7 +747,10 @@ class Adopter:
                     "steps": steps, "pulled": next((list(s.data.get("pulled", [])) for s in self.report.steps
                                                     if s.name == "pull"), []),
                     **({"smoke": smoke.data} if smoke.data else {})}
-        arch = card_arch_of(node.card)
+        notes = [n for s in self.report.steps for n in (s.data.get("notes") or [])]
+        if notes:
+            evidence["notes"] = notes
+        arch = node_card_arch(node)
         return site_images.parse_record({
             "model": self.request.model, "role": self.request.role, "engine": engine, "ref": ref,
             "device_family": engine_images.canonical_device_family(node.device_family),

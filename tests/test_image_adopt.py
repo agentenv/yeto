@@ -63,20 +63,27 @@ def probe_out(facts=None, **over):
 class FakeNodes(FakeCluster):
     """The preflight's fake B300 cluster plus the adoption probe."""
 
-    def __init__(self, nodes, *, probe=None, probe_rc=0, **per_node):
+    def __init__(self, nodes, *, probe=None, probe_rc=0, bare=None, busy=None, **per_node):
         super().__init__(nodes, **per_node)
         self.probe = probe_out() if probe is None else probe
+        self.bare = bare  # the probe's output without cards (None: the same as with them)
         self.probe_rc = probe_rc
+        self.busy = f"{ia.BUSY_MARK} tool cuda\n" if busy is None else busy
 
     def run(self, node, script, *, timeout=300.0):
+        if ia.BUSY_MARK in script:
+            self.scripts.append((node.name, "busy"))
+            return self.done(0, self.busy)
         if ia.FACT in script:
-            self.scripts.append((node.name, "probe"))
-            return self.done(self.probe_rc, self.probe)
+            cards = "--gpus" in shlex.split(script)
+            self.scripts.append((node.name, "probe+cards" if cards else "probe"))
+            return self.done(self.probe_rc, self.bare if self.bare is not None and not cards else self.probe)
         return super().run(node, script, timeout=timeout)
 
     def kinds(self):
-        return [("probe" if s == "probe" else s.split()[0] + " " + s.split()[1] if s.startswith("docker")
-                 else "host" if "@@yeto-section" in s else s.split()[0]) for _, s in self.scripts]
+        return [(s if s in ("probe", "probe+cards", "busy") else s.split()[0] + " " + s.split()[1]
+                 if s.startswith("docker") else "host" if "@@yeto-section" in s else s.split()[0])
+                for _, s in self.scripts]
 
 
 def request(nodes, tmp_path, **kw):
@@ -160,15 +167,25 @@ def test_a_denied_manifest_names_the_registry_login(tmp_path):
 # -- step 2: probe --------------------------------------------------------------------
 
 
-def test_the_probe_runs_the_image_with_the_node_cards_and_reads_its_facts():
+def test_the_probe_runs_the_image_without_cards_and_reads_its_facts():
     node = b300(0)
-    script = ia.probe_script(PINNED, node)
-    argv = shlex.split(script)
-    assert argv[:4] == ["docker", "run", "--rm", "--network"] and PINNED in argv
-    assert list(node.docker_args) == argv[5:5 + len(node.docker_args)]  # the node's device flags
+    argv = shlex.split(ia.probe_script(PINNED, node))
+    assert argv[:6] == ["docker", "run", "--rm", "--network", "host", "--entrypoint"] and PINNED in argv
+    assert "torch._C._cuda_getArchFlags()" in argv[-1]  # the build flags: no card needed
+    with_cards = shlex.split(ia.probe_script(PINNED, node, cards=True))
+    assert list(node.docker_args) == with_cards[5:5 + len(node.docker_args)]  # the fallback: the node's flags
+    from yeto.launch.node_inventory import NodeProfile
+
+    podman = NodeProfile.from_node(b300(0, docker_args=()), container="podman")
+    argv = shlex.split(ia.probe_script(PINNED, podman, cards=True))
+    assert argv[:3] == ["podman", "run", "--rm"] and ["--device", "nvidia.com/gpu=all"] == argv[5:7]
+    with pytest.raises(ia.AdoptError, match="node b300-0 runs no container engine"):
+        ia.probe_script(PINNED, b300(0, runtime="rootfs"))
     facts = ia.parse_probe(probe_out() + "noise line\nYETO_IMAGE_FACT bad {not json\n")
     assert (facts.cpu_arch, facts.python, facts.cuda, facts.arch_list) == (
         "x86_64", "3.12.3", "13.0", ("sm_90", "sm_100", "sm_103", "compute_103"))
+    assert facts.arch_source is None and ia.parse_probe(probe_out(arch_source="build_flags")).arch_source == \
+        "build_flags"
     assert facts.versions() == {"python": "3.12.3", "python_path": "/usr/bin/python3", "torch": "2.9.1+cu130",
                                 "cuda": "13.0", "megatron-core": "0.15.0", "miles": "0.3.0", "ray": "2.52.0",
                                 "image_lock": "miles-new"}
@@ -204,25 +221,77 @@ def test_an_image_built_above_the_nodes_card_stops_at_fit(tmp_path, catalog_befo
     with pytest.raises(ia.AdoptError) as error:
         a.run()
     assert error.value.step == "fit"
-    assert "the image is built for sm_90/sm_100 (lowest sm90); node b300-0 has A100-80GB (sm80)" in error.value.reason
+    assert "the image is built for sm_90/sm_100; node b300-0 has A100-80GB (sm80) (CUDA binary compatibility: " \
+        "a cubin sm_XY runs on compute capability X.Z with Z >= Y" in error.value.reason
     assert "node b300-1 has A100-80GB (sm80)" in error.value.reason
-    assert ops.kinds() == ["probe"]  # nothing pulled
+    assert ops.kinds() == ["date", "host", "busy", "probe"]  # the probe node's checks, nothing pulled
     assert catalog_before.read_text() == "version: 1\nimages: []\n"
 
 
-@pytest.mark.parametrize("archs, card, ok", [
-    (["sm_90", "compute_90"], "B300", True),      # PTX of sm90 compiles on sm103
-    (["sm_100"], "B300", False),                  # cubin of sm100 only: not sm103
-    (["sm_80", "sm_90"], "H100", True),
-    (["gfx942"], "MI355X", False),
-    (["gfx942", "gfx950"], "MI355X", True),
-    ([], "B300", False),                          # no cards seen in the probe
+@pytest.mark.parametrize("archs, card, ok, note", [
+    (["sm_90", "compute_90"], "B300", True, ia.PTX_RULE_NOTE),  # PTX of sm90 compiles on sm103
+    (["sm_100"], "B300", True, ia.MINOR_RULE_NOTE),              # a 10.0 cubin runs on 10.3
+    (["sm_80"], "A10G", True, ia.MINOR_RULE_NOTE),               # an 8.0 cubin runs on 8.6
+    (["sm_86"], "A100", False, None),                            # not on a lower minor
+    (["sm_100a"], "B300", False, None),                          # an arch-specific cubin: only 10.0
+    (["sm_90a"], "H100", True, None),
+    (["sm_120"], "B300", False, None),                           # another major
+    (["sm_90", "compute_90a"], "B300", False, None),             # arch-specific PTX: no forward JIT
+    (["compute_103a"], "B300", True, ia.PTX_RULE_NOTE),
+    (["sm_90", "compute_120"], "B300", False, None),             # PTX of a newer card: no backward JIT
+    (["sm_100f"], "B300", True, ia.MINOR_RULE_NOTE),             # a family cubin of 10.x
+    (["sm_80", "sm_90"], "H100", True, None),
+    (["sm_90", "sm_100", "sm_103"], "B300", True, None),
+    (["gfx942"], "MI355X", False, None),
+    (["gfx942", "gfx950"], "MI355X", True, None),
+    (["gfx950:sramecc+:xnack-"], "MI355X", True, None),          # a target's feature suffix
+    ([], "B300", False, None),                                   # no cards seen in the probe
 ])
-def test_card_arch_rules(archs, card, ok):
+def test_card_arch_rules(archs, card, ok, note):
     facts = ia.parse_probe(probe_out(arch_list=archs))
     family = "rocm" if card.startswith("MI") else "cuda"
     node = b300(0, card=card, device_family=family)
+    problem, how = ia.card_arch_fit(facts, node)
+    assert (problem is None) is ok, problem
+    assert (note in how) if note else how is None
     assert (ia.card_arch_problem(facts, node) is None) is ok
+
+
+@pytest.mark.parametrize("archs", [["sm_100"], ["sm_90", "compute_90"], ["compute_103"]])
+def test_strict_arch_wants_the_exact_cubin(archs):
+    facts = ia.parse_probe(probe_out(arch_list=archs))
+    problem, _ = ia.card_arch_fit(facts, b300(0), strict=True)
+    assert problem.startswith("--strict-arch: the image is built for") and "no cubin of exactly sm103" in problem
+    assert ia.card_arch_fit(ia.parse_probe(probe_out(arch_list=["sm_103a"])), b300(0), strict=True) == (None, None)
+
+
+def test_the_node_profile_card_arch_wins_over_the_card():
+    from yeto.launch.node_inventory import NodeProfile
+
+    node = NodeProfile.from_node(b300(0), card_arch="sm100")
+    facts = ia.parse_probe(probe_out(arch_list=["sm_100"]))
+    assert ia.card_arch_fit(facts, node) == (None, None) and ia.node_card_arch(node) == "sm100"
+
+
+def test_a_minor_rule_pass_is_noted_in_the_fit_and_the_evidence(tmp_path):
+    nodes = [b300(i) for i in range(2)]
+    ops = FakeNodes(nodes, probe=probe_out(arch_list=["sm_90", "sm_100"]))
+    report = adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
+    fit = next(s for s in report.steps if s.name == "fit")
+    assert ia.MINOR_RULE_NOTE in fit.detail and len(fit.data["notes"]) == 2
+    (rec,) = si.load(tmp_path / "site-images.yaml")
+    assert rec.evidence["notes"] == fit.data["notes"]
+    assert rec.evidence["notes"][0] == f"node b300-0 (sm103) runs the sm_100 cubin: {ia.MINOR_RULE_NOTE}"
+    strict = request(nodes, tmp_path, strict_arch=True)
+    with pytest.raises(ia.AdoptError, match="step fit failed: --strict-arch"):
+        adopter(strict, FakeNodes(nodes, probe=probe_out(arch_list=["sm_90", "sm_100"])), smoke=passing_smoke()).run()
+
+
+def test_a_node_of_no_known_card_architecture_is_refused_at_fit(tmp_path):
+    node = b300(0, card="M890", device_family="ppu")
+    a = adopter(request([node], tmp_path), FakeNodes([node]))
+    with pytest.raises(ia.AdoptError, match="node b300-0 has M890 cards of no known architecture"):
+        a._fit(PINNED, ia.parse_probe(probe_out()), "miles")
 
 
 def test_fit_refuses_another_cpu_a_missing_engine_and_a_cpu_only_torch(tmp_path):
@@ -242,10 +311,10 @@ def test_the_trainer_floor_still_applies_to_a_known_trainer_image(tmp_path):
     a100 = b300(0, card="A100-80GB", hbm_gib=80.0)
     ref = "ghcr.io/owner/yeto-miles-k31@sha256:" + "ab" * 32
     facts = ia.parse_probe(probe_out(arch_list=["sm_80", "sm_90"]))
-    problems, _ = ia.fit_problems(request([a100], tmp_path), ref, facts, "miles")
+    problems, _, _ = ia.fit_problems(request([a100], tmp_path), ref, facts, "miles")
     assert len(problems) == 1 and "node b300-0: trainer image" in problems[0] and "sm90+" in problems[0]
     lifted = dataclasses.replace(request([a100], tmp_path), attention_backend="flash")
-    problems, warnings = ia.fit_problems(lifted, ref, facts, "miles")
+    problems, warnings, _ = ia.fit_problems(lifted, ref, facts, "miles")
     assert problems == [] and "the flash attention backend takes another path" in warnings[0]
 
 
@@ -254,7 +323,7 @@ def test_a_catalog_sampler_image_is_held_to_its_record(tmp_path):
 
     ref = pins.VLLM_SAMPLER_IMAGE_ROCM.removeprefix("docker:")
     facts = ia.parse_probe(probe_out(packages={"vllm": "0.19"}))
-    problems, _ = ia.fit_problems(request([b300(0)], tmp_path, role="sampler"), ref, facts, "vllm")
+    problems, _, _ = ia.fit_problems(request([b300(0)], tmp_path, role="sampler"), ref, facts, "vllm")
     assert len(problems) == 1 and "it is a rocm image" in problems[0]
 
 
@@ -273,18 +342,24 @@ def test_a_node_short_of_image_room_stops_the_pull_everywhere(tmp_path, catalog_
     assert error.value.step == "pull"
     assert "node b300-2: disk_images: /var/lib/containerd (containerd image store) on /: 40 GiB free" \
         in error.value.reason
-    assert "b300-0" not in error.value.reason
+    assert "node b300-0:" not in error.value.reason
+    assert "the image stays pulled on b300-0 (a retry reuses it" in error.value.reason  # the probe pulled it
+    assert error.value.holding == ("b300-0",)
     assert "docker pull" not in ops.kinds()  # no node pulled
     assert catalog_before.read_text() == "version: 1\nimages: []\n"
 
 
 def test_a_failed_pull_names_the_node(tmp_path, catalog_before):
-    nodes = [b300(i) for i in range(2)]
+    nodes = [b300(i) for i in range(3)]
     bad = Behavior(pull=(1, "Error response from daemon: no space left on device"))
-    ops = FakeNodes(nodes, **{"b300-1": bad})
-    with pytest.raises(ia.AdoptError, match=r"step pull failed: node b300-1: image_pull: docker pull failed \(rc 1\)"):
+    ops = FakeNodes(nodes, **{"b300-2": bad})
+    with pytest.raises(ia.AdoptError, match=r"step pull failed: node b300-2: image_pull: docker pull failed \(rc 1\)") \
+            as error:
         adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
-    assert ops.kinds().count("docker pull") == 2  # every node was pulled in parallel
+    assert error.value.holding == ("b300-0", "b300-1")  # the probe node, then the nodes whose pull passed
+    assert f"the image stays pulled on b300-0, b300-1 (a retry reuses it; `docker rmi {PINNED}` there frees the " \
+        "room)" in error.value.reason
+    assert ops.kinds().count("docker pull") == 3  # every node was pulled in parallel
     assert catalog_before.read_text() == "version: 1\nimages: []\n"
 
 
@@ -322,10 +397,11 @@ def test_a_failed_smoke_writes_nothing(tmp_path, catalog_before):
     def smoke(adopter, ref, facts, engine):
         return ia.StepResult("smoke", False, "hot reload: the engine answered 500", 2.0)
 
-    with pytest.raises(ia.AdoptError, match="step smoke failed: hot reload"):
+    with pytest.raises(ia.AdoptError, match="step smoke failed: hot reload") as error:
         adopter_ = adopter(request(nodes, tmp_path, role="sampler"), FakeNodes(
             nodes, probe=probe_out(packages={"vllm": "0.19.0"})), smoke=smoke)
         adopter_.run()
+    assert error.value.holding == ("b300-0",) and "the image stays pulled on b300-0" in error.value.reason
     assert catalog_before.read_text() == "version: 1\nimages: []\n"
 
 
@@ -381,3 +457,96 @@ def test_the_preflight_pull_reports_a_failed_pull():
     ok_ops = FakeNodes(nodes)
     assert cp.ClusterPreflight(nodes, image=PINNED, ops=ok_ops, log=lambda m: None,
                                clock=lambda: FakeCluster.NOW).pull()[1] is True
+
+
+# -- the probe node's checks (host, idle cards) and the probe fallback ----------------------
+
+
+def test_the_probe_node_is_checked_for_room_before_the_probe_pulls(tmp_path, catalog_before):
+    nodes = [b300(i) for i in range(2)]
+    low = Behavior(host={"disk": (0, "\n".join([disk_line("/", 80, 200, dev="/dev/sda2", mount="/"),
+                                                disk_line("/var/lib/containerd", 40, mount="/")]))})
+    ops = FakeNodes(nodes, **{"b300-0": low})
+    with pytest.raises(ia.AdoptError, match=r"step probe failed: node b300-0: disk_images: ") as error:
+        adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
+    assert error.value.holding == () and "stays pulled" not in error.value.reason
+    assert ops.kinds() == ["date", "host"]  # no probe ran
+
+
+@pytest.mark.parametrize("family, card, out, apps", [
+    ("cuda", "B300", "YETO_BUSY tool cuda\nYETO_BUSY apps 4242, python3, 81000 MiB\n", ["4242 python3"]),
+    ("cuda", "B300", "YETO_BUSY tool cuda\nYETO_BUSY apps No devices were found\n", []),
+    ("npu", "910B3", "YETO_BUSY tool ascend\n"
+     "YETO_BUSY apps | 0     910B3               | OK            | 93.1        39                0    / 0   |\n"
+     "YETO_BUSY apps | 0                         | 0000:C1:00.0  | 0           0    / 0          3404 / 65536 |\n"
+     "YETO_BUSY apps | 0       0                 | 2938420       | python                   | 61307 |\n"
+     "YETO_BUSY apps | No running processes found in NPU 1                            |\n", ["2938420 python"]),
+    ("rocm", "MI355X", "YETO_BUSY tool rocm\nYETO_BUSY apps gpu,name,pid,mem\nYETO_BUSY apps 0,vllm,777,1024\n",
+     ["777 vllm"]),
+    ("rocm", "MI355X", "YETO_BUSY tool rocm\nYETO_BUSY apps KFD process information:\n"
+     "YETO_BUSY apps PID  PROCESS NAME  GPU(s)  VRAM USED\nYETO_BUSY apps 3131 python3 1 0\n", ["3131 python3"]),
+])
+def test_busy_parsing_per_family(family, card, out, apps):
+    from yeto.launch.node_inventory import profile_of
+
+    node = b300(0, card=card, device_family=family)
+    found, containers, readable = ia.parse_busy(out, profile_of(node).family)
+    assert (found, containers, readable) == (apps, [], True)
+    assert ia.BUSY_MARK in ia.busy_script(node)
+
+
+def test_the_busy_script_runs_under_bash(tmp_path):
+    done = subprocess.run(["bash", "-c", ia.busy_script(b300(0))], capture_output=True, text=True, timeout=60,
+                          env={"PATH": "/usr/bin:/bin"})
+    assert ia.parse_busy(done.stdout, "cuda")[2] is False  # no nvidia-smi here: unreadable, not busy
+    assert f"{ia.BUSY_MARK} tool none" in done.stdout
+
+
+def test_a_busy_probe_node_is_refused_unless_allowed(tmp_path, catalog_before):
+    nodes = [b300(0)]
+    busy = "YETO_BUSY tool cuda\nYETO_BUSY apps 4242, python3, 81000 MiB\nYETO_BUSY containers yeto-r1-i0 img\n"
+    with pytest.raises(ia.AdoptError, match=r"step probe failed: node b300-0 is in use: process 4242 python3, "
+                                            r"container yeto-r1-i0 img; .* --allow-busy"):
+        adopter(request(nodes, tmp_path), FakeNodes(nodes, busy=busy), smoke=passing_smoke()).run()
+    assert catalog_before.read_text() == "version: 1\nimages: []\n"
+    logs = []
+    a = adopter(request(nodes, tmp_path, allow_busy=True), FakeNodes(nodes, busy=busy), smoke=passing_smoke())
+    a.log = logs.append
+    assert a.run().ok
+    assert any("WARNING: node b300-0 is in use" in m and "--allow-busy" in m for m in logs)
+
+
+def test_an_unreadable_card_tool_warns_and_goes_on(tmp_path):
+    nodes = [b300(0)]
+    logs = []
+    a = adopter(request(nodes, tmp_path), FakeNodes(nodes, busy="YETO_BUSY tool none\n"), smoke=passing_smoke())
+    a.log = logs.append
+    assert a.run().ok and any("no card tool to read its processes" in m for m in logs)
+
+
+def test_the_probe_falls_back_to_the_cards_when_the_build_flags_are_empty(tmp_path):
+    nodes = [b300(0)]
+    ops = FakeNodes(nodes, bare=probe_out(arch_list=[]))
+    report = adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
+    assert ops.kinds()[:5] == ["date", "host", "busy", "probe", "probe+cards"]
+    assert report.facts.arch_list == ("sm_90", "sm_100", "sm_103", "compute_103")
+    flags = FakeNodes(nodes)
+    adopter(request(nodes, tmp_path), flags, smoke=passing_smoke()).run()
+    assert "probe+cards" not in flags.kinds()  # the build flags were enough
+
+
+def test_the_pull_needs_a_docker_node(tmp_path):
+    from yeto.launch.node_inventory import NodeProfile
+
+    nodes = [NodeProfile.from_node(b300(i, runtime="rootfs"), container="podman") for i in range(2)]
+    a = adopter(request(nodes, tmp_path), FakeNodes(nodes))
+    with pytest.raises(ia.AdoptError, match=r"step pull failed: no trainer node runs docker \(runtimes \['rootfs'\]\)"):
+        a._pull(PINNED)
+
+
+def test_a_fit_failure_names_the_probe_node_that_holds_the_image(tmp_path):
+    nodes = [b300(0)]
+    ops = FakeNodes(nodes, probe=probe_out(uname_m="aarch64"))
+    with pytest.raises(ia.AdoptError, match="step fit failed") as error:
+        adopter(request(nodes, tmp_path), ops, smoke=passing_smoke()).run()
+    assert error.value.holding == ("b300-0",)
