@@ -249,7 +249,9 @@ class PairedSubmission:
 
     candidates: dict[str, Any]
     submissions: dict[str, Any] = field(default_factory=dict)
-    retained_at: float = field(default_factory=time.monotonic)
+    # Read at construction like every other time.monotonic() here, through the
+    # module's ``time`` (one clock a test can replace for the whole module).
+    retained_at: float = field(default_factory=lambda: time.monotonic())
     # The island's local round (RolePairing.local_round) when it retained the
     # pair: the round whose cut the pair pushes (lead cap).
     local_round: int = 0

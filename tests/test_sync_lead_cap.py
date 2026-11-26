@@ -38,7 +38,9 @@ from test_rl_full_parameter_sync import _PairedRole
 
 from yeto.protocol import PullRequest
 from yeto.rl.adapters.miles.full_parameter.role_stream import RoleSubmissionCandidate
+from yeto.rl.engine import full_parameter_sync as pairing_module
 from yeto.rl.engine.full_parameter_sync import (
+    LEAD_WAIT_POLL_S,
     FullParameterSync,
     FullParameterSyncProfile,
     RolePairing,
@@ -59,6 +61,39 @@ def _candidate(global_step: int, local_step: int) -> RoleSubmissionCandidate:
         role="actor", permit=PullRequest((global_step - 1) % 2, global_step, 1),
         base_version=max(0, global_step - 2), local_step=local_step, c_steps=1, c_tokens=11,
         payload_bytes=8, submission_cut=object(), anchor=object())
+
+
+class _ModuleShim:
+    """``module`` with some attributes replaced."""
+
+    def __init__(self, module, **replaced):
+        self._module = module
+        self.__dict__.update(replaced)
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+
+@pytest.fixture
+def lead_clock(monkeypatch):
+    """The pairing module's clock, advanced only by the module's own sleeps (the
+    lead wait's polls): give-up and timeout arithmetic without a wall-clock bound,
+    which a loaded host breaks by stretching real sleeps. Returns the clock."""
+    now = [1024.0]
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay, result=None):
+        now[0] += delay
+        await real_sleep(0)
+        return result
+
+    monkeypatch.setattr(pairing_module, "time", _ModuleShim(time, monotonic=lambda: now[0]))
+    monkeypatch.setattr(pairing_module, "asyncio", _ModuleShim(asyncio, sleep=sleep))
+    return lambda: now[0]
+
+
+# One poll of float error on either side of a computed give-up time.
+_EPS = 1e-9
 
 
 def _pairing(role, **profile):
@@ -116,14 +151,16 @@ async def test_the_wait_ends_when_the_blocking_round_merges_and_serves_peers_mea
 
 
 @pytest.mark.asyncio
-async def test_the_wait_gives_up_at_half_the_wait_timeout_and_never_times_out_itself():
+async def test_the_wait_gives_up_at_half_the_wait_timeout_and_never_times_out_itself(lead_clock):
     role = _PairedRole("actor", [_candidate(1, 1)], [], release_broadcasts=False)
     pairing = _pairing(role, max_local_rounds_ahead=1, wait_timeout=0.4)
     pairing.local_round = 1
     pairing.submit_ready()
-    started = time.monotonic()
-    await pairing.wait_for_lead()
-    assert 0.15 <= time.monotonic() - started < 0.4  # half of 0.4 s, before the pair's timeout
+    started = lead_clock()
+    waited = await pairing.wait_for_lead()
+    # The first poll at or past half of 0.4 s gives up, long before the pair's 0.4 s timeout.
+    assert 0.2 - _EPS <= lead_clock() - started < 0.2 + LEAD_WAIT_POLL_S + _EPS
+    assert waited == pytest.approx(lead_clock() - started)
     assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 1)
     assert len(pairing.inflight) == 1 and pairing.failure is None
 
@@ -157,19 +194,20 @@ async def test_the_wait_also_covers_rounds_trained_before_the_next_pull_arrives(
 
 
 @pytest.mark.asyncio
-async def test_the_wait_for_a_late_pull_gives_up_at_half_the_wait_timeout():
+async def test_the_wait_for_a_late_pull_gives_up_at_half_the_wait_timeout(lead_clock):
     role = _PairedRole("actor", [_candidate(1, 1)], [])
     pairing = _pairing(role, max_local_rounds_ahead=1, wait_timeout=0.4)
     pairing.local_round = 1
     pairing.submit_ready()
     await pairing.commit_staged_broadcasts()
     pairing.local_round = 2
-    started = time.monotonic()
+    started = lead_clock()  # the push of round 1 was retained at this time
     await pairing.wait_for_lead()
-    assert 0.1 <= time.monotonic() - started < 0.4
+    assert 0.2 - _EPS <= lead_clock() - started < 0.2 + LEAD_WAIT_POLL_S + _EPS
     assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 1)
     pairing.local_round = 3
-    assert await pairing.wait_for_lead() > 0  # past the give-up time: one poll, then trains on
+    # Past the give-up time: one poll, then trains on.
+    assert await pairing.wait_for_lead() == pytest.approx(LEAD_WAIT_POLL_S)
     assert pairing.lead_wait_escapes == 2
 
 
@@ -189,7 +227,7 @@ class _PeerPacedRole(_PairedRole):
 
 
 @pytest.mark.asyncio
-async def test_with_k_1_the_wait_opens_no_pair_that_would_hold_it():
+async def test_with_k_1_the_wait_opens_no_pair_that_would_hold_it(lead_clock):
     """A PULL that arrives during a K = 1 wait is not pushed from the cut the
     island already pushed: that push would block the wait itself, so each
     PULL arriving while the wait's pushes merge held the island one merge
@@ -220,7 +258,7 @@ async def test_with_k_1_the_wait_opens_no_pair_that_would_hold_it():
 
 
 @pytest.mark.asyncio
-async def test_with_k_2_the_wait_still_pushes_a_pull_that_cannot_hold_it():
+async def test_with_k_2_the_wait_still_pushes_a_pull_that_cannot_hold_it(lead_clock):
     """With K = 2 a pair from the current cut does not block this wait (one
     round may train on top of it), so the wait keeps answering PULLs."""
     role = _PeerPacedRole([_candidate(1, 1)])
