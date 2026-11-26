@@ -269,7 +269,9 @@ def serve(stream, *, max_polls=10) -> int:
         served = await stream.serve_peer_snapshots()
         for _ in range(max_polls):
             donor = stream._donor
-            if donor is None or served or (not donor.busy and not donor._waiting):
+            # busy is read before _done: once the commit thread is gone its result is
+            # in _done, and a finished but uncollected snapshot still needs a poll
+            if donor is None or served or (not donor.busy and not donor._waiting and not donor._done):
                 break
             assert donor.background
             donor.wait(10)  # the hash + commit thread, once the shards are written
@@ -320,6 +322,28 @@ def test_donor_snapshot_and_recovering_restore_through_the_role_stream(tmp_path,
     assert [a.version for a in stream._anchors] == [5, 6]
     assert client.marked and stream.recovery_outcome.path == "peer"
     assert DirectorySnapshotStore(store_root).locators() == [], "a restored snapshot is removed"
+
+
+def test_serve_collects_a_snapshot_whose_commit_finished_before_the_next_check(tmp_path, stubs, monkeypatch):
+    """The hash + commit thread may end before the safe-point loop looks at the
+    donor again: the donor is then idle with the answer not yet collected, and
+    ``serve`` must poll once more instead of reporting nothing served. The
+    schedule is forced: the commit thread is joined as soon as it starts."""
+    from yeto.rl.peer_recovery import DonorService
+
+    check = DonorService._check_captured
+
+    def commit_first(self):
+        check(self)
+        if self._worker is not None:
+            self._worker.join(10)
+
+    monkeypatch.setattr(DonorService, "_check_captured", commit_first)
+    client = FakeClient(requests=[rp.SnapshotRequest(1, 9, 5, (3, 4))])
+    donor = donor_stream(tmp_path / "store", FakeGroup(adam_step=17), client)
+    assert serve(donor) == 1
+    (_, versions, _, _), = client.sent
+    assert versions == (3, 4)
 
 
 def test_island_pool_member_recovers_from_a_peer_while_it_heartbeats(tmp_path, stubs):

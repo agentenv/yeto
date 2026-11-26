@@ -631,8 +631,11 @@ def test_host_background_start_survives_a_writer_that_finishes_before_submit_ret
 
     from tests.rl_cut_fakes import make_rank, train_step
 
+    submitted = []
+
     class WriterFirst(concurrent.futures.ThreadPoolExecutor):
         def submit(self, fn, /, *args, **kwargs):
+            submitted.append(fn)
             future = super().submit(fn, *args, **kwargs)
             future.result(timeout=30)  # the writer (and its _release_capture) ran first
             return future
@@ -642,6 +645,8 @@ def test_host_background_start_survives_a_writer_that_finishes_before_submit_ret
     inline = cp.save_cut_shard(rank, directory=str(tmp_path / "inline"), cut_id="c1")
     monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", WriterFirst)
     started = cp.save_cut_shard(rank, directory=str(tmp_path / "host"), cut_id="c1", background=cp.HOST_BACKGROUND)
+    # the forced schedule really ran (save_cut_shard looks ThreadPoolExecutor up when called)
+    assert submitted == [cp._write_host_background]
     assert started == {"pending": "c1", "coord": inline["coord"],
                        "capture": {"mode": "host", "reason": "host_background"}}
     summary = cp.finish_cut_shard(rank, cut_id="c1")
