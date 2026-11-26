@@ -50,6 +50,9 @@ from .node_inventory import FABRIC_UNAVAILABLE, FABRIC_UNGROUPED, InventoryError
 HINT = ("the node inventory declares no fabric_group: a multi-node island may land on nodes that do not "
         "reach each other over IB / RoCE; `yeto cluster probe` groups them (docs/OWN_CLUSTERS.md)")
 UNAVAILABLE = "fabric unavailable"
+NO_RDMA = "no RDMA fabric"
+NO_RDMA_NEXT = ("if the node has IB / RoCE HCAs, set its fabric to ib or roce in the inventory and probe "
+                "again; otherwise nothing to do (yeto preflight checks the node itself)")
 _log = logging.getLogger(__name__)
 
 
@@ -225,14 +228,18 @@ class ProbeResult:
     pair_problems: dict[str, str] = field(default_factory=dict)
     bad_edges: list[tuple[str, str, str]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # node -> its declared fabric, for the nodes that declare no RDMA fabric (``tcp``): no group by
+    # their own inventory, single-node islands only; not a probe failure
+    no_rdma: dict[str, str] = field(default_factory=dict)
 
     @property
     def clean(self) -> bool:
         return not self.unavailable and not self.bad_edges
 
     def assignment(self) -> dict[str, str]:
-        """Node name -> group name (``unavailable``: no RDMA to the others)."""
-        out = {n: FABRIC_UNAVAILABLE for n in self.unavailable}
+        """Node name -> group name (``unavailable``: no RDMA to the others, a node that
+        declares no RDMA fabric included)."""
+        out = {n: FABRIC_UNAVAILABLE for n in [*self.unavailable, *self.no_rdma]}
         for g, members in self.groups.items():
             out.update({n: g for n in members})
         return dict(sorted(out.items()))
@@ -242,10 +249,13 @@ class ProbeResult:
         out += [f"missing edge {a}<->{b}: {why}" for a, b, why in self.bad_edges]
         for n, why in self.unavailable.items():
             out.append(f"{UNAVAILABLE}: {n}: {'; '.join(why) or 'no RDMA edge to another node'}")
+        for n, fabric in self.no_rdma.items():
+            out.append(f"{NO_RDMA}: {n}: fabric {fabric} in the inventory: no group, single-node islands only "
+                       f"(fabric_group {FABRIC_UNAVAILABLE}); next: {NO_RDMA_NEXT}")
         return out
 
     def record(self) -> dict[str, Any]:
-        return {"groups": self.groups, "unavailable": self.unavailable,
+        return {"groups": self.groups, "unavailable": self.unavailable, "no_rdma": self.no_rdma,
                 "edges": [list(e) for e in self.edges], "pair_problems": self.pair_problems,
                 "bad_edges": [list(e) for e in self.bad_edges], "warnings": self.warnings}
 
@@ -545,7 +555,14 @@ def group_nodes(names: Sequence[str], checks: Sequence[Any], *, states: Sequence
                 previous: Mapping[str, str | None] | None = None, reserved: Iterable[str] = (),
                 nccl_pairs: str = "all") -> ProbeResult:
     """The fabric groups of ``names`` from a preflight's ``checks`` (and its node
-    ``states``: the declared rails, the fabric keys)."""
+    ``states``: the declared rails, the fabric keys). A node whose state declares no
+    RDMA fabric (``tcp``) is in ``no_rdma``, not ``unavailable``: the probe does not
+    group it, and that is no failure of the probe."""
+    from .ssh_trainer_island import RDMA_FABRICS  # noqa: PLC0415 - the island imports this module
+
+    declared = {s.node.name: getattr(s.node, "fabric", None) for s in states}
+    no_rdma = {n: str(declared[n]) for n in names if declared.get(n) not in (None, *RDMA_FABRICS)}
+    names = [n for n in names if n not in no_rdma]
     blocked = node_blocks(names, checks, states)
     edges, problems, warns = evaluate_pairs(names, checks, nccl_pairs=nccl_pairs, blocked=blocked)
     edge = {frozenset(e) for e in edges}
@@ -560,7 +577,7 @@ def group_nodes(names: Sequence[str], checks: Sequence[Any], *, states: Sequence
     keys = {s.node.name: fabric_keys(s) for s in states}
     ids = assign_ids(multi, keys=keys, previous=previous, reserved=reserved)
     result = ProbeResult(groups=dict(sorted(zip(ids, multi))), edges=edges, pair_problems=problems,
-                         bad_edges=bad, warnings=warns)
+                         bad_edges=bad, warnings=warns, no_rdma=dict(sorted(no_rdma.items())))
     for part in parts:
         if len(part) > 1:
             continue

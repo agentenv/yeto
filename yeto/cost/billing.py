@@ -452,6 +452,9 @@ def _nc_rate(r: Resource, rates: Rates) -> float | None:
     return None
 
 
+OWN_SSH_NODES_NOTE = "own SSH nodes (no price_per_card_hour): $0"
+
+
 def _span_cost(r: Resource, start: float, now: float, rate: float | None, note: str = "") -> ItemCost:
     end = r.released_at if r.released_at is not None else now
     if end < start and r.key not in _SKEW_WARNED:
@@ -547,9 +550,11 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
         elif _provider_cost(r.kind) is not None:  # an island provider's machine (nc_lease)
             items.append(_provider_cost(r.kind)(r, now, rates))
         elif r.kind == "ssh_trainer":  # the operator's machines: the inventory's declared price
+            # a node without price_per_card_hour is the operator's own machine: $0 (the inventory's
+            # default, as for an ssh: sampler pool), not unpriced
             rate = r.attrs.get("usd_per_hour")
-            items.append(_span_cost(r, r.created_at, now, None if rate is None else float(rate),
-                                    "" if rate is not None else "SSH nodes without price_per_card_hour"))
+            items.append(_span_cost(r, r.created_at, now, 0.0 if rate is None else float(rate),
+                                    "" if rate is not None else OWN_SSH_NODES_NOTE))
         elif r.kind == "sky_cluster":
             rate = r.attrs.get("usd_per_hour")
             note = ""

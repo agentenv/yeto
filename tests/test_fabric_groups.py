@@ -344,6 +344,40 @@ def test_three_connected_nodes_form_a_group_and_a_socket_node_is_fabric_unavaila
     assert sum("torch.distributed.run" in s for _, s in ops.scripts) == 2 * 6  # every pair ran its own NCCL
 
 
+def _tcp_inventory(tmp_path, fabrics):
+    path = tmp_path / "nodes.yaml"
+    path.write_text(yaml.safe_dump({"nodes": [_entry(i, fabric=f) for i, f in enumerate(fabrics)]}))
+    return path
+
+
+def test_a_tcp_node_is_no_group_and_no_probe_failure_with_a_next_step(tmp_path, capsys):
+    """Rehearsal: tcp nodes were first said to "get no group", then reported "fabric
+    unavailable" (with the ib_write_bw noise of their pairs) and the probe exited 1."""
+    path = _tcp_inventory(tmp_path, ["ib", "ib", "tcp"])
+    assert cluster_cli.main(_args(path, "--write"), ops=_ops_for(path), log=lambda m: None) == 0
+    cap = capsys.readouterr()
+    assert "nodes ['b300-2'] declare no RDMA fabric (ib / roce): they get no group" in cap.err
+    (tcp,) = [x for x in cap.out.splitlines() if "b300-2" in x]
+    assert tcp.startswith(f"{fg.NO_RDMA}: b300-2: fabric tcp in the inventory: no group, single-node islands only")
+    assert f"next: {fg.NO_RDMA_NEXT}" in tcp and fg.UNAVAILABLE not in cap.out
+    groups = {n.name: n.fabric_group for n in load_inventory(path)}
+    assert groups["b300-0"] == groups["b300-1"] != FABRIC_UNAVAILABLE and groups["b300-2"] == FABRIC_UNAVAILABLE
+
+
+def test_a_probe_of_tcp_nodes_only_says_so_for_every_node_and_exits_0(tmp_path, capsys):
+    path = _tcp_inventory(tmp_path, ["tcp", "tcp"])
+    assert cluster_cli.main(_args(path, "--json"), ops=_ops_for(path), log=lambda m: None) == 0
+    record = json.loads(capsys.readouterr().out)
+    assert record["groups"] == {} and record["unavailable"] == {} and record["bad_edges"] == []
+    assert record["no_rdma"] == {"b300-0": "tcp", "b300-1": "tcp"}
+
+
+def test_a_declared_ib_node_that_runs_over_sockets_stays_fabric_unavailable():
+    nodes, ops = _cluster(2, socket={"b300-1"})
+    result = _probe(nodes, ops)
+    assert result.no_rdma == {} and list(result.unavailable) == ["b300-0", "b300-1"] and not result.clean
+
+
 def test_a_triangle_with_a_missing_edge_is_no_group_of_three():
     names = ["b300-0", "b300-1", "b300-2"]
     result = fg.group_nodes(names, _pair_checks(names, socket={("b300-0", "b300-2")}))

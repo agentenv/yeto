@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -249,7 +250,7 @@ def test_cleanup_stops_an_open_incarnation_on_every_node_by_the_ledger_alone(tmp
     assert [r.id for r in ledger.open_resources()] == ["k31/trainer-i4"]
 
 
-def test_cost_prices_an_incarnation_by_the_declared_price_or_leaves_it_unpriced(tmp_path):
+def test_cost_prices_an_incarnation_by_the_declared_price_or_at_zero_on_own_nodes(tmp_path):
     ledger = ResourceLedger(tmp_path / "resources.jsonl", clock=lambda: 1000.0)
     nodes = [b300(i, price_per_card_hour=1.0) for i in range(6)]
     for i, priced in ((1, nodes), (2, [b300(0)])):
@@ -258,8 +259,26 @@ def test_cost_prices_an_incarnation_by_the_declared_price_or_leaves_it_unpriced(
     summary = billing.resource_costs(ledger.resources(), now=1000.0 + 1800)
     by_id = {item.key: item for item in summary.items}
     assert by_id["ssh_trainer:k31/t-i1"].estimated_usd == pytest.approx(24.0)  # 48 cards, $1, 30 min
-    assert not by_id["ssh_trainer:k31/t-i2"].priced
-    assert "price_per_card_hour" in by_id["ssh_trainer:k31/t-i2"].note
+    own = by_id["ssh_trainer:k31/t-i2"]  # no price: the operator's own node, $0 and not unpriced
+    assert own.priced and own.estimated_usd == 0.0 and "price_per_card_hour" in own.note
+    assert summary.unpriced == []
+
+
+def test_the_cost_guard_does_not_warn_about_own_ssh_nodes(tmp_path):
+    """Rehearsal: every incarnation of a resident ssh trainer on own nodes (no
+    price_per_card_hour) raised a cost_unpriced warning."""
+    from yeto.cost.guard import CostGuard, GuardConfig
+
+    ledger = ResourceLedger(tmp_path / "resources.jsonl", clock=lambda: 1000.0)
+    ledger.created("ssh_trainer", "k31/t-i0", "t-i0", **ssh_trainer_ledger.created_attrs(
+        run_id="k31", island="t", incarnation=0, nodes=[b300(0)], docker=True, kill_grace_s=30))
+    guard = CostGuard("k31", GuardConfig(), ledger=ledger, events_path=tmp_path / "events.jsonl",
+                      clock=lambda: 1000.0 + 600, log=lambda *_: None)
+    guard.tick()
+    events = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert [e for e in events if e.get("event") == "cost_unpriced"] == []
+    (tick,) = [e for e in events if e.get("event") == "cost_tick"]
+    assert tick["unpriced"] == [] and tick["total_usd"] == 0.0
 
 
 # ---------------------------------------------------------------- multi-node staged releases

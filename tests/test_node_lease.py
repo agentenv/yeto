@@ -939,6 +939,22 @@ def test_the_probe_finds_trainer_process_groups_and_venv_samplers(tmp_path):
     assert os.environ.get("FAKE_STATE_DIR") is None
 
 
+def test_the_probe_prints_each_finding_once(tmp_path):
+    """Rehearsal: one labelled trainer container named ``yeto-<run>-...`` on a docker node
+    whose ``sudo -n`` works was printed four times (two views x label and name listing)."""
+    import subprocess
+
+    env = _node_bin(tmp_path)
+    rows = [{"name": "yeto-run-a-fake", "labels": {node_lease.RUN_LABEL: "run-a"}}]
+    for view in ("docker", "docker-root"):  # docker's one daemon: both views list the container
+        (tmp_path / f"{view}.json").write_text(json.dumps(rows))
+    out = subprocess.run(["bash", "-c", node_lease.still_runs_script("run-a", sudo=True)], capture_output=True,
+                         text=True, env=env).stdout
+    lines = [x for x in out.splitlines() if x.startswith(node_lease.PROBE_MARK)]
+    assert lines == [f"{node_lease.PROBE_MARK} found=container:yeto-run-a-fake", f"{node_lease.PROBE_MARK} done"]
+    assert node_lease.parse_probe(out) == (True, ["container:yeto-run-a-fake"])
+
+
 def test_the_node_runtime_labels_its_containers_only_when_asked(tmp_path):
     from tests.test_ssh_sampler_pool import conf
     from yeto.node import launch as node_launch
