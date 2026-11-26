@@ -262,6 +262,91 @@ def test_a_failed_launch_whose_ledger_is_all_released_moves_at_once(tmp_path):
     assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
 
 
+def test_a_bucket_left_for_a_person_does_not_hold_the_move(tmp_path):
+    """#864 leaves some sky_storage rows open on purpose (release_skipped: the bucket holds
+    data) and some unconfirmed (release_failed): they hold no quota, so the move goes on at
+    once and they are reported."""
+    rows = [{"kind": "sky_storage", "id": "b0", "name": "b0", "release_error": "release_skipped: holds objects"},
+            {"kind": "sky_storage", "id": "b1", "name": "b1", "release_error": "release_failed: 403"}]
+    w, launches, clock, logs = _ledger_fleet(tmp_path, rows)
+    w.step()
+    assert getattr(launches, "torn_down", []) == []
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+    assert any("left for a person to decide" in m and "b0" in m and "do not block the move" in m for m in logs)
+
+
+def test_an_open_cluster_row_still_holds_the_move_next_to_a_skipped_bucket(tmp_path):
+    rows = [{"kind": "sky_storage", "id": "b0", "name": "b0", "release_error": "release_skipped: holds objects"},
+            {"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0", "release_error": None}]
+    w, launches, clock, logs = _ledger_fleet(tmp_path, rows)
+    w.step()
+    assert launches.torn_down == ["run-i0"] and [p for p, _ in launches.starts] == ["run-i0"]
+    rows.pop()  # the cluster released; the bucket stays for a person
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+
+
+def test_a_move_through_its_stop_waits_for_what_the_old_launch_left_open(tmp_path):
+    """A running launch moved through its STOP: if its ledger still has a compute row open
+    once it ended, the old prefix is torn down before the next incarnation orders anything."""
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    rows = [{"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0", "release_error": None}]
+    launches.open_resources = lambda prefix: rows
+    clock = Clock()
+    w = tw.TrainerWorker(store, objects, launches, lifecycle.IslandStateStore(objects, log=lambda m: None),
+                         log=lambda m: None, clock=clock)
+    w.step()
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    assert w.load(0)["state"] == tw.MOVING and getattr(launches, "torn_down", []) == []
+    launches.end("run-i0", 0)
+    w.step()
+    assert launches.torn_down == ["run-i0"] and [p for p, _ in launches.starts] == ["run-i0"]
+    rows.clear()
+    w.step()
+    assert [p for p, _ in launches.starts] == ["run-i0", "run-i0-m1"]
+    assert w.load(0)["relaunches"] == 0
+
+
+def test_a_move_through_its_stop_with_a_released_ledger_starts_at_once(tmp_path):
+    objects, store = fleet(tmp_path, [member(0, gpu="aws:1xl4@us-east-1")])
+    launches = FakeLaunches()
+    launches.open_resources = lambda prefix: [
+        {"kind": "sky_storage", "id": "b0", "name": "b0", "release_error": "release_skipped: holds objects"}]
+    w = worker(objects, store, launches)
+    w.step()
+    _set_gpu(store, "isl0", "aws:1xa10g@us-east-1")
+    w.step()
+    launches.end("run-i0", 0)
+    w.step()
+    assert getattr(launches, "torn_down", []) == [] and "run-i0-m1" in launches.live
+
+
+def test_only_compute_rows_a_teardown_can_still_release_hold_a_move():
+    rows = [{"kind": "sky_cluster", "id": "c0", "release_error": None},
+            {"kind": "modal_app", "id": "ap-1", "release_error": "release_failed: timeout"},
+            {"kind": "modal_app", "id": "ap-2", "release_error": "release_skipped: kept by its owner"},
+            {"kind": "sky_storage", "id": "b0", "release_error": "release_failed: 403"}]
+    waits, reported = tw.split_open_rows(rows)
+    # a skipped row is left on purpose: `yeto down` never releases it, waiting would only time out
+    assert [r["id"] for r in waits] == ["c0", "ap-1"]
+    assert [r["id"] for r in reported] == ["ap-2", "b0"]
+
+
+def test_teardown_failures_while_clearing_carry_into_the_next_incarnation(tmp_path):
+    rows = [{"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0"}]
+    w, launches, clock, logs = _ledger_fleet(tmp_path, rows)
+    w.step()
+    clock.t += tw.CLEAR_TIMEOUT_S + 1
+    w.step()  # 1/N: torn down again
+    assert w.load(0)["relaunches"] == 1
+    rows.clear()
+    w.step()
+    record = w.load(0)
+    assert record["prefix_now"] == "run-i0-m1" and record["relaunches"] == 1
+
+
 def test_local_launch_ops_read_the_open_rows_of_a_launch_ledger(tmp_path, monkeypatch):
     from yeto import runs
     from yeto.cost.ledger import ResourceLedger
@@ -274,7 +359,8 @@ def test_local_launch_ops_read_the_open_rows_of_a_launch_ledger(tmp_path, monkey
     ledger.created("sky_cluster", "run-i0-0", "run-i0-0")
     ledger.created("sky_storage", "bucket-a", "bucket-a")
     ledger.released("sky_storage", "bucket-a", "bucket-a")
-    assert ops.open_resources("run-i0") == [{"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0"}]
+    assert ops.open_resources("run-i0") == [{"kind": "sky_cluster", "id": "run-i0-0", "name": "run-i0-0",
+                                             "release_error": None}]
 
 
 def test_a_hand_off_while_the_target_changes_is_started_again_as_it_was(tmp_path):
