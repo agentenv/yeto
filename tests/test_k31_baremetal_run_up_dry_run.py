@@ -116,6 +116,9 @@ def _fill(tmp: Path) -> Path:
 
 
 def _normalize(text: str, tmp: Path) -> list[str]:
+    state = os.environ.get("YETO_TEST_STATE_ROOT")  # conftest: the session's stand-in for ~/.yeto
+    if state:
+        text = text.replace(state, "<HOME>/.yeto")
     text = text.replace(str(tmp), "<TMP>").replace(str(ROOT), "<ROOT>").replace(HOME, "<HOME>")
     # the island script carries the source tree's digest, which differs between any two trees
     text = re.sub(r"(island script: \d+ bytes, sha256 )[0-9a-f]{16}", r"\1<ISH>", text)
