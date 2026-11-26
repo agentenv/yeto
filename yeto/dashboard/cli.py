@@ -127,10 +127,13 @@ def _paths(args) -> list[str]:
 def _store(args):
     if not getattr(args, "store", None):
         return None
+    from .fleet_store import store_readers
     from .store_tapes import StoreTapes, open_objects
 
-    return StoreTapes(open_objects(args.store), label="store",
-                      interval_s=float(getattr(args, "store_poll", None) or 0.0))
+    interval = float(getattr(args, "store_poll", None) or 0.0)
+    # the island tapes, and the launchers' fleet.jsonl copies (fleet/log/, fleet_store)
+    return store_readers(StoreTapes(open_objects(args.store), label="store", interval_s=interval),
+                         interval_s=interval)
 
 
 def _resolved(args, paths: list[str], store=None):

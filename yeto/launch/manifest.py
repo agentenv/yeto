@@ -92,18 +92,38 @@ def _write_run_manifest(args) -> dict | None:
     return manifest
 
 
-def _dashboard_fleet_log(args, tasks, results):
+def _fleet_learner(args):
+    """``(learner id, learners)`` of a fleet island launch, else None (never raises)."""
+    try:
+        from ..rl.engine import sample_roles
+
+        return sample_roles.fleet_learner(args)
+    except Exception:  # noqa: BLE001 - the fleet log falls back to the launch's island index
+        return None
+
+
+def _dashboard_fleet_log(args, tasks, results, objects=None):
     """fleet-dashboard 2.3: the run's ``fleet.jsonl`` writer, or None if it
-    cannot be built (never blocks a launch)."""
+    cannot be built (never blocks a launch). An island launch of a fleet launched
+    island by island names its island by its fleet learner id. ``objects``: the run
+    store's object API when the launch keeps its island records there; the file is
+    then also copied into the store in chunks (``dashboard.fleet_store``)."""
+    member = _fleet_learner(args)
     try:
         from .. import runs
         from ..dashboard.fleet import from_env
 
-        return from_env(runs.run_dir(args.cluster_prefix) / "fleet.jsonl",
-                        {name: tasks[name] for name in results})
+        learner_ids = None if member is None else {name: member[0] for name in results}
+        log = from_env(runs.run_dir(args.cluster_prefix) / "fleet.jsonl",
+                       {name: tasks[name] for name in results}, learner_ids=learner_ids)
     except Exception as e:  # noqa: BLE001
         print(f"[launcher] fleet.jsonl disabled: {e}", file=sys.stderr)
         return None
+    if objects is not None:
+        from ..dashboard.fleet_store import start_uploader
+
+        log.uploader = start_uploader(objects, log.path, learner_id=None if member is None else member[0])
+    return log
 
 
 def _no_sync_events_dir(args) -> Path:

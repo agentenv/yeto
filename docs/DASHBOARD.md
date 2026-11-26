@@ -205,6 +205,34 @@ The head-side `fleet.jsonl` is written by `FleetController`
 and the budget can be passed to the launcher with the environment variables
 `YETO_DASHBOARD_PRICES` / `YETO_DASHBOARD_BUDGET_USD`.
 
+Each record's `island_id` is the island's learner id, the id the syncer tape uses.
+In a fleet launched island by island (`fleet.launch: per_island`) every island
+launch runs one island, island 0 of its launch (`<prefix>-l0-<cloud>`); its records
+carry the fleet learner id (`--rl-fleet-learner-id`), so the islands of the fleet
+stay apart on the page. Every other launch keeps the `-l<m>` index of the island
+name, as before.
+
+A launch that keeps its island records in the run store (an island fleet, or
+`--island-lifecycle on` with `--rl-checkpoint-store`) also copies `fleet.jsonl`
+there, in chunks, every 30 s (`YETO_RL_TAPE_UPLOAD_S`, 0 turns it off):
+`fleet/log/<lane>/<host>-p<pid>-<UTC start>/<seq>.jsonl`, lane `l<k>` for the
+island launch of learner `k` and `fleet` for a launch of the whole fleet. Every
+launcher process writes its own folder, so the events of a control plane that
+moved to another host, or of a host that was lost, stay in the store. The copy is
+observation only: a failed upload is a `WARN` line in the launcher log, retried
+with the next chunk, and the launcher's end waits at most 15 s for the last one.
+A launch of one trainer island uploads nothing, as before. `--store` reads every
+folder next to the island tapes (a lane's folders in the order they started), and
+a record that is also in a local `fleet.jsonl` given with `--tapes` counts once.
+For tools that read the file itself:
+
+```
+python -m yeto.dashboard.fleet_store merge --store s3://<bucket>/runs/<run> \
+    [--fleet-log ~/.yeto/runs/<run>/fleet.jsonl ...] --out fleet.merged.jsonl
+```
+
+writes one `fleet.jsonl`, in time order, each record once.
+
 ## Alert rules and thresholds
 
 | Rule | Default threshold | Level |

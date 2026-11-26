@@ -1314,7 +1314,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             no_recover=verda["no_recover"] if verda else (),
             instance_guard=verda["guard"] if verda else None,
             on_rename=_rename_hook(clusters, on_clusters, [] if head_mode else [syncer_cluster]),
-            fleet_log=_dashboard_fleet_log(args, tasks, results),
+            fleet_log=_dashboard_fleet_log(args, tasks, results,
+                                           objects=None if island_states is None else island_states.objects),
             syncer_finished_probe=local_syncer.finished if head_mode else None,
             left_pool_probe=(
                 (lambda name: name in event_collectors and event_collectors[name].left_pool)
@@ -1690,6 +1691,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     f"Terminate them from the cloud console, then: yeto down {prefix}",
                     file=sys.stderr,
                 )
+        close_fleet_log = getattr(getattr(controller, "fleet_log", None), "close", None)
+        if callable(close_fleet_log):
+            # the store copy of fleet.jsonl: its last lines (the island_stop just written
+            # included), bounded; a store that fails is a WARN, never the exit code
+            close_fleet_log()
         if ssh_islands is not None:
             ssh_islands.close()  # streams and locks; a kept island is reattached by the next launch
         if island_states is not None:
