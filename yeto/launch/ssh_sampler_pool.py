@@ -233,6 +233,9 @@ class SshPoolConf:
     node_health: str | None = None
     # the inventory's top-level lease_store (yeto.launch.node_lease); None: nodes not leased
     lease_store: str | None = None
+    # the site image catalog a ``container.image: auto`` node without an inventory image reads
+    # (the inventory's top-level site_images:, else ~/.yeto/site-images.yaml; yeto.launch.site_images)
+    site_images: str | None = None
 
 
 def _strs(value: Any, key: str) -> tuple[str, ...]:
@@ -258,6 +261,9 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
             raise ValueError("ssh provider: inventory (an SSH node inventory file) is required")
         inventory = load_profiles(os.path.expanduser(str(section["inventory"])))
     lease_store = lease_store_of(inventory)
+    from .site_images import inventory_catalog_path  # noqa: PLC0415
+
+    site_catalog = str(inventory_catalog_path(section.get("inventory")))
     inventory = [profile_of(n) for n in inventory]
     by_name = nodes_by_name(list(inventory))
     names = section.get("nodes")
@@ -354,7 +360,8 @@ def parse_config(cfg: Mapping[str, Any], *, inventory: Sequence[Node] | None = N
                        min_cards=int(pre["min_cards"]) if pre.get("min_cards") is not None else None,
                        grace_s=int(section.get("grace_s", 120)),
                        price_usd_h=float(price) if price is not None else None, lost_node_hold_s=float(hold),
-                       node_runtime=node_runtime, node_health=health, lease_store=lease_store)
+                       node_runtime=node_runtime, node_health=health, lease_store=lease_store,
+                       site_images=site_catalog)
 
 
 # -- node shell -----------------------------------------------------------------
@@ -1262,6 +1269,8 @@ class SshSamplerPoolOps:
         self._node_route: Any = None
         self._health_generation: dict[str, int] = {}  # ticket -> the assignment its health check is of
         self._health_lost: set[str] = set()  # tickets whose node's health read lost (drain holds its slot)
+        self._images: dict[str, Any] | None = None  # node -> site_images.Choice, fixed at the first start
+        self._images_lock = threading.Lock()  # parallel starts (IslandPool) choose the images once
 
     def attach_control(self, control: Any) -> dict[str, Any]:
         """The store control plane (``store_state.PoolControl``): the provider's tickets, holds
@@ -1472,8 +1481,65 @@ class SshSamplerPoolOps:
 
     def image_for(self, node: Node) -> str:
         """The image a node runs: ``container.image`` (``auto``: the node's inventory
-        image, else the catalog's for what the spec asks), else the node's image."""
-        return node_image(self.conf, node, spec_of(self.cfg))
+        image, else the site image catalog's, else the engine image catalog's for what the
+        spec asks), else the node's image. An image the pool chose itself is chosen once
+        for every node (:func:`pool_image_choices`, what the dry-run prints) and kept in
+        the pool's state (:meth:`images_path`): a replacement node and a restarted pool
+        controller start the same image, the catalog is not read again."""
+        images = self._images
+        if images is None:
+            with self._images_lock:  # double-checked: one start chooses, the others take its choice
+                if self._images is None:
+                    self._images = self._pin_images()
+                images = self._images
+        choice = images.get(node.name)
+        if choice is None:
+            return node_image(self.conf, node, spec_of(self.cfg))
+        if isinstance(choice, Exception):
+            raise choice
+        return str(choice.ref)
+
+    def images_path(self) -> Path:
+        return self.state_dir / f"ssh-pool-{self.run_id}-images.json"
+
+    def _pin_images(self) -> dict[str, Any]:
+        from . import site_images  # noqa: PLC0415
+
+        spec = spec_of(self.cfg)
+        choices = pool_image_choices(self.conf, spec)
+        needs = engine_images.spec_needs(spec)
+        key = {"model": needs.get("model"), "engine": needs.get("engine_pref"), "catalog": self.conf.site_images}
+        path = self.images_path()
+        try:
+            kept = json.loads(path.read_text())
+        except (OSError, ValueError):
+            kept = None
+        if isinstance(kept, dict) and kept.get("key") == key:
+            for name, row in (kept.get("images") or {}).items():
+                if name in choices and not _explicit(choices[name]):
+                    choices[name] = site_images.Choice(str(row["ref"]), str(row["source"]),
+                                                       why=f"kept from the pool's start ({path.name})")
+        pinned = {name: {"ref": c.ref, "source": c.source} for name, c in choices.items()
+                  if not isinstance(c, Exception) and not _explicit(c)}
+        if pinned:
+            try:
+                import tempfile  # noqa: PLC0415
+
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+                try:
+                    with os.fdopen(fd, "w") as handle:
+                        handle.write(json.dumps({"key": key, "images": pinned}, indent=1, sort_keys=True))
+                    os.replace(tmp, path)
+                except BaseException:
+                    Path(tmp).unlink(missing_ok=True)
+                    raise
+            except OSError as error:  # the pool runs; a restarted controller chooses again
+                _log(f"ssh pool: the chosen images were not kept in {path}: {error}")
+            for name, c in sorted(choices.items()):
+                if not isinstance(c, Exception) and not _explicit(c):
+                    _log(f"ssh pool: node {name}: {c.line('sampler')}")
+        return choices
 
     def start_node_runtime(self, route: Any, node: Node, m, shards: list[str], spec: Mapping[str, Any], *,
                            python: str, env_file: str | None) -> str:
@@ -1791,16 +1857,69 @@ def spec_of(cfg: Mapping[str, Any]) -> dict[str, Any]:
 
 def node_image(conf: SshPoolConf, node: Node, spec: Mapping[str, Any]) -> str:
     """The image ``node`` runs (container runtime): ``container.image`` unless it is
-    ``auto``; then the node's inventory image, else the engine image catalog's choice
+    ``auto``; then the node's inventory image, else the site image catalog's verified
+    image for the spec's model on the pool's nodes, else the engine image catalog's choice
     for what ``spec`` asks (raises ``ImageIncompatible`` when none serves it)."""
+    return str(node_image_choice(conf, node, spec).ref)
+
+
+def _explicit(choice: Any) -> bool:
+    from .site_images import SOURCE_EXPLICIT  # noqa: PLC0415
+
+    return not isinstance(choice, Exception) and choice.source == SOURCE_EXPLICIT
+
+
+def node_image_choice(conf: SshPoolConf, node: Node, spec: Mapping[str, Any]):  # -> site_images.Choice
+    """:func:`node_image` with where it came from (``site_images.Choice``): the pool's or
+    the inventory's image (explicit), the site image catalog, or the engine image catalog
+    (the built-in default). A broken site catalog raises ``SiteImagesError``."""
+    choices = pool_image_choices(conf, spec, only=node)
+    choice = choices[node.name]
+    if isinstance(choice, Exception):
+        raise choice
+    return choice
+
+
+def pool_image_choices(conf: SshPoolConf, spec: Mapping[str, Any], *,
+                       only: Node | None = None) -> dict[str, Any]:
+    """Every node's image choice (``site_images.Choice``, or the exception that refuses
+    the node), the pool's nodes at once: the site catalog is read once and matched against
+    all of them (``auto`` nodes without an inventory image), so a spare that replaces a
+    node starts the same site image. ``only``: just that node's entry (a node outside
+    the pool is matched alone)."""
+    from . import site_images  # noqa: PLC0415
+
     assert conf.container is not None
+    nodes = list(conf.nodes)
+    if only is not None and only.name not in {n.name for n in nodes}:
+        nodes = [only]
+    wanted = [only] if only is not None else nodes
     if conf.container.image and conf.container.image != AUTO_IMAGE:
-        return conf.container.image
-    if node.image:
-        return node.image
+        return {n.name: site_images.Choice(conf.container.image, site_images.SOURCE_EXPLICIT) for n in wanted}
+    out: dict[str, Any] = {n.name: site_images.Choice(n.image, site_images.SOURCE_EXPLICIT) for n in wanted if n.image}
+    auto = [n for n in nodes if not n.image]
+    if not [n for n in wanted if not n.image]:
+        return out
     needs = engine_images.spec_needs(spec)
-    return engine_images.resolve(profile_of(node), needs.pop("model"), needs.pop("engine_pref"),
-                                 **needs).image.pull_ref  # type: ignore[union-attr]
+    model, pref = needs.pop("model"), needs.pop("engine_pref")
+    try:
+        site = site_images.select(None, model, "sampler", [profile_of(n) for n in auto], engine=pref,
+                                  path=conf.site_images, default=None)
+    except site_images.SiteImagesError as error:
+        return {**out, **{n.name: error for n in wanted if not n.image}}
+    for node in wanted:
+        if node.image:
+            continue
+        if site.source == site_images.SOURCE_SITE:
+            out[node.name] = site
+            continue
+        try:
+            ref = engine_images.resolve(profile_of(node), model, pref, **needs).image.pull_ref  # type: ignore[union-attr]
+        except engine_images.ImageIncompatible as error:
+            out[node.name] = error
+            continue
+        out[node.name] = site_images.Choice(ref, site_images.SOURCE_DEFAULT, None, site.path, site.why)
+    return out
 
 
 def image_problems(conf: SshPoolConf, spec: Mapping[str, Any]) -> list[str]:
@@ -1812,11 +1931,18 @@ def image_problems(conf: SshPoolConf, spec: Mapping[str, Any]) -> list[str]:
     needs = engine_images.spec_needs(spec)
     model, pref = needs.pop("model"), needs.pop("engine_pref")
     out = []
+    from .site_images import SOURCE_EXPLICIT, SiteImagesError  # noqa: PLC0415
+
+    choices = pool_image_choices(conf, spec)  # what the pool's first start fixes (SshSamplerPoolOps.image_for)
     for node in conf.nodes:
         try:
-            image = node_image(conf, node, spec)
-            engine_images.resolve(profile_of(node), model, pref, image=image, **needs)
-        except engine_images.ImageIncompatible as error:
+            choice = choices[node.name]
+            if isinstance(choice, Exception):
+                raise choice
+            if choice.source != SOURCE_EXPLICIT:  # the dry-run names an image the pool chose itself
+                print(f"ssh provider: node {node.name}: {choice.line('sampler')}")
+            engine_images.resolve(profile_of(node), model, pref, image=str(choice.ref), **needs)
+        except (engine_images.ImageIncompatible, SiteImagesError) as error:
             out.append(f"ssh provider: node {node.name}: {error}")
     return out
 

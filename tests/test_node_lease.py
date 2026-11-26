@@ -91,7 +91,8 @@ def test_a_bad_lease_store_is_refused(value):
 
 
 def test_the_unknown_field_message_names_lease_store():
-    with pytest.raises(InventoryError, match=r"known: \['images', 'lease_store', 'node_health', 'nodes'\]"):
+    with pytest.raises(InventoryError,
+                       match=r"known: \['images', 'lease_store', 'node_health', 'nodes', 'site_images'\]"):
         parse_inventory({"lease": "s3://x", "nodes": [_raw(0)]})
 
 
