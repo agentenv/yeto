@@ -1300,10 +1300,14 @@ renewal: the lock's margin (57 s), a beat, a poll of the service (15 s), the syn
 (its checkpoint written, up to 170 s) and three heartbeat calls that hang until they are cut
 off. At the fence the heartbeat thread stops the syncer itself (its process group: SIGTERM,
 SIGKILL after the grace), at once: it waits neither for the main thread nor for a restart of
-the syncer in progress. A restart checks the fence before and after it starts a process, and
-stops one it started after the fence, so the service never starts a syncer again. A heartbeat
-thread that fails fences the service too, and the main thread fences it when it finds the
-lease left within the lock's margin (a heartbeat thread that is gone). From the syncer's start
+the syncer in progress. Its log lines go through a bounded queue and never block it (a full
+journal pipe holds no fence up; lines past the queue are dropped and counted). A heartbeat
+thread that fails fences the service too. The main thread checks the lease itself before it
+starts or restarts the syncer and before it writes the syncer record: at or below the margin,
+a poll and the syncer's stop (57 + 15 + 170 = 242 s left), it fences the service and stops the
+syncer (a heartbeat thread that is gone or stuck). A restart checks the fence and the lease
+before and after it stops the old process and after it starts the new one, and stops one it
+started after the fence, so the service never starts a syncer again. From the syncer's start
 on, the main thread's store calls (its records, its reads of the fleet's STOP) go through the
 heartbeat's client and are cut off after 34 s too. Tests with the budget scaled down (stores
 that hang 15 to 585 s per call, a fence during a restart) show the syncer stopped before the
@@ -1377,11 +1381,18 @@ removes the fleet's STOP from the run store. Then start the unit (`systemctl sta
 - **The syncer unit** (`KillMode=control-group`): `systemctl stop` sends the syncer SIGTERM; it
   writes its checkpoint and is killed only after 170 s (`TimeoutStopSec=180`). The next start
   resumes from the checkpoint. The service's own end can take longer than `TimeoutStopSec`
-  when the store hangs: the syncer's stop (up to 170 s, plus 5 s for SIGKILL), then up to about
-  100 s waiting for the heartbeat's calls (about 277 s in all). systemd then SIGKILLs the
-  service. The syncer is already stopped by then, but the lease is not released: it runs out
-  570 s after the last renewal. A restart on the same host takes it back at once; another
-  host's service waits for it.
+  when the store hangs. In the worst case it adds up as follows:
+  - the syncer's stop: up to 175 s (170 s, plus 5 s for SIGKILL);
+  - the last tape upload: up to 31 s per syncer shard;
+  - the heartbeat's calls: up to 170 s (the beat thread and the call in flight, 34 s each, then
+    68 s for a late call and 34 s for the final heartbeat).
+
+  That is about 345 s without a tape upload and about 376 s with one shard, well past
+  `TimeoutStopSec=180`. systemd then SIGKILLs the service. The syncer is already stopped by then
+  (its stop fits inside the 180 s), but the final heartbeat is not written and the lease is not
+  released: it runs out 570 s after the last renewal. A restart on the same host takes it back
+  at once; another host's service waits for it. The unit's `TimeoutStopSec` is not raised for
+  this: the syncer's grace is tied to it, and so is the lease budget.
 
 ### Limits
 

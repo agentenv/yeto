@@ -340,12 +340,10 @@ def _warn_part_checksums_off(uri: str, error: Exception) -> None:
 
 
 def _replace_forbidden(error: BaseException) -> bool:
-    """A 403: the key may not write there (a key limited to another prefix)."""
-    if error_code(error) in ("AccessDenied", "Forbidden", "403"):
-        return True
-    response = getattr(error, "response", None)
-    meta = response.get("ResponseMetadata") if isinstance(response, Mapping) else None
-    return isinstance(meta, Mapping) and meta.get("HTTPStatusCode") == 403
+    """The key may not write there (a key limited to another prefix): ``AccessDenied`` or
+    ``Forbidden`` only. Another 403 (``ExpiredToken``, ``RequestTimeTooSkewed``,
+    ``SignatureDoesNotMatch``, ...) says nothing of the endpoint: it is raised."""
+    return error_code(error) in ("AccessDenied", "Forbidden")
 
 
 def _replace_unsupported(error: BaseException) -> bool:
@@ -999,7 +997,12 @@ class S3ObjectStore:
             except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
                 if self._code(error) == "PreconditionFailed":
                     usable = True
-                elif _replace_unsupported(error) or _replace_forbidden(error):
+                elif _replace_unsupported(error):
+                    usable = False
+                elif _replace_forbidden(error):
+                    print(f"[store] WARNING: {self.uri}: the conditional write probe may not write {probe} with "
+                          f"If-Match ({self._code(error) or error}): the syncer record is rewritten by "
+                          "read-then-write", file=sys.stderr, flush=True)
                     usable = False
                 else:
                     raise

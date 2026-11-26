@@ -129,12 +129,32 @@ def test_the_process_check_reads_the_whole_command_line(tmp_path):
     import os
     import shutil
 
-    sleeper = _long_path_copy(shutil.which("sleep"), tmp_path)
+    # a link, not a copy: macOS kills a copy of a system binary (its platform signature) at its
+    # exec, so a copy would race the read below; argv[0] is the long path all the same
+    where = tmp_path / ("long-" + "d" * 60) / ("e" * 60) / ("f" * 60) / ("g" * 60)
+    where.mkdir(parents=True)
+    sleeper = where / "sleep"
+    sleeper.symlink_to(os.path.realpath(shutil.which("sleep")))
+    assert len(str(sleeper)) > 260
+    parent = _argv_of(os.getpid())
     proc = subprocess.Popen([str(sleeper), "30"])
     try:
+        # Popen can return before the kernel shows the new image's argv (Linux sets it late in
+        # execve; until then /proc reads empty, or the forked parent's). Wait for the exec by
+        # the argv changing at all, never for it to match: a reader that cuts the command line
+        # still shows a changed argv, and then fails the checks below at once.
+        deadline = time.monotonic() + 10
+        while (not _argv_of(proc.pid) or _argv_of(proc.pid) == parent) and proc.poll() is None:
+            assert time.monotonic() < deadline, f"the child never showed its own argv: {_argv_of(proc.pid)}"
+            time.sleep(0.01)
+        assert proc.poll() is None
         assert _is_binary(proc.pid, sleeper), _argv_of(proc.pid)
         assert _argv_of(proc.pid)[0] == str(sleeper) and len(_argv_of(proc.pid)[0]) > 260
         assert not _is_binary(proc.pid, shutil.which("sleep") + "-other")
+        other = tmp_path / "other" / "sleep"  # the same name, another binary: not this process
+        other.parent.mkdir()
+        other.symlink_to(os.path.realpath(shutil.which("cat")))
+        assert not _is_binary(proc.pid, other)
         assert not _is_binary(os.getpid(), sleeper)
     finally:
         proc.kill()

@@ -12,6 +12,10 @@ import time
 from .syncer import syncer_command, syncer_event_tape
 from .fleet import _RlStrictFailure
 
+# a LocalSyncer's process and its reaped flag change together (start, and a stop from another
+# thread); held only for that, never across a stop's wait
+_PROC_LOCK = threading.Lock()
+
 
 class LocalSyncer:
     """The syncer as a subprocess of the head node's controller job.
@@ -83,8 +87,7 @@ class LocalSyncer:
             # pid alone can orphan the syncer, which then holds the port
             # across controller restarts; start_new_session gives the whole
             # tree its own process group for stop() to kill.
-            self._reaped = False
-            self.proc = subprocess.Popen(
+            proc = subprocess.Popen(
                 self.command,
                 shell=True,
                 stdout=log_f,
@@ -93,6 +96,11 @@ class LocalSyncer:
                 start_new_session=True,
                 env=self.env,
             )
+            # the new process and its "not reaped" together: a stop in another thread (an
+            # on-site service's fence) sees the old reaped one or the new one, never the old
+            # one as not reaped (its process group id may be reused by then)
+            with _PROC_LOCK:
+                self.proc, self._reaped = proc, False
         finally:
             log_f.close()  # Popen holds its own duplicate of the fd
         print(f"[launcher] syncer subprocess started (pid {self.proc.pid})", flush=True)
@@ -166,30 +174,35 @@ class LocalSyncer:
     def _stop_tree(self) -> None:
         """Terminate the syncer's process group, even when its leader (the
         shell) already exited: members it backgrounded may still run."""
-        if self.proc is None or self._reaped:
+        with _PROC_LOCK:
+            proc, reaped = self.proc, self._reaped
+        if proc is None or reaped:
             return
-        self._signal_tree(signal.SIGTERM)
+        self._signal_tree(signal.SIGTERM, proc)
         grace = self.stop_grace_s
         started = time.monotonic()
         try:
-            self.proc.wait(timeout=10 if grace is None else grace)
+            proc.wait(timeout=10 if grace is None else grace)
         except subprocess.TimeoutExpired:
             pass
         deadline = time.monotonic() + 10 if grace is None else started + grace
-        while self._group_alive() and time.monotonic() < deadline:
+        while self._group_alive(proc) and time.monotonic() < deadline:
             time.sleep(0.1)
-        if self._group_alive() or self.proc.poll() is None:
-            self._signal_tree(signal.SIGKILL)
+        if self._group_alive(proc) or proc.poll() is None:
+            self._signal_tree(signal.SIGKILL, proc)
             try:
-                self.proc.wait(timeout=5)
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
-        if self.proc.poll() is not None and not self._group_alive():
-            self._reaped = True
+        if proc.poll() is not None and not self._group_alive(proc):
+            with _PROC_LOCK:
+                if self.proc is proc:
+                    self._reaped = True
 
-    def _group_alive(self) -> bool:
+    def _group_alive(self, proc: subprocess.Popen | None = None) -> bool:
+        proc = self.proc if proc is None else proc
         try:
-            os.killpg(self.proc.pid, 0)
+            os.killpg(proc.pid, 0)
         except (ProcessLookupError, PermissionError, OSError):
             return False
         return True
@@ -249,14 +262,15 @@ class LocalSyncer:
                                                       incarnation=syncer_incarnation(), interval_s=interval))
         print(f"[launcher] syncer tape -> {store.rstrip('/')}/tapes/syncer every {interval:.0f} s", flush=True)
 
-    def _signal_tree(self, sig: int) -> None:
+    def _signal_tree(self, sig: int, proc: subprocess.Popen | None = None) -> None:
         """Signal the syncer's whole process group (see start()), falling
         back to the direct child."""
+        proc = self.proc if proc is None else proc
         try:
-            os.killpg(self.proc.pid, sig)
+            os.killpg(proc.pid, sig)
         except (ProcessLookupError, PermissionError, OSError):
             try:
-                self.proc.send_signal(sig)
+                proc.send_signal(sig)
             except OSError:
                 pass
 

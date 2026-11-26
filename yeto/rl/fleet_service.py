@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import shlex
 import signal
@@ -502,11 +503,19 @@ class Onsite:
                 if _credential_error(error, self.env):  # no store will answer this host: not one that is down
                     raise ServiceError(f"the run store refuses this host's credentials ({type(error).__name__}: "
                                        f"{error})") from error
-                if type(error).__name__ == "NoCredentialsError" and self._built:
+                no_credentials = type(error).__name__ == "NoCredentialsError"
+                if no_credentials and self._built:
                     self._objects = None  # a dynamic source may give one later: the next try's client asks again
                 tries += 1
-                log(f"[{self.role} service] the run store does not answer ({type(error).__name__}: {error}); its ended "
-                    f"marker is read again in {delay:.0f}s (try {tries}), nothing is started meanwhile")
+                if no_credentials:  # a dynamic source (the instance metadata, a container endpoint) gave none
+                    sources = ", ".join(credential_sources(self.env)["dynamic"]) or "none"
+                    log(f"[{self.role} service] no credential for the run store yet (NoCredentialsError; dynamic "
+                        f"sources: {sources}): check this host's store credentials (the env file, ~/.aws, or "
+                        "AWS_EC2_METADATA_DISABLED=true where there is no instance metadata); its ended marker is "
+                        f"read again in {delay:.0f}s (try {tries}), nothing is started meanwhile")
+                else:
+                    log(f"[{self.role} service] the run store does not answer ({type(error).__name__}: {error}); its "
+                        f"ended marker is read again in {delay:.0f}s (try {tries}), nothing is started meanwhile")
                 sleep(delay)
                 delay = min(delay * 2, ENDED_READ_MAX_S)
         if raw is None:
@@ -782,7 +791,7 @@ def service_lock_ttl_s(stop_grace_s: float | None, beat_s: float | None = None, 
 
 # the files of a profile that hold, or lead to, a credential (botocore's names)
 _PROFILE_CREDENTIAL_KEYS = ("aws_access_key_id", "credential_process", "role_arn", "web_identity_token_file",
-                            "sso_start_url", "sso_session", "credential_source")
+                            "sso_start_url", "sso_session", "login_session", "credential_source")
 
 
 def credential_sources(environ: Any) -> dict[str, list[str]]:
@@ -883,6 +892,54 @@ def heartbeat_objects(uri: str | None, environ: dict[str, str]) -> Any:
     return s3_store.head_objects(text.replace("r2://", "s3://", 1), environ=env)
 
 
+class QueuedLog:
+    """A log that never blocks its caller (the heartbeat thread): each line goes through a
+    bounded queue to a writer thread of its own. A full queue drops the line and counts it;
+    the next line written says how many were dropped. A line the log cannot take (a closed
+    pipe) is dropped too."""
+
+    def __init__(self, log: Callable[[str], None], size: int = 256) -> None:
+        self._log = log
+        self._queue: queue.Queue = queue.Queue(size)
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self.dropped = 0
+
+    def __call__(self, message: str) -> None:
+        with self._lock:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="syncer-service-log", daemon=True)
+                self._thread.start()
+        try:
+            self._queue.put_nowait(message)
+        except queue.Full:
+            with self._lock:
+                self.dropped += 1
+
+    def _run(self) -> None:
+        while True:
+            message = self._queue.get()
+            try:
+                with self._lock:
+                    dropped, self.dropped = self.dropped, 0
+                if dropped:
+                    self._log(f"[syncer service] WARNING: {dropped} log line(s) dropped (the log did not keep up)")
+                self._log(message)
+            except Exception:  # noqa: BLE001 - a log that cannot be written changes nothing
+                pass
+            finally:
+                self._queue.task_done()
+
+    def flush(self, timeout_s: float) -> bool:
+        """Wait up to ``timeout_s`` for the lines queued so far to be written."""
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while self._queue.unfinished_tasks:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.005)
+        return True
+
+
 class CallChannel:
     """Store calls one at a time, each waited for at most ``call_s`` (a thread per call): past
     that a ``TimeoutError``, and the thread ends on its client's own timeouts. A call made while
@@ -944,9 +1001,11 @@ class RecordRefused(RuntimeError):
 class BoundedStore:
     """An object store whose every call goes through a :class:`CallChannel` (the syncer
     service's main path after it started: its record writes and its STOP reads never hold the
-    service past the channel's ``call_s``). With ``token``, the syncer record is written only
-    by :meth:`write_record`: never once ``lost()`` says the service is fenced, and only over a
-    record whose ``service_generation`` is at most ``token`` (a conditional write)."""
+    service past the channel's ``call_s``). With ``token``, the syncer record (which
+    ``write_syncer_record`` writes by ``write_exclusive``, always there on this store) is written
+    only by :meth:`write_record`: never once ``lost()`` says the service is fenced or its lease
+    is short, and only over a record whose ``service_generation`` is at most ``token`` (a
+    conditional write)."""
 
     def __init__(self, objects: Any, channel: CallChannel, *, token: int | None = None,
                  lost: Callable[[], str | None] | None = None) -> None:
@@ -954,8 +1013,6 @@ class BoundedStore:
         self._token, self._lost = token, lost or (lambda: None)
 
     def write(self, key: str, data: bytes) -> None:
-        if self._token is not None and key == _syncer_record_key():
-            return self.write_record(data)
         return self._channel.call("store write", lambda: self._objects.write(key, data))
 
     def write_exclusive(self, key: str, data: bytes) -> None:
@@ -1049,7 +1106,9 @@ class Heartbeat:
                  on_fence: Callable[[], None] | None = None) -> None:
         from yeto.launch.fleet_syncer import HEARTBEAT_CALL_S, POLL_S, SERVICE_BEAT_S, SERVICE_STARTING  # noqa: PLC0415
 
-        self.objects, self.host, self.key, self.lock, self.log = objects, host, key, lock, log
+        self.objects, self.host, self.key, self.lock = objects, host, key, lock
+        # never blocks the beat thread: a journal pipe that is full or hangs holds no fence up
+        self.log = log if isinstance(log, QueuedLog) else QueuedLog(log)
         self.generation, self.node = generation, node
         self.state = SERVICE_STARTING
         self.lost: str | None = None
@@ -1085,7 +1144,7 @@ class Heartbeat:
         try:
             self.channel.call("heartbeat", lambda: self._write(state, reason), wait_s=self.call_s if wait else 0.0)
         except Exception as error:  # noqa: BLE001 - tried again at the next beat
-            self.log(f"[syncer service] WARNING: heartbeat not written ({type(error).__name__}: {error})")
+            self._say(f"[syncer service] WARNING: heartbeat not written ({type(error).__name__}: {error})")
 
     def set(self, state: str) -> None:
         if state != self.state:
@@ -1136,13 +1195,17 @@ class Heartbeat:
             self._say(f"[syncer service] ERROR: {self.lost}: ending this syncer")
             return
         except Exception as error:  # noqa: BLE001 - a store blip: renewed at the next beat
-            self.log(f"[syncer service] WARNING: lock not renewed ({type(error).__name__}: {error})")
-        if left <= self.fence_s:  # stopped now, the syncer is down before another service may take the lock
+            failed = error
+        if left <= self.fence_s:  # stopped now (before any log line), the syncer is down before another service
+            # may take the lock
             self.lost = (f"the syncer service lock was not renewed and its lease had {left:.0f}s left before this "
                          f"renewal (the syncer's stop needs up to {self.fence_s:.0f}s of it): fenced by itself")
             self.lost_code = SELF_FENCED_EXIT
             self._fenced()
+            self._say(f"[syncer service] WARNING: lock not renewed ({type(failed).__name__}: {failed})")
             self._say(f"[syncer service] ERROR: {self.lost}: ending this syncer (exit {SELF_FENCED_EXIT}: restarted)")
+            return
+        self._say(f"[syncer service] WARNING: lock not renewed ({type(failed).__name__}: {failed})")
 
     def start(self) -> None:
         self.beat()
@@ -1327,6 +1390,7 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         return 2
     lock.objects = heartbeat_store if heartbeat_store is not None else objects  # renewed by the heartbeat only
     fenced, running = threading.Event(), {"syncer": None}
+    beat_log = QueuedLog(log)  # the beat thread's lines: never blocking it (a full journal pipe holds no fence up)
 
     def halt(target: Any) -> None:
         (getattr(target, "terminate", None) or target.stop)()  # its process group: SIGTERM, SIGKILL after the grace
@@ -1335,19 +1399,33 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         fenced.set()
         target = running["syncer"]
         if target is not None:
-            halt(target)  # before any log line: a log that hangs (a full journal pipe) never holds it up
-            try:
-                log("[syncer service] the lock is no longer this service's: the syncer is stopped (SIGTERM, "
-                    "SIGKILL after the grace)")
-            except Exception:  # noqa: BLE001 - a log that cannot be written changes nothing
-                pass
+            halt(target)  # before any log line (and the line itself never blocks: queued)
+            beat_log("[syncer service] the lock is no longer this service's: the syncer is stopped (SIGTERM, "
+                     "SIGKILL after the grace)")
 
-    beat = Heartbeat(lock.objects, host, kid, lock=lock, generation=lock.token, node=node, every_s=beat_s, log=log,
+    beat = Heartbeat(lock.objects, host, kid, lock=lock, generation=lock.token, node=node, every_s=beat_s, log=beat_log,
                      stop_grace_s=stop_grace_s, poll_s=poll_s, call_s=call_s, on_fence=fence)
     # the main path from the start of the syncer on (its records, the STOP reads): the heartbeat's
     # client through a channel of its own, so no store call holds it past call_s after a fence
+    def lease_floor_s() -> float:
+        """The lease the main thread needs left to start, restart or record a syncer: the
+        lock's margin, a poll until serve sees a fence, and the syncer's stop (the grace)."""
+        return float(lock.margin_s) + beat.poll_s + beat.stop_grace_s
+
     def lost_now() -> str | None:
-        return beat.lost if beat.lost is not None else ("the service is fenced" if fenced.is_set() else None)
+        """Why the main thread may no longer start, restart or record the syncer: the lock is
+        lost, the service is fenced, or the lease left is at or below :func:`lease_floor_s`
+        (the heartbeat is stuck: the main thread fences, and the syncer is stopped now)."""
+        if beat.lost is not None:
+            return beat.lost
+        if fenced.is_set():
+            return "the service is fenced"
+        left = lock.lease_left()
+        if left > lease_floor_s():
+            return None
+        beat.fence_here(f"the service lock's lease has {left:.0f}s left (the margin, a poll and the syncer's stop "
+                        f"need {lease_floor_s():.0f}s) and the heartbeat did not fence: fenced by the main thread")
+        return beat.lost or "the service is fenced"
 
     main_store = BoundedStore(lock.objects, CallChannel(beat.call_s), token=lock.token, lost=lost_now)
     syncer, code, reason, final = None, 1, None, None
@@ -1386,24 +1464,29 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
                 """The restart in two steps, the fence checked around each: once fenced, no syncer
                 is started again, and one started meanwhile is stopped at once (the fence itself
                 never waits for this)."""
-                if fenced.is_set():
-                    raise RuntimeError("the syncer service is fenced: its syncer is not started again")
+                why = lost_now()
+                if why:
+                    raise RuntimeError(f"the syncer service is fenced ({why}): its syncer is not started again")
                 if getattr(syncer, "terminate", None) is None:
                     restart()
                 else:
                     syncer.terminate()
-                    if fenced.is_set():
-                        raise RuntimeError("the syncer service is fenced: its syncer is not started again")
+                    why = lost_now()
+                    if why:
+                        raise RuntimeError(f"the syncer service is fenced ({why}): its syncer is not started again")
                     syncer.start()
-                if fenced.is_set():  # fenced while it started: the fence may have stopped the old one only
+                why = lost_now()
+                if why:  # fenced while it started: the fence may have stopped the old one only
                     halt(syncer)
-                    raise RuntimeError("the syncer service was fenced while its syncer started: stopped again")
+                    raise RuntimeError(f"the syncer service was fenced while its syncer started ({why}): stopped "
+                                       "again")
 
             syncer.restart = guarded_restart
         running["syncer"] = syncer
         beat.start()  # starting: no island dials it until its record is written
-        syncer.start()
-        if fenced.is_set():  # fenced before the syncer was up: never left running
+        if lost_now() is None:
+            syncer.start()
+        if lost_now() is not None:  # fenced before the syncer was up: never left running
             halt(syncer)
         for hook in ("start_log_forwarder", "start_store_upload"):
             method = getattr(syncer, hook, None)
@@ -1419,12 +1502,9 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
                     Path(fresh_path).unlink(missing_ok=True)
 
         def stopped() -> str | None:
-            if beat.lost is not None:
-                return beat.lost
-            if lock.lease_left() <= lock.margin_s:  # the beat thread is gone or stuck: the main thread fences
-                beat.fence_here(f"the service lock's lease has {lock.lease_left():.0f}s left (its margin is "
-                                f"{lock.margin_s:.0f}s) and the heartbeat did not fence: fenced by the main thread")
-                return beat.lost
+            why = lost_now()  # the beat thread gone or stuck: the main thread fences before the floor
+            if why:
+                return why
             try:
                 doc = fleet_syncer.read_onsite_stop(main_store)
             except Exception:  # noqa: BLE001 - read again at the next poll (cut off after call_s)
@@ -1453,5 +1533,6 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
         # the final heartbeat, then the release (the next service need not wait for the lease), after
         # the calls in flight; another holder's lease is not ours to end
         beat.finish(final, reason, release=beat.lost_code != LOCK_LOST_EXIT)
+        beat_log.flush(beat.call_s)  # the beat thread's lines before the end's (bounded: a log that hangs)
     log(f"[syncer service] ended: exit {code}" + (f" ({reason})" if reason else ""))
     return code

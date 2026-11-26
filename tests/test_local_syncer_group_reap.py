@@ -121,3 +121,47 @@ def test_restart_rearms_reaping(tmp_path):
     finally:
         syncer.stop()
     assert syncer.proc.poll() is not None
+
+
+def test_a_stop_while_a_start_runs_never_signals_the_reaped_group(tmp_path, monkeypatch):
+    """L5: the old process is reaped (its process group id may be reused). A stop from another
+    thread (an on-site service's fence) while start() is inside its Popen signals nothing of
+    the old group, and the new process is not taken as reaped."""
+    import threading
+
+    from yeto.launch import local_syncer as ls
+
+    syncer = _make(tmp_path, "exec sleep 30")
+    syncer.stop_grace_s, syncer.env = 1.0, None
+    old = subprocess.Popen(["true"], start_new_session=True)
+    old.wait()
+    syncer.proc, syncer._reaped = old, True
+    entered, go = threading.Event(), threading.Event()
+    real_popen, real_killpg = subprocess.Popen, os.killpg
+    signalled = []
+
+    def popen(*args, **kwargs):
+        entered.set()
+        go.wait(10)
+        return real_popen(*args, **kwargs)
+
+    def killpg(pid, sig):
+        signalled.append((pid, sig))
+        return real_killpg(pid, sig)
+
+    monkeypatch.setattr(ls.subprocess, "Popen", popen)
+    monkeypatch.setattr(ls.os, "killpg", killpg)
+    starting = threading.Thread(target=syncer.start)
+    starting.start()
+    try:
+        assert entered.wait(10)
+        syncer._stop_tree()  # another thread's stop, while the start is inside Popen
+        assert all(pid != old.pid for pid, _ in signalled), signalled
+    finally:
+        go.set()
+        starting.join(10)
+    try:
+        assert syncer.proc is not old and syncer._reaped is False
+    finally:
+        syncer._stop_tree()
+    assert syncer._reaped is True and syncer.proc.poll() is not None
