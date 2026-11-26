@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -239,6 +241,76 @@ def node_usd_h(provider: str, gpu: Any, gpus: Any, *, spot: bool | None = None, 
         return None
     row = lookup(provider, gpu, spot=spot, region=region, path=path)
     return None if row is None else row.node_usd_h(float(gpus))
+
+
+CATALOG_FRESH_S = 24 * 3600  # an older local catalog file is still read, and its date said
+# clouds whose sky catalog prices a GPU apart from its host VM (a GPU row has no instance type
+# and its price is the card's only): a whole node's price is not read from those rows
+CATALOG_SPLIT_PRICES = {"gcp": "sky's GCP catalog lists GPU and host VM prices on separate rows; not combined here"}
+
+
+def catalog_node_usd_h(cloud: str, gpu: Any, gpus_per_node: Any, *, region: str | None = None,
+                       instance_type: str | None = None, catalog_path: str | None = None) -> tuple[float | None, str]:
+    """USD per hour of one node from the local sky catalog file (``<cloud>/vms.csv``), at its
+    ON-DEMAND list price (a spot node bills no more than that): ``instance_type``'s when
+    named, else the dearest instance the file lists for ``gpus_per_node`` x ``gpu`` (sky picks
+    among them by the task's CPU and memory, which a price recorded before the launch does
+    not know: never under). For a machine without a billing row in the price table.
+
+    Only the file already on disk is read, as CSV: sky's catalog functions are not called,
+    because on a stale file they download a fresh one (no timeout) and AWS's look up zone
+    mappings with the host's credentials; a launch must not wait on that. A file older than
+    :data:`CATALOG_FRESH_S` is still read, and the note gives its date. Only whole-machine rows
+    (with an instance type) count; a cloud that prices GPUs apart from their host VM
+    (:data:`CATALOG_SPLIT_PRICES`) is not priced here. ``(None, why)`` when there is no file, it
+    is unreadable or lists nothing for the machine; never raises. ``catalog_path``: the file
+    (default: sky's path for ``cloud``)."""
+    import csv  # noqa: PLC0415
+
+    split = CATALOG_SPLIT_PRICES.get(str(cloud).lower())
+    if split is not None:  # a card's price alone would bill the node low
+        return None, split
+
+    want = instance_type or f"{gpus_per_node}x{gpu}"
+    where = f" in {region}" if region else ""
+    try:
+        if catalog_path is None:
+            from sky.catalog import common  # noqa: PLC0415 - optional; only its path rule (no fetch)
+
+            catalog_path = common.get_catalog_path(f"{str(cloud).lower()}/vms.csv")
+        mtime = os.stat(catalog_path).st_mtime
+    except OSError:
+        return None, f"no local sky catalog for {cloud}"
+    except Exception as error:  # noqa: BLE001 - sky not installed or its path rule failed
+        return None, f"no sky catalog ({type(error).__name__})"
+    try:
+        count = None if instance_type else float(gpus_per_node)
+        costs = []
+        with open(catalog_path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if not row["InstanceType"]:  # a GPU priced apart from its host VM: not a node's price
+                    continue
+                if region and row["Region"] != region:
+                    continue
+                if instance_type:
+                    if row["InstanceType"] != instance_type:
+                        continue
+                elif (str(row["AcceleratorName"]).lower() != str(gpu).lower()
+                      or not row["AcceleratorCount"] or float(row["AcceleratorCount"]) != count):
+                    continue
+                if row["Price"]:
+                    costs.append((float(row["Price"]), row["InstanceType"]))
+    except Exception as error:  # noqa: BLE001 - a malformed file (columns, numbers): unpriced, said
+        return None, f"unreadable sky catalog for {cloud} ({type(error).__name__})"
+    if not costs:
+        return None, (f"sky catalog has no on-demand price for {instance_type}{where}" if instance_type
+                      else f"sky catalog has no {want} instance on {cloud}{where}")
+    usd, name = max(costs)
+    note = (f"sky catalog on-demand price of {instance_type}{where}" if instance_type
+            else f"sky catalog on-demand price of the dearest {want} instance ({name}){where}")
+    if time.time() - mtime > CATALOG_FRESH_S:
+        note += f"; local catalog file of {time.strftime('%Y-%m-%d', time.gmtime(mtime))}, not refreshed here"
+    return usd, note
 
 
 def host(provider: str, *, path: str | None = None) -> HostPrice | None:
