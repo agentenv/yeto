@@ -712,13 +712,19 @@ class SshIslandOps:
     # -- node health ------------------------------------------------------------------
     def _health_reading(self, rec: _Island, rank: int, reading: Any) -> None:
         """One node's health check: its event (``node_health`` when it turns lost,
-        ``node_health_read_failed`` when reads start failing), and a lost node's handling."""
+        ``node_health_read_failed`` when reads start failing, ``node_health_fm_restarted`` at
+        each check of a fabric manager restart streak), and a lost node's handling."""
         node = rec.spec.nodes[rank].name
         base = {"node": node, "rank": rank, "incarnation": rec.incarnation}
         if reading.degraded:  # once per node: what its check cannot judge
             rec.health_events.append({"event": node_health.EVENT_DEGRADED, **base, "reasons": list(reading.degraded)})
             self.log(f"[launcher] {rec.name}: {node_health.EVENT_DEGRADED}: rank {rank} ({node}): "
                      f"{'; '.join(reading.degraded)}")
+        if reading.fm_restarted:  # every check of a fabric manager restart streak
+            fields = reading.fm_restarted_fields()
+            rec.health_events.append({"event": node_health.EVENT_FM_RESTARTED, **base, **fields})
+            self.log(f"[launcher] {rec.name}: {node_health.EVENT_FM_RESTARTED}: rank {rank} ({node}) "
+                     f"streak {fields.get('streak')}: {'; '.join(fields.get('reasons') or [])}")
         if reading.event is not None:
             rec.health_events.append({"event": reading.event, **base, **node_health.event_fields(reading)})
             self.log(f"[launcher] {rec.name}: {reading.event}: rank {rank} ({node}) {reading.verdict}: "

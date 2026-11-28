@@ -264,6 +264,10 @@ class NodeRuntime:
             self.log(f"{self.assignment.ticket}: health record not written: {error}")
         if reading.degraded:
             self.log(f"{self.assignment.ticket}: {node_health.EVENT_DEGRADED}: {'; '.join(reading.degraded)}")
+        if reading.fm_restarted:
+            fields = reading.fm_restarted_fields()
+            self.log(f"{self.assignment.ticket}: {node_health.EVENT_FM_RESTARTED}: streak {fields.get('streak')}: "
+                     f"{'; '.join(fields.get('reasons') or [])}")
         if reading.event is not None:
             self.log(f"{self.assignment.ticket}: {reading.event}: {reading.verdict} "
                      f"{'; '.join(reading.result.reasons) or '-'}")
