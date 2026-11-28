@@ -328,6 +328,77 @@ def test_directory_store_skips_staged_files(tmp_path):
     assert store.list("a/") == ["a/y.json"]
 
 
+def _deleted_after_the_check(monkeypatch, victim):
+    """``Path.is_file`` answers True for ``victim``, then the file is deleted (a concurrent
+    delete between the check and the read)."""
+    import pathlib
+
+    real = pathlib.Path.is_file
+
+    def is_file(self):
+        ok = real(self)
+        if ok and self == victim:
+            victim.unlink()
+        return ok
+
+    monkeypatch.setattr(pathlib.Path, "is_file", is_file)
+
+
+@pytest.mark.parametrize("op", ["read", "size", "read_file"])
+def test_directory_store_reads_a_key_deleted_after_its_check_as_missing(tmp_path, monkeypatch, op):
+    store = DirectoryObjectStore(tmp_path / "s")
+    store.write("fleet/nodes/b300-1/quarantine.json", b"{}")
+    _deleted_after_the_check(monkeypatch, tmp_path / "s" / "fleet/nodes/b300-1/quarantine.json")
+    if op == "read":
+        assert store.read("fleet/nodes/b300-1/quarantine.json") is None
+    elif op == "size":
+        assert store.size("fleet/nodes/b300-1/quarantine.json") is None
+    else:
+        target = tmp_path / "out.json"
+        assert store.read_file("fleet/nodes/b300-1/quarantine.json", target) is False
+        assert not target.exists() and not list(tmp_path.glob("out.json*"))
+
+
+def test_directory_store_read_file_into_a_missing_directory_still_raises(tmp_path):
+    store = DirectoryObjectStore(tmp_path / "s")
+    store.write("k.json", b"{}")
+    with pytest.raises(FileNotFoundError):
+        store.read_file("k.json", tmp_path / "no" / "such" / "out.json")
+
+
+def test_directory_store_lists_past_a_directory_removed_while_listed(tmp_path, monkeypatch):
+    import os
+    import shutil
+
+    store = DirectoryObjectStore(tmp_path)
+    store.write("fleet/nodes/b300-1/settled/m.json", b"1")
+    store.write("fleet/nodes/b300-2/quarantine.json", b"1")
+    real = os.scandir
+
+    removed = []
+
+    def scandir(path="."):
+        if not isinstance(path, int) and not removed and os.fspath(path) == os.fspath(tmp_path / "fleet/nodes/b300-1"):
+            removed.append(path)
+            shutil.rmtree(path)  # removed between its parent's listing and its own
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    assert store.list("fleet/nodes/") == ["fleet/nodes/b300-2/quarantine.json"] and removed
+
+
+def test_directory_store_lists_nested_keys_and_skips_directory_symlinks(tmp_path):
+    store = DirectoryObjectStore(tmp_path / "s")
+    for key in ("a/b/c.json", "a/d.json", "e.json"):
+        store.write(key, b"1")
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "x.json").write_bytes(b"1")
+    (tmp_path / "s" / "a" / "link").symlink_to(tmp_path / "other", target_is_directory=True)
+    assert store.list("") == ["a/b/c.json", "a/d.json", "e.json"]
+    assert store.list("a/") == ["a/b/c.json", "a/d.json"]
+    assert store.list("a/b") == ["a/b/c.json"]
+
+
 # ---------------------------------------------------------------- sample buffer
 def _add(buf, sample_id, version):
     ref = buf.write_payload(sample_id, sample_id.encode())

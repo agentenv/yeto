@@ -176,7 +176,12 @@ class DirectoryObjectStore:
 
     def read(self, key: str) -> bytes | None:
         path = self._path(key)
-        return path.read_bytes() if path.is_file() else None
+        if not path.is_file():
+            return None
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:  # deleted since the check (a concurrent delete): missing
+            return None
 
     def write(self, key: str, data: bytes) -> None:
         path = self._path(key)
@@ -198,7 +203,12 @@ class DirectoryObjectStore:
 
     def size(self, key: str) -> int | None:
         path = self._path(key)
-        return path.stat().st_size if path.is_file() else None
+        if not path.is_file():
+            return None
+        try:
+            return path.stat().st_size
+        except FileNotFoundError:  # deleted since the check: missing
+            return None
 
     def write_file(self, key: str, source: str | os.PathLike[str]) -> None:
         path = self._path(key)
@@ -211,7 +221,12 @@ class DirectoryObjectStore:
         if not path.is_file():
             return False
         part = f"{target}{DOWNLOAD_SUFFIX}"
-        shutil.copyfile(path, part)
+        try:
+            shutil.copyfile(path, part)
+        except FileNotFoundError:
+            if os.path.lexists(path):  # the target's directory, not the key, is missing
+                raise
+            return False  # deleted since the check: missing
         os.replace(part, target)
         return True
 
@@ -219,8 +234,10 @@ class DirectoryObjectStore:
         base = self.root / prefix.rsplit("/", 1)[0] if "/" in prefix else self.root
         if not base.is_dir():
             return []
-        keys = (p.relative_to(self.root).as_posix() for p in base.rglob("*")
-                if p.is_file() and not p.name.endswith(TMP_SUFFIX))
+        # os.walk skips a directory removed while it is listed (rglob raised FileNotFoundError);
+        # it does not follow directory symlinks either
+        keys = (Path(top, name).relative_to(self.root).as_posix() for top, _dirs, files in os.walk(base)
+                for name in files if Path(top, name).is_file() and not name.endswith(TMP_SUFFIX))
         return sorted(k for k in keys if k.startswith(prefix) and k > start_after)
 
     def list_page(self, prefix: str, *, start_after: str = "", limit: int = 1000) -> tuple[list[str], str | None]:
