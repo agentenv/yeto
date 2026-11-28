@@ -352,6 +352,7 @@ def test_launcher_keeps_the_log_of_this_run_and_its_check(tmp_path, monkeypatch,
     home = tmp_path / "home"
     (home / "yeto-output").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("YETO_LOCAL_OUTPUT_DIR")  # the default: this machine's ~/yeto-output
     now = time.time()
     old = {"kind": "dispense_open", "island_id": 0, "incarnation": "aa", "rows": 4, "time_unix": now - 7200}
     records = [

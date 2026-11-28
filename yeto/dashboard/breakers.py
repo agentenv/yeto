@@ -25,6 +25,7 @@ import functools
 import json
 import math
 import os
+import re
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable
@@ -241,6 +242,11 @@ def _trip_row(r: dict, ts: float | None, *, legacy: str | None = None, name: str
             "config_source": r.get("config_source")}
 
 
+def _natural(value: Any) -> tuple:
+    """Sort key of ``value``'s text with its digit runs as numbers (``island 2`` < ``island 10``)."""
+    return tuple((0, int(part), "") if part.isdigit() else (1, 0, part)
+                 for part in re.split(r"(\d+)", str(value)) if part)
+
 class BreakerState:
     """What the reducer folded about breakers (module doc)."""
 
@@ -309,8 +315,10 @@ class BreakerState:
         ``drop_rounds``: the rounds of the window that dropped anything."""
         out: dict[str, dict] = {}
         # In a fixed order: of two scopes with the same ratio the first one is reported, so a
-        # set's order (string hashes, PYTHONHASHSEED) must not pick it.
-        keys = sorted(set(self.rounds) | set(self._open), key=lambda key: (str(key[0]), tuple(map(str, key[1]))))
+        # set's order (string hashes, PYTHONHASHSEED) must not pick it. Numbers in numeric
+        # order: island 2 before island 10.
+        keys = sorted(set(self.rounds) | set(self._open),
+                      key=lambda key: (_natural(key[0]), tuple(_natural(part) for part in key[1])))
         for name, scope in keys:
             rows = list(self.rounds.get((name, scope)) or ())
             cur = self._open.get((name, scope))

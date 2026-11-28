@@ -539,7 +539,7 @@ import sys
 from yeto.dashboard.reducer import Reducer
 
 r = Reducer()
-for island in (1, 0):
+for island in map(int, sys.argv[1:]):
     for i in range(12):
         t = 1_790_000_000.0 + 60 * i
         r.feed({"event": "rl_buffer_stale_skipped", "island_id": island, "time_unix": t, "rollout_id": i,
@@ -557,10 +557,19 @@ def test_two_islands_with_the_same_drop_rate_name_the_same_island_under_any_hash
     root = Path(__file__).resolve().parent.parent
     scopes = set()
     for seed in range(8):
-        out = subprocess.run([sys.executable, "-c", TIED_ISLANDS], cwd=root, check=True, capture_output=True,
-                             text=True, env={**os.environ, "PYTHONHASHSEED": str(seed), "PYTHONPATH": str(root)})
+        out = subprocess.run([sys.executable, "-c", TIED_ISLANDS, "1", "0"], cwd=root, check=True,
+                             capture_output=True, text=True,
+                             env={**os.environ, "PYTHONHASHSEED": str(seed), "PYTHONPATH": str(root)})
         scopes.add(out.stdout.strip())
     assert scopes == {"island 0"}
+
+
+def test_of_two_islands_with_the_same_drop_rate_the_lower_number_is_named():
+    """Island ids in numeric order, not as text: island 2 before island 10."""
+    root = Path(__file__).resolve().parent.parent
+    out = subprocess.run([sys.executable, "-c", TIED_ISLANDS, "10", "2"], cwd=root, check=True,
+                         capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(root)})
+    assert out.stdout.strip() == "island 2"
 
 
 def test_drop_rate_warning_and_window():

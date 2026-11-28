@@ -82,3 +82,34 @@ def test_a_child_that_names_the_real_yeto_output_is_refused(tmp_path, monkeypatc
     assert len(guard._state["violations"]) == 3
     with pytest.raises(PermissionError):  # past a wrapper, the shell still runs it here
         subprocess.run(["timeout", "60", "bash", "-c", f"echo {command}"], check=True)
+
+
+def test_a_local_file_tool_that_writes_the_real_yeto_output_by_absolute_path_is_refused(tmp_path, monkeypatch):
+    import subprocess
+
+    home = tmp_path / "home"
+    output = home / guard.OUTPUT_DIR
+    monkeypatch.setitem(guard._state, "guarded", (str(home / ".yeto"), str(output)))
+    monkeypatch.setitem(guard._state, "violations", [])
+    source = tmp_path / "tape.jsonl"
+    source.write_text("{}\n")
+    for argv in (["mkdir", "-p", str(output)],
+                 ["cp", str(source), f"{output}/yeto-tape.jsonl"],
+                 ["rsync", "-a", f"{source}", f"{output}/"],
+                 ["/bin/mkdir", str(output / "sub")],
+                 ["timeout", "30", "cp", str(source), str(output)],
+                 ["dd", f"if={source}", f"of={output}/x"],
+                 ["install", "-D", f"--target-directory={output}", str(source)]):
+        with pytest.raises(PermissionError, match="real ~/yeto-output"):
+            subprocess.run(argv, check=True)
+    assert len(guard._state["violations"]) == 7 and not output.exists()
+    # the same tools on paths of the test, of another machine, or a name that only starts the same
+    subprocess.run(["mkdir", "-p", str(tmp_path / "out" / guard.OUTPUT_DIR)], check=True)
+    subprocess.run(["cp", str(source), str(tmp_path / "out" / guard.OUTPUT_DIR)], check=True)
+    subprocess.run(["mkdir", "-p", f"{output}s"], check=True)
+    rsync = tmp_path / "rsync"  # a fake: the remote side of the copy is the node's
+    rsync.write_text("#!/bin/sh\nexit 0\n")
+    rsync.chmod(0o755)
+    subprocess.run([str(rsync), "-az", f"node:{output}/", str(tmp_path / "copy")], check=True)
+    subprocess.run([str(rsync), "-az", str(source), f"node:{output}/"], check=True)
+    assert len(guard._state["violations"]) == 7 and not output.exists()

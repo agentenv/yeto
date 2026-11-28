@@ -70,6 +70,10 @@ OUTPUT_DIR = "yeto-output"  # a node's ~/yeto-output (yeto.launch.syncer, rl_isl
 _HOME_OUTPUT = re.compile(r"(?:^|(?<=[\s='\"]))(?:~|\$HOME|\$\{HOME\})/" + OUTPUT_DIR + r"(?![\w.-])")
 # the children that run a command line on this machine: a shell, Python, the syncer
 _LOCAL_RUNNERS = re.compile(r"^(?:ba|z|da|k)?sh$|^python[\d.]*$|^yeto-syncer")
+# the file tools that write a path of this machine given as an argument (``rsync``: one
+# without ``host:``); ``~`` in their argv is not expanded, so only an absolute path counts
+_FILE_TOOLS = frozenset({"cp", "mv", "rsync", "mkdir", "install", "ln", "touch", "tee", "dd", "tar", "rm",
+                         "ditto"})
 
 _state: dict = {"root": None, "owned": False, "guarded": (), "snapshot": {}, "violations": [],
                 "test": "<collection>", "installed": False}
@@ -183,8 +187,11 @@ def _program(words: list[str]) -> str:
 def child_output(args, env, *, shell: bool = False) -> str | None:
     """The real ~/yeto-output that a child's command line names (``args``, ``env`` and
     ``shell`` as given to ``subprocess.Popen``; ``env`` None: this process's), or None.
-    Only a child that runs it here counts (a shell, Python, the syncer): an ``ssh`` or
-    ``rsync`` argument names a path of another machine."""
+    Only a child that runs it here counts (a shell, Python, the syncer): an ``ssh``
+    argument names a path of another machine. A file tool (``cp``, ``rsync``, ``mkdir``
+    ...) counts when an argument is an absolute path in the real ~/yeto-output (an
+    option's value too: ``--log-file=...``, ``of=...``); ``node:/...`` is another
+    machine's."""
     outputs = [root for root in _state["guarded"] if os.path.basename(root) == OUTPUT_DIR]
     if not outputs:
         return None
@@ -197,7 +204,15 @@ def child_output(args, env, *, shell: bool = False) -> str | None:
         except TypeError:
             return None
         text = " ".join(words)
-    if not shell and not _LOCAL_RUNNERS.search(_program(words)):
+    program = _program(words)
+    if not shell and program in _FILE_TOOLS:
+        for word in words:
+            path = word.split("=", 1)[1] if "=" in word and not word.startswith(os.sep) else word
+            for root in outputs:
+                if path == root or path.startswith(root + os.sep):
+                    return root
+        return None
+    if not shell and not _LOCAL_RUNNERS.search(program):
         return None
     for root in outputs:
         if re.search(re.escape(root) + r"(?![\w.-])", text):
