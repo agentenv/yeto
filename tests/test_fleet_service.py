@@ -93,6 +93,11 @@ def test_an_ipv6_syncer_service_in_brackets_is_taken(tmp_path, host):
     ({"syncer_service": "::1]"}, "IPv6 address in brackets"),
     ({"syncer_service": "[::1]:29400"}, "without a port"),
     ({"syncer_service": "[10.0.0.5]"}, "IPv6 address in brackets"),
+    ({"syncer_service": "[:]"}, "IPv6 address in brackets"),
+    ({"syncer_service": "[.:.]"}, "IPv6 address in brackets"),
+    ({"syncer_service": "a..b"}, "IPv6 address in brackets"),
+    ({"syncer_service": "a-"}, "IPv6 address in brackets"),
+    ({"syncer_service": "-a"}, "IPv6 address in brackets"),
     ({"syncer_service": "host name"}, "without a port"),
     ({"syncer_service": 5}, "without a port"),
 ])
@@ -1689,6 +1694,39 @@ def test_the_main_thread_s_floor_is_the_margin_a_poll_the_stop_and_a_call(tmp_pa
                   serve=serve, parse=_prepared, node="site-s", workdir=str(tmp_path / "work"), log=lambda m: None,
                   clock=lambda: time.time() + moved[0], monotonic=lambda: time.monotonic() + moved[0])
     assert (seen["stopped"] is not None and "fenced by the main thread" in seen["stopped"]) is fences, seen
+
+
+def test_the_first_lease_counts_from_before_the_acquire(tmp_path, monkeypatch):
+    """L-1: the monotonic side of the first lease counts from before the acquire: 100 s spent
+    inside it (a slow store) are already gone from the lease."""
+    import time
+
+    from yeto.launch.pool import store_lock
+
+    monkeypatch.setattr(fs.Heartbeat, "_loop", lambda self: self._stop.wait())
+    grace, call_s = fs.SYNCER_STOP_GRACE_S, fleet_syncer.HEARTBEAT_CALL_S
+    ttl = fs.service_lock_ttl_s(grace, fleet_syncer.SERVICE_BEAT_S, poll_s=fleet_syncer.POLL_S, call_s=call_s)
+    floor = min(60.0, ttl * 0.1) + fleet_syncer.POLL_S + grace + call_s
+    moved, seen = [0.0], {}
+    real_acquire = store_lock.StoreLock.acquire.__func__
+
+    def acquire(cls, *args, **kwargs):
+        moved[0] += 100.0  # the acquire took 100 s (monotonic)
+        return real_acquire(cls, *args, **kwargs)
+
+    monkeypatch.setattr(store_lock.StoreLock, "acquire", classmethod(acquire))
+
+    def serve(args, addr, n, *, clusters, head_mode, local_syncer, record_extra, on_record, stopped, early_finish,
+              **kw):
+        moved[0] = 100.0 + ttl - (floor + 50.0)  # from the acquire's end: floor + 50 left; from before it: floor - 50
+        seen["stopped"] = stopped()
+        return 9
+
+    monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "state")
+    fs.run_syncer(str(onsite_config(tmp_path)), objects=DirectoryObjectStore(tmp_path / "store"),
+                  make_syncer=lambda args, n: FakeSyncer(), serve=serve, parse=_prepared, node="site-s",
+                  workdir=str(tmp_path / "work"), log=lambda m: None, monotonic=lambda: time.monotonic() + moved[0])
+    assert seen["stopped"] is not None and "fenced by the main thread" in seen["stopped"], seen
 
 
 @pytest.mark.parametrize("first", ["main", "beat"])

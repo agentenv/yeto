@@ -132,7 +132,9 @@ FLEET_KEYS = frozenset({"trainer_argv", "dispense", "step_s", "sandbox_usd_per_h
 # fleet.syncer_service: the host of an on-site syncer run as a service (``yeto fleet service``):
 # a host name or IPv4 address, or an IPv6 address in brackets ([addr]), the islands dial, no
 # port (the syncer's ports are its own; "host:port" is built from it)
-SYNCER_SERVICE_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*\]")
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+_IPV6 = r"(?=[0-9A-Fa-f:.]*[0-9A-Fa-f])(?:[0-9A-Fa-f]{0,4}:){2,7}(?:[0-9A-Fa-f]{1,4}|\d{1,3}(?:\.\d{1,3}){3})?"
+SYNCER_SERVICE_HOST = re.compile(rf"{_LABEL}(?:\.{_LABEL})*|\[{_IPV6}\]")
 DEFAULT_MIN_ISLANDS = 1
 # fleet.waiting_absent_after_s: an island waiting for a spare node (a resident ssh: island
 # that lost a node, yeto.launch.island_spares) counts as running for fleet.min_islands this

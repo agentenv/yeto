@@ -1148,7 +1148,8 @@ Name the syncer's host in the run config:
 
 `fleet.syncer_service` is the host name or address the islands dial, without a port (the
 syncer listens on its own ports, 29400 and up). An IPv6 address goes in brackets
-(`"[fd00::5]"`); a bare one, or brackets that do not pair, are refused. With it:
+(`"[fd00::5]"`); a bare one, or brackets that do not pair, are refused, and so are
+host names with empty or dash-edged labels (`a..b`, `a-`). With it:
 
 - the **syncer service** (`yeto fleet service-run --role syncer`, what the unit runs) runs the
   fleet's syncer on that host. A syncer process that dies is started again at once and resumes
