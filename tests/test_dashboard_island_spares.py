@@ -7,6 +7,7 @@ health checks (every customer run) carries no new field at all."""
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import subprocess
@@ -564,14 +565,16 @@ HOUR = 3600.0
 
 
 def _long_wait(tmp_path, waited: float, *, report_age: float = 60.0, plan_absent: float | None = None,
-               max_wait: float | None = None):
+               max_wait: float | None = None, poll: float | None = None):
     """Island 1 waiting ``waited`` seconds for a spare node at the page's time, its record written
     ``report_age`` seconds before it; its tape silent for an hour."""
     end = reducer().max_ts
     now = end + HOUR
     r = reducer(lost(now - 10), ev("island_lost", now - 5, reason=LOST), waiting(now, elapsed=waited))
-    if plan_absent is not None:
-        assert r.load_fleet_plan({**plan_doc(), "roster": {"waiting_absent_after_s": plan_absent}}, "test")
+    roster = {**({"waiting_absent_after_s": plan_absent} if plan_absent is not None else {}),
+              **({"controller_poll_s": poll} if poll is not None else {})}
+    if roster:
+        assert r.load_fleet_plan({**plan_doc(), "roster": roster}, "test")
     doc = spares_doc(lost=["gpu-d"], waiting_spare=True, wait_reason=WAIT, waiting_since=now - waited,
                      **({"max_wait_s": max_wait} if max_wait is not None else {}))
     assert r.load_fleet_state(store_state(tmp_path / "s", "recovering", spares=doc, updated=now - report_age))
@@ -601,7 +604,8 @@ def test_a_wait_past_spare_max_wait_s_reads_lost(tmp_path, max_wait):
     assert not c["spares"]["waiting"] and c["spares"]["wait_state"]["state"] == "expired"
     assert c["island_now"]["state"] == "lost" and c["status"] in ("lost", "stale")
     out = smoke(tmp_path / "p", r)
-    assert out["dashed"] >= 1 and "lost" in out["texts"]  # drawn as a lost trainer again
+    assert out["dashed"] >= 1 and "lost" in out["texts"] and "unknown" not in out["texts"]  # a lost trainer again
+    assert any(t.startswith("lost · no event for 1h0m") for t in out["texts"])  # the phase, against the same time
     assert not any(t.startswith("waiting for a spare node ·") for t in out["texts"])  # no wait phase
     assert any("past --spare-max-wait-s" in t for t in out["texts"]) and "past --spare-max-wait-s" in out["nodes"]
     assert out["roster"] == "--bad"  # a loss, not a wait
@@ -613,7 +617,11 @@ def test_a_wait_no_record_reports_any_more_reads_lost(tmp_path):
     assert not c["spares"]["waiting"] and c["spares"]["wait_state"]["state"] == "frozen"
     assert c["island_now"]["state"] == "unknown"  # nobody says what it is
     out = smoke(tmp_path / "p", r)
-    assert out["dashed"] >= 1 and "lost" in out["texts"] and "no report for 2.0 h" in out["nodes"]
+    # unknown (nobody reports the wait), not lost as past the longest wait: badge, phase and Fragments agree
+    assert out["dashed"] >= 1 and "unknown" in out["texts"] and "lost" not in out["texts"]
+    assert any(t.startswith("unknown · no event for 1h0m") for t in out["texts"])
+    why = "launcher may be gone · no wait report for 2h0m"  # what to act on first, the same duration format
+    assert any(t.startswith(why) for t in out["texts"]) and why in out["nodes"] and why in out["tip"]
     # an hourly report one hour and ten minutes old is still a wait
     ok = _long_wait(tmp_path / "b", 30 * 60, report_age=70 * 60)
     assert cards(ok)["1"]["spares"]["waiting"] and "wait_state" not in cards(ok)["1"]["spares"]
@@ -648,3 +656,55 @@ def test_the_wait_reads_the_same_time_on_card_tip_and_table(tmp_path):
     assert "waiting for a spare node · 1m35s" in out["texts"]  # card
     assert "waiting for a spare</span><span>1m35s · " in out["tip"]  # its tip
     assert "waiting spare 1m35s" in out["nodes"]  # Islands now
+
+
+def test_a_slow_controller_poll_is_no_unreported_wait(tmp_path):
+    """--controller-poll 1500 s (from the plan): a report lands up to two polls late (3600 + 2 x 1500 + 600 s)."""
+    ok = _long_wait(tmp_path, 2 * HOUR, report_age=HOUR + 2 * 1500 + 500, poll=1500.0)
+    assert cards(ok)["1"]["spares"]["waiting"] and cards(ok)["1"]["spares"].get("wait_state") == {"state": "absent"}
+    late = _long_wait(tmp_path / "b", 2 * HOUR, report_age=HOUR + 2 * 1500 + 700, poll=1500.0)
+    assert cards(late)["1"]["spares"]["wait_state"]["state"] == "frozen"
+
+
+@pytest.mark.parametrize("age, frozen", [(fleet_islands.WAIT_FROZEN_S - 1, False), (fleet_islands.WAIT_FROZEN_S + 1, True)])
+def test_the_unreported_wait_boundary(age, frozen):
+    assert fleet_islands.WAIT_FROZEN_S == 3600 + 2 * 30 + 600  # the hourly report, two default polls, 10 min
+    ws = fleet_islands.spare_wait_state(1000.0, 10_000.0, 10_000.0 + age, absent_after_s=1e9)
+    assert (ws is not None and ws["state"] == "frozen") is frozen
+
+
+def test_the_dashboard_constants_are_the_runtime_s():
+    from yeto.cli import build_parser  # noqa: PLC0415
+    from yeto.rl import fleet as rl_fleet  # noqa: PLC0415
+
+    assert fleet_islands.SPARE_MAX_WAIT_S == isp.MAX_WAIT_S
+    assert fleet_islands.SPARE_WAIT_REPORT_S == isp.WAIT_REPORT_S
+    assert fleet_islands.WAITING_ABSENT_AFTER_S == rl_fleet.DEFAULT_WAITING_ABSENT_AFTER_S
+    sub = next(a for a in build_parser()._actions if isinstance(a, argparse._SubParsersAction))  # noqa: SLF001
+    poll = next(a for a in sub.choices["launch"]._actions if "--controller-poll" in a.option_strings)  # noqa: SLF001
+    assert fleet_islands.CONTROLLER_POLL_S == poll.default
+
+
+def test_the_plan_carries_the_controller_poll():
+    from yeto.rl import fleet as rl_fleet  # noqa: PLC0415
+
+    assert rl_fleet.controller_poll_s(["--gpu", "x", "--controller-poll", "1500"]) == 1500.0
+    assert rl_fleet.controller_poll_s(["--controller-poll=90"]) == 90.0 and rl_fleet.controller_poll_s(["--gpu", "x"]) is None
+    plan = fleet_islands.load_plan({**plan_doc(), "roster": {"controller_poll_s": 1500}})
+    assert plan["controller_poll_s"] == 1500.0 and "controller_poll_s" not in fleet_islands.load_plan(plan_doc())
+
+
+def test_an_events_only_wait_takes_its_max_wait_from_its_events(tmp_path):
+    end = reducer().max_ts
+    r = reducer(lost(end + 10), waiting(end + 20, elapsed=3 * HOUR, max_wait_s=2 * HOUR))
+    sp = cards(r)["1"]["spares"]
+    assert sp["source"] == "events" and sp["wait_state"]["state"] == "expired" and "(2 h)" in sp["wait_state"]["why"]
+    assert cards(reducer(lost(end + 10), waiting(end + 20, elapsed=3 * HOUR)))["1"]["spares"]["wait_state"] == {
+        "state": "absent"}  # without it: the default 24 h
+
+
+def test_an_empty_nodes_column_is_not_drawn(tmp_path):
+    r = _long_wait(tmp_path, 30 * HOUR)  # the trainer reads lost: in the ended table, the live one has no reason
+    out = smoke(tmp_path / "p", r)
+    live, _, ended = out["nodes"].partition("<details")
+    assert '<th class="spn">Nodes</th>' not in live and '<th class="spn">Nodes</th>' in ended

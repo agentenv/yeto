@@ -275,10 +275,13 @@ its lost node and why, and its replacements on its card, its tip and an extra
 It is out of the syncer roster while a spare takes a lost node's place (the roster
 in the warning colour). Past `fleet.waiting_absent_after_s` (plan, default 1 h) it
 reads `waiting for a spare node · counts as absent`. A wait past
-`--spare-max-wait-s` (the record's, default 24 h), or one no record or event
-reported for 1 h 12 min (the hourly wait report, two health periods and 10 min), is
-not believed: the island reads lost, as one without spare nodes. Node checks stop on
-purpose while the island recovers, so a check reads stale only while it runs.
+`--spare-max-wait-s` (the record's or its events', default 24 h) is not believed:
+the island reads lost, as one without spare nodes. One no record reported for 1 h +
+2 x `--controller-poll` (from the plan, default 30 s) + 10 min (the hourly wait
+report lands with the controller's next poll) reads unknown: `launcher may be gone`.
+Node checks stop on purpose while the island recovers, so a check reads stale only
+while it runs; right after a relaunch a check may read stale for about 60 s until
+the first new health record lands.
 
 ## Alert rules and thresholds
 

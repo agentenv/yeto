@@ -534,7 +534,7 @@ function spareMark(c){var sp=c.spares;if(spEnded(c))return null;
 // the trainer row's Nodes cell: the reason only ([text, hover, class]) or null
 function spareCell(c){var sp=c.spares,bad=spEnded(c)?[]:c.node_health||[],td=TD(),out=[],tip=[],cls="",ws=spWait(c);
   if(sp&&sp.stopped)return [sp.stopped,sp.stopped,"bd"];
-  if(ws&&ws.state!=="absent"&&!spEnded(c))return [ws.why,ws.why,"bd"];  // a wait not believed: lost or unknown
+  if(ws&&ws.state!=="absent"&&!spEnded(c)){var ot=td&&td.overdueText?td.overdueText(ws,NOW):ws.why;return [ot,ot,"bd"]}  // a wait not believed: lost or unknown
   if(sp&&sp.waiting&&!spEnded(c))return [td?td.whyNoSpare(sp.reason):sp.reason||"no free spare node",sp.reason||"no free spare node","wt"];
   if(bad.length){var h=bad[0],why=function(x){return td?td.healthWhy(x):x.reasons.join("; ")||x.verdict};
     out.push(h.node+": "+why(h)+(bad.length>1?" +"+(bad.length-1):""));
@@ -599,8 +599,9 @@ function rlm(V){
   // a run with a syncer: local step / outer version, last PUSH / BCAST; no HBM column when nothing sampled it
   var dl=typeof YetoTopoD!=="undefined"?YetoTopoD.table(V):null,noHbm=!!dl&&!cs.some(function(c){return fin(hbm(c))});
   var head='<tr><th>Island</th><th>'+(dl?'<span title="local step: this island\'s own steps; outer sweep: every fragment merged at least that many times">Local step / outer sweep</span>':"Round / policy")+'</th><th>Reward</th><th>train-rollout KL</th><th>logprob |diff|</th><th>grad_norm</th><th>Step / round time</th><th>Tokens/s</th>'+(noHbm?"":'<th class="bar">HBM peak</th>')+'<th>'+(dl?"Last PUSH / BCAST applied":"Last release / load")+'</th><th>Shard · incarnation</th></tr>';
-  var spc=cs.some(function(c){return c.role!=="sampler"&&(c.spares||c.node_health)}),nc=(noHbm?9:10)+(spc?1:0);
-  if(spc)head=head.replace("<th>Shard · incarnation</th>",'<th class="spn">Nodes</th><th>Shard · incarnation</th>');
+  // the Nodes column: only in a table one of whose trainers has something to say there
+  var spc=false,nc=noHbm?9:10,head0=head,headSp=head.replace("<th>Shard · incarnation</th>",'<th class="spn">Nodes</th><th>Shard · incarnation</th>');
+  var cols=function(rows){spc=rows.some(function(c){return c.role!=="sampler"&&!!spareCell(c)});nc=(noHbm?9:10)+(spc?1:0);head=spc?headSp:head0;return head};
   var flNa=rlMulti(V);
   var rowOf=function(c){var ex=X[c.id]||{},s=S[c.id],rr=RR(c),r=rr[rr.length-1]||{},liv=rlLive(c.status),h=hbm(c),lim=ex.hbm_total_gib,mx=Math.max(64,fin(lim)?lim*1.15:0),pc=fin(h)?Math.min(100,100*h/mx):0;
       // a resident ssh: island waiting for a spare node or with a lost node: its mark in place of its status; else a
@@ -609,7 +610,7 @@ function rlm(V){
       var sg=liv&&!!(c.island_now&&"straggler" in c.island_now?c.island_now.straggler:c.straggler);
       var sm=c.role!=="sampler"?spareMark(c):null,wr=sm&&c.waiting_reason==="waiting for a spare node"?null:c.waiting_reason;
       var mk=sm||(sg?["straggler","wn","y"]:null);
-      var row='<tr'+(liv?'':' class="off"')+'><td><div class="nn">'+(mk?'<i class="dot '+mk[2]+'" title="'+esc(mk[0])+'"></i>':rlDot(c.status))+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns"'+(mk?' style="white-space:nowrap"':'')+'>'+esc([c.name,c.gpu?c.gpu+" × "+c.cards:null,c.backend_label].filter(Boolean).join(" · ")||"n/a")+' · '+(mk?'<span class="'+mk[1]+'">'+esc(mk[0])+'</span>':esc(c.status))+esc((wr?": "+wr:"")+(c.left?" ("+(c.left.reason||"")+")":"")+(c.starting&&c.startup_stage?": "+c.startup_stage.label+(fin(c.startup_stage.age_s)?" "+dur(c.startup_stage.age_s):"")+(fin(c.startup_s)?" · start "+dur(c.startup_s):""):"")+((c.launches||[]).length>1?" · launch "+(c.launches.length)+" ("+(c.launches.length-1)+" superseded)":""))+'</div></td>';
+      var row='<tr'+(liv?'':' class="off"')+'><td><div class="nn">'+(mk?'<i class="dot '+mk[2]+'" title="'+esc(mk[0])+'"></i>':rlDot(c.status))+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns"'+(!sm&&sg?' style="white-space:nowrap"':'')+'>'+esc([c.name,c.gpu?c.gpu+" × "+c.cards:null,c.backend_label].filter(Boolean).join(" · ")||"n/a")+' · '+(mk?'<span class="'+mk[1]+'"'+(sm?' style="white-space:nowrap"':'')+'>'+esc(mk[0])+'</span>':esc(c.status))+esc((wr?": "+wr:"")+(c.left?" ("+(c.left.reason||"")+")":"")+(c.starting&&c.startup_stage?": "+c.startup_stage.label+(fin(c.startup_stage.age_s)?" "+dur(c.startup_stage.age_s):"")+(fin(c.startup_s)?" · start "+dur(c.startup_s):""):"")+((c.launches||[]).length>1?" · launch "+(c.launches.length)+" ("+(c.launches.length-1)+" superseded)":""))+'</div></td>';
       var hb='<td class="bar"><div class="bl">'+(fin(h)?h.toFixed(1)+" GiB"+(fin(lim)?" of "+lim+" GiB":""):"not sampled")+'</div><div class="bt"><div class="bf'+(liv?"":" idle")+'" style="width:'+pc.toFixed(1)+'%"></div>'+(fin(lim)?'<div class="bm" style="left:'+(100*lim/mx).toFixed(1)+'%"></div>':"")+'</div>'+(fin(h)?"":'<div class="ns" title="'+esc(ex.gpu_mem_note||"")+'">'+(/unavailable/.test(ex.gpu_mem_note||"")?"telemetry library missing":"enable --rl-resource-sample-interval")+'</div>')+'</td>';
       if(noHbm)hb="";
       if(c.role==="sampler"&&s){var sr=s.rounds||[],l=s.last_round||sr[sr.length-1]||{},ld=(A.releases||[]).map(function(x){return (x.loads||{})[c.id]?[x.policy_version,x.loads[c.id]]:null}).filter(Boolean).pop();
@@ -630,9 +631,9 @@ function rlm(V){
     return '<tr class="off"><td><div class="nn">'+rlDot(c.status)+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">'+esc([c.name,c.gpu?c.gpu+" × "+c.cards:null].filter(Boolean).join(" · "))+'</div></td>'+
       '<td colspan="'+nc+'" class="ns" title="'+esc((c.left&&c.left.detail)||"")+'">'+esc(st+(why?": "+why:"")+" · ended before its first round")+'</td></tr>'};
   var rowNa=function(c){if(never(c))return neverRow(c);var h=rowOf(c);return flNa?h.replace(/(<[^>]*>)|\bn\/a\b/g,function(m,tag){return tag||'<span class="note" title="not on this island\'s tapes">—</span>'}):h};
-  $("rNodes").innerHTML=(liveC.length?'<table class="nt">'+head+liveC.map(rowNa).join("")+'</table>':'<div class="empty">no active island</div>')+
-    (endC.length?'<details class="ended"'+(liveC.length?"":" open")+'><summary class="ns">'+endC.length+' island(s) that ended (left / lost / finished / stopped): '+esc(endC.map(function(c){return c.label+" "+c.status}).join(", "))+'</summary><table class="nt">'+head+endC.map(rowNa).join("")+'</table></details>':"")+
-    (unk.length?'<details class="ended"><summary class="ns">'+unk.length+' unrecognized tape(s)</summary><table class="nt">'+unk.map(unkRow).join("")+'</table></details>':"");
+  $("rNodes").innerHTML=(liveC.length?'<table class="nt">'+cols(liveC)+liveC.map(rowNa).join("")+'</table>':'<div class="empty">no active island</div>')+
+    (endC.length?'<details class="ended"'+(liveC.length?"":" open")+'><summary class="ns">'+endC.length+' island(s) that ended (left / lost / finished / stopped): '+esc(endC.map(function(c){return c.label+" "+c.status}).join(", "))+'</summary><table class="nt">'+cols(endC)+endC.map(rowNa).join("")+'</table></details>':"")+
+    (unk.length?'<details class="ended"><summary class="ns">'+unk.length+' unrecognized tape(s)</summary><table class="nt">'+(cols([]),"")+unk.map(unkRow).join("")+'</table></details>':"");
   // fleet charts
   $("rFleetH").textContent="Fleet over "+overLabel();
   // a trainer point carries the launch that trained it (the newest launch started before it): a relaunch breaks the line

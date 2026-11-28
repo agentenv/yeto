@@ -135,6 +135,9 @@ def load_plan(doc: Any) -> dict | None:
     absent = _f((doc.get("roster") or {}).get("waiting_absent_after_s")) if isinstance(doc.get("roster"), dict) else None
     if absent is not None and absent > 0:  # fleet.waiting_absent_after_s, when the plan sets it
         out["waiting_absent_after_s"] = absent
+    poll = _f((doc.get("roster") or {}).get("controller_poll_s")) if isinstance(doc.get("roster"), dict) else None
+    if poll is not None and poll > 0:  # the trainer's --controller-poll, when given
+        out["controller_poll_s"] = poll
     return out
 
 
@@ -372,13 +375,25 @@ def spares_record(doc: Any, updated: Any = None) -> dict | None:
 SPARE_MAX_WAIT_S = 24 * 3600.0  # --spare-max-wait-s: the island gives up after this long
 SPARE_WAIT_REPORT_S = 3600.0  # island_spares.WAIT_REPORT_S: a waiting island's record is written this often
 WAITING_ABSENT_AFTER_S = 3600.0  # yeto.rl.fleet.DEFAULT_WAITING_ABSENT_AFTER_S (fleet.waiting_absent_after_s)
-# a waiting island whose record (or wait report) is older than this: its launcher no longer reports
-# it (one hourly report missed, plus two health periods and 10 min of slack)
-WAIT_FROZEN_S = SPARE_WAIT_REPORT_S + 2 * 60.0 + 600.0
+CONTROLLER_POLL_S = 30.0  # --controller-poll default (yeto.cli)
+FROZEN_SLACK_S = 600.0
+
+
+def wait_frozen_s(poll_s: float | None = None) -> float:
+    """How old a waiting island's record (or newest wait event) may be before its wait is not
+    believed: the hourly wait report is written by the island controller's poll loop, so a report
+    lands up to one poll late and the record write of that report up to one more poll after it;
+    plus 10 min for store and clock slack."""
+    poll = CONTROLLER_POLL_S if poll_s is None else float(poll_s)
+    return SPARE_WAIT_REPORT_S + 2 * poll + FROZEN_SLACK_S
+
+
+WAIT_FROZEN_S = wait_frozen_s()
 
 
 def spare_wait_state(waiting_since: float | None, updated: float | None, now: float, *,
-                     absent_after_s: float | None = None, max_wait_s: float | None = None) -> dict | None:
+                     absent_after_s: float | None = None, max_wait_s: float | None = None,
+                     poll_s: float | None = None) -> dict | None:
     """How a wait for a spare node reads at ``now``: None (an ordinary wait), ``{"state": "absent"}``
     past ``fleet.waiting_absent_after_s`` (the fleet counts the island absent; still waiting), or
     ``{"state": "expired" | "frozen", "why"}``: past ``--spare-max-wait-s`` (the island should have
@@ -386,11 +401,11 @@ def spare_wait_state(waiting_since: float | None, updated: float | None, now: fl
     the wait is not believed and the island reads lost or unknown."""
     limit = SPARE_MAX_WAIT_S if max_wait_s is None else float(max_wait_s)
     if waiting_since is not None and now - waiting_since > limit:
-        return {"state": "expired", "why": f"waiting for a spare node past --spare-max-wait-s ({limit / 3600:g} h): "
-                                           "the island should have given up; its launcher may be gone"}
-    if updated is not None and now - updated > WAIT_FROZEN_S:
-        return {"state": "frozen", "why": f"waiting for a spare node, but no report for {(now - updated) / 3600:.1f} h"
-                                          ": its launcher may be gone"}
+        return {"state": "expired", "why": f"past --spare-max-wait-s ({limit / 3600:g} h) · "
+                                           "should have given up waiting for a spare node"}
+    if updated is not None and now - updated > wait_frozen_s(poll_s):
+        return {"state": "frozen", "since": updated,
+                "why": "launcher may be gone: no report of its wait for a spare node"}
     absent = WAITING_ABSENT_AFTER_S if absent_after_s is None else float(absent_after_s)
     if waiting_since is not None and now - waiting_since > absent:
         return {"state": "absent"}

@@ -1588,10 +1588,13 @@ class Reducer:
         sp = isl.get("spares")
         if sp is None:
             sp = isl["spares"] = {"waiting": False, "since": None, "reason": None, "replacements": 0,
-                                  "last_at": None, "last": None, "lost": [], "stopped": None, "last_ts": None}
+                                  "last_at": None, "last": None, "lost": [], "stopped": None, "last_ts": None,
+                                  "max_wait": None}
         if ts is not None:  # the newest spare-node event (a wait no event reports any more reads frozen)
             sp["last_ts"] = ts if sp["last_ts"] is None else max(sp["last_ts"], ts)
         why = str(r["reason"])[:300] if r.get("reason") else None
+        if finite(r.get("max_wait_s")) is not None:  # --spare-max-wait-s, on its wait events
+            sp["max_wait"] = finite(r.get("max_wait_s"))
         if event == "island_node_lost":
             if r.get("node") and r["node"] not in sp["lost"]:
                 sp["lost"].append(str(r["node"]))
@@ -1648,12 +1651,13 @@ class Reducer:
                              "source": "events"}
             if running:
                 out["spares"]["stopped"] = None
-            updated, max_wait = ev.get("last_ts"), None
+            updated, max_wait = ev.get("last_ts"), ev.get("max_wait")
         sp = out.get("spares")
         if sp and sp["waiting"]:
             ws = fleet_islands.spare_wait_state(
                 sp["since"], updated, now, max_wait_s=max_wait,
-                absent_after_s=(self.fleet_plan or {}).get("waiting_absent_after_s"))
+                absent_after_s=(self.fleet_plan or {}).get("waiting_absent_after_s"),
+                poll_s=(self.fleet_plan or {}).get("controller_poll_s"))
             if ws is not None:
                 sp["wait_state"] = ws
                 if ws["state"] != "absent":  # not believed: no wait masks the island's loss

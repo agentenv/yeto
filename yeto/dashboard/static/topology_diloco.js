@@ -76,6 +76,7 @@ function straggler(tr){var n=tr.island_now;return (n&&"straggler" in n?n.straggl
 function trainerState(tr,tn,isl){
   var age=fin(tr.phase_since)?tn-tr.phase_since:null,a=age!=null?" · "+dur(age):"",ph=tr.phase_raw,co=isl&&isl.colocated;
   if(waitingSpare(tr))return ["waiting for a spare node"+(absentWait(tr)?" · counts as absent":fin(tr.spares.since)?" · "+dur(Math.max(0,spNow()-tr.spares.since)):""),"warn"];
+  var ow=overdueWord(tr);if(ow&&!tr.live)return [ow+(fin(tr.last_event_ts)?" · no event for "+dur(Math.max(0,spNow()-tr.last_event_ts)):""),"bad"];
   var inow=islandNow(tr);if(inow)return inow;
   if(tr.failure)return["failed: "+tr.failure.metric,"bad"];
   if(sft()){var q=fin(tr.last_event_ts)?dur(tn-tr.last_event_ts)+" ago":"n/a";
@@ -106,6 +107,10 @@ function lostNode(tr){return !ended(tr)&&(tr.node_health||[]).some(function(h){r
 function absentWait(tr){return waitingSpare(tr)&&(tr.spares.wait_state||{}).state==="absent"}
 // a wait not believed (past --spare-max-wait-s, or no report for an hour): the island reads lost
 function overdueWait(tr){var w=(tr.spares||{}).wait_state;return !ended(tr)&&!!w&&w.state!=="absent"?w:null}
+// a wait not believed in words, what to act on first, durations against spNow() as everywhere else
+function overdueText(w,at){var tn=fin(at)?at:spNow();return w.state==="frozen"?"launcher may be gone · no wait report for "+(fin(w.since)&&fin(tn)?dur(Math.max(0,tn-w.since)):"over an hour"):w.why}
+// what the card reads for it: unknown (nobody reports the wait) or lost (past the longest wait)
+function overdueWord(tr){var w=overdueWait(tr);return w?(w.state==="frozen"?"unknown":"lost"):null}
 // the badge of a lost node (a wait is the card's phase line, not a badge too)
 function spareBadge(tr){return lostNode(tr)?["node ✕",C.bad]:null}
 // why no spare node (island_spares.Pick.why_none): the skipped nodes and why first (what to act on: a
@@ -122,7 +127,7 @@ function healthWhy(h){if(h.stale)return "health unread (stale)";if(h.verdict==="
 // or null; waiting: why no spare is free; stopped: why the island gave up
 function spareNote(tr,tn){var sp=tr.spares,bad=ended(tr)?[]:tr.node_health||[],out=[];
   if(sp&&sp.stopped)return [[sp.stopped,"bad"]];
-  var od=overdueWait(tr);if(od)return [[od.why,"bad"]];
+  var od=overdueWait(tr);if(od)return [[overdueText(od),"bad"]];
   if(waitingSpare(tr))return [[whyNoSpare(sp.reason),"warn"]];
   if(bad.length){var h=bad[0];out.push([h.node+": ",""],[healthWhy(h),h.verdict==="lost"?"bad":"warn"]);
     if(bad.length>1)out.push([" +"+(bad.length-1)+" node"+(bad.length>2?"s":""),""])}
@@ -142,7 +147,7 @@ function spareRows(tr){var sp=tr.spares,h="",tn=spNow(),ws=(sp||{}).wait_state;
   if(!sp)return h;
   if(sp.stopped)h+=row("spare nodes",sp.stopped);
   if(sp.waiting||ws)h+=row("waiting for a spare",(fin(sp.since)?dur(Math.max(0,tn-sp.since))+" · ":"")+(sp.reason||"no free spare node"));
-  if(ws)h+=row("spare wait",ws.state==="absent"?"counts as absent for the fleet (past fleet.waiting_absent_after_s)":ws.why);
+  if(ws)h+=row("spare wait",ws.state==="absent"?"counts as absent for the fleet (past fleet.waiting_absent_after_s)":overdueText(ws));
   if(sp.lost&&sp.lost.length)h+=row("lost node(s)",sp.lost.join(", "));
   if(sp.replacements>0){var l=sp.last||{};
     h+=row("last replacement",(l.lost&&l.spare?l.lost+" → "+l.spare:"")+(l.resume_step!=null?" · resumed at step "+l.resume_step:"")+(fin(sp.last_at)?" · "+dur(Math.max(0,tn-sp.last_at))+" ago":""));
@@ -413,7 +418,7 @@ function paint(){
   D.trainers.forEach(function(tr,k){var o=L.boxes[k],tc=o.tc,st=trainerState(tr,tn,tr.island),c=col(st[1]),dead=!tr.live&&!(tr.status==="done"||tr.status==="stopped"||tr.finalized||D.done)&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state))&&!waitingSpare(tr);  // a finished run: no trainer is lost
     tc.step.textContent=(fin(tr.step)?"step "+tr.step:fleet()?"not trained yet":"step —")+(sft()&&fin(tr.steps_total)?" / "+tr.steps_total:"");tc.outer.textContent=fin(tr.outer)?(L.W<640?"sweep ":"outer sweep ")+tr.outer:"";  // complete sweeps it applied (hover: the card's tip)
     fitText(tc.ph,st[0],tc.phw);tc.ph.style.fill=st[1]==="good"?C.ink:c;tc.dot.setAttribute("fill",c);
-    tc.badge.textContent=tr.failure?(/hash/.test(tr.failure.metric)?"hash ✕":/lr/.test(tr.failure.metric)?"lr 0":"failed"):tr.lr_zero&&tr.live?"lr 0":dead?"lost":tr.syncer_link&&tr.syncer_link.state==="disconnected"&&!D.done&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state))?"link ✕":"";tc.badge.style.fill=C.bad;
+    tc.badge.textContent=tr.failure?(/hash/.test(tr.failure.metric)?"hash ✕":/lr/.test(tr.failure.metric)?"lr 0":"failed"):tr.lr_zero&&tr.live?"lr 0":dead?(overdueWord(tr)||"lost"):tr.syncer_link&&tr.syncer_link.state==="disconnected"&&!D.done&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state))?"link ✕":"";tc.badge.style.fill=C.bad;
     if(!tc.badge.textContent&&tr.live&&straggler(tr)&&!D.done){tc.badge.textContent="straggler";tc.badge.style.fill=C.warn}  // no push merged for N merge cycles
     [tc.co?o.merged:tc.box].forEach(function(b){if(b){b.style.stroke=dead||tr.failure?C.bad:"";b.style.strokeDasharray=dead?"5 4":""}});
     o.tc.g.setAttribute("opacity",dead?0.6:1);
@@ -712,5 +717,5 @@ function table(view){var d=view&&view.topology&&view.topology.diloco;if(!d)retur
       return (p?"↑ f"+p.frag+" t"+p.step+" · "+dur(tn-p.ts)+" ago":t.full_push?"↑ "+(t.full_push.count||0)+" PUSH last round, "+(t.full_push.total||0)+" in the run"+(t.full_push.overwritten?" · overwritten "+t.full_push.overwritten:""):"↑ none")+'<div class="ns">'+(b?"↓ f"+b.frag+" v"+b.v+" applied"+(fin(t.apply_s)?" · apply "+t.apply_s.toFixed(2)+"s":""):t.full_push?"↓ applied in the round (no per-fragment record yet)":"↓ no BCAST applied yet")+"</div>"+
         '<div class="ns">frag ['+(t.versions||[]).join(" ")+"]</div>"}}}
 
-return{render:render,kpis:kpis,table:table,whyNoSpare:whyNoSpare,healthWhy:healthWhy,spNow:spNow};
+return{render:render,kpis:kpis,table:table,whyNoSpare:whyNoSpare,healthWhy:healthWhy,spNow:spNow,overdueText:overdueText};
 })();
