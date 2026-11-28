@@ -1654,12 +1654,19 @@ def trainer_leases(args: Any) -> Any:
     """The run's :class:`~.node_lease.NodeLeases` for its ``ssh:`` trainer islands (one per
     process and run; its keeper thread renews them while the launcher runs). The holder is
     ``<run>/trainer@<identity>``, the identity kept in the run dir (:data:`NODE_LEASE_FILE`).
-    None: the inventory has no ``lease_store``, or a dry run (nothing is leased)."""
+    None: the inventory has no ``lease_store``, a dry run (nothing is leased), or the syncer
+    launch of a fleet launched island by island (``--rl-fleet-role syncer``): it runs no
+    trainer island, so it never holds a trainer node; its ``--gpu`` and inventory only
+    describe the fleet's islands, whose own launches lease their nodes."""
     from .node_inventory import lease_store_of
 
     nodes = getattr(args, "rl_node_inventory_nodes", None)
     store = lease_store_of(nodes)
     if store is None or getattr(args, "dry_run", False):
+        return None
+    from yeto.rl.engine import sample_roles
+
+    if sample_roles.fleet_role(args) == sample_roles.FLEET_ROLE_SYNCER:
         return None
     from .node_lease import NodeLeases, local_identity, ssh_probe
 

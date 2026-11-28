@@ -505,6 +505,27 @@ def test_a_dry_run_leases_nothing_and_logs_the_hint_only(caplog, capsys):
     assert capsys.readouterr() == ("", "")
 
 
+def test_the_syncer_launch_of_a_fleet_leases_no_trainer_node(monkeypatch):
+    """B7: the syncer launch (``--rl-fleet-role syncer``) runs no trainer island; its ``--gpu``
+    and inventory describe the fleet's islands, whose launches lease their own nodes."""
+    from yeto.launch import ssh_resident
+    from yeto.launch.ssh_trainer_island import trainer_leases
+
+    objects, clock = _objects(), Clock()
+    island = _leases("run-b-i0/trainer", objects, clock)
+    island.acquire("b300-0")  # the island launch holds its node
+    nodes = NodeList([b300(0)], lease_store=STORE)
+    opened = []
+    monkeypatch.setattr(node_lease, "NodeLeases", lambda *a, **kw: opened.append(a) or island)
+    assert trainer_leases(_args(nodes, rl_fleet_role="syncer", dry_run=False)) is None
+    assert opened == []  # no store opened, nothing claimed or waited for
+    assert trainer_leases(_args(nodes, rl_fleet_role="island", dry_run=False)) is island  # an island still leases
+    monkeypatch.setattr(ssh_resident, "is_resident", lambda *a: True)
+    ssh_resident.check(_args(nodes, rl_fleet_role="syncer", dry_run=False, rl_ssh_trainer_workdir="/opt/yeto",
+                             rl_image=None), [_island(1)])  # the inventory checked, no lease taken
+    assert island.holder("b300-0") == island.holder_id
+
+
 def test_a_start_on_a_node_another_run_took_is_refused(tmp_path):
     objects, clock = _objects(), Clock()
     mine = _leases("run1/trainer", objects, clock)
