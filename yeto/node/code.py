@@ -47,8 +47,10 @@ def not_git_tree(repo: Path | str, why: str) -> str:
 def git_tree_problem(repo: Path | str = REPO_ROOT, *, run: Callable[..., Any] = subprocess.run) -> str | None:
     """None when ``repo`` is inside a git work tree with a commit; else :func:`not_git_tree`."""
     try:
+        # git needs none of the run's service settings (a sky API server endpoint is not passed on)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("SKYPILOT_")}
         done = run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
-                   capture_output=True, text=True, timeout=60)
+                   capture_output=True, text=True, timeout=60, env=env)
     except (OSError, subprocess.SubprocessError) as error:
         return not_git_tree(repo, f"git did not run: {error}")
     if done.returncode != 0:

@@ -328,8 +328,8 @@ _NON_RL_LITERALS = frozenset({
     # the partial-expert selection tool named in k31_checks.py's hint
     "--ep-size", "--input", "--num-trainable", "--validate",
     # remote samplers (daytona_sampler.py, nc/ssh_sampler.py, nc/tasks.py, nc/modal_provider.py):
-    # git rev-parse, curl, and the engine_sampler entry's own CLI
-    "--short", "--cacert", "--retry-connrefused", "--spec",
+    # curl and the engine_sampler entry's own CLI (their git rev-parse --short is yeto.node.code.code_sha's)
+    "--cacert", "--retry-connrefused", "--spec",
     # the node-side weights copy and its CLI (weights_sync.py, ssh_weights.py), and the Megatron
     # pipeline split it reads from YETO_MILES_TRAIN_EXTRA_ARGV
     "--attempts", "--chunk-mb", "--hash", "--headroom", "--pp", "--pp-first", "--pp-last", "--procs",

@@ -622,17 +622,23 @@ def test_podman_nodes_are_probed_checked_and_pulled_with_podman(tmp_path):
     assert rec.evidence["pulled"] == ["b300-0", "b300-1"]
 
 
-def test_a_podman_graphroot_short_of_room_stops_the_pull(tmp_path):
+@pytest.mark.parametrize(("dev", "fix"), [
+    ("/dev/sda2", "move it to NVMe (graphroot in /etc/containers/storage.conf)"),
+    ("/dev/nvme0n1p2", "/ is already on NVMe (/dev/nvme0n1p2): free space there"),
+])
+def test_a_podman_graphroot_short_of_room_stops_the_pull(tmp_path, dev, fix):
+    """The NVMe or not of the fix comes from the node's probe (its df device), given here."""
     nodes = [_podman(0), _podman(1)]
     low = Behavior(host={"podman_root": (0, "/var/lib/containers/storage"),
-                         "disk": (0, "\n".join([disk_line("/", 80, 200, dev="/dev/sda2", mount="/"),
-                                                disk_line("/var/lib/containers/storage", 30, mount="/")]))})
+                         "disk": (0, "\n".join([disk_line("/", 80, 200, dev=dev, mount="/"),
+                                                disk_line("/var/lib/containers/storage", 30, dev=dev, mount="/")]))})
     ops = FakeNodes(nodes, **{"b300-0": _graphroot(), "b300-1": low})
     with pytest.raises(ia.AdoptError) as error:
         adopter(request(nodes, tmp_path, node="b300-0"), ops, smoke=passing_smoke()).run()
     assert error.value.step == "pull"
     assert ("node b300-1: disk_images: /var/lib/containers/storage (podman graphroot) on /: 30 GiB free "
-            "(move it to NVMe (graphroot in /etc/containers/storage.conf))") in error.value.reason
+            f"({fix}") in error.value.reason
+    assert ("move it to NVMe" in error.value.reason) == (dev == "/dev/sda2")
     assert not any(" pull -q " in s for _, s in ops.scripts)
 
 
