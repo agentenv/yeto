@@ -207,6 +207,20 @@ def _island_hmac_key_does_not_leak():
     _reset_island_hmac_key()
 
 
+@_pytest.fixture(scope="session", autouse=True)
+def _local_output_in_tmp(tmp_path_factory):
+    """The launcher's copy of a run's output on this machine (``yeto.delivery.local_output_dir``,
+    ``~/yeto-output`` by default) goes to one directory of the session, for every test: a
+    launch a test runs never creates or writes the real ~/yeto-output (yeto_home_guard). A
+    test of the default deletes the variable with monkeypatch."""
+    from yeto.delivery import LOCAL_OUTPUT_ENV
+
+    patch = _pytest.MonkeyPatch()
+    patch.setenv(LOCAL_OUTPUT_ENV, str(tmp_path_factory.mktemp("yeto-output")))
+    yield
+    patch.undo()
+
+
 @_pytest.fixture(autouse=True)
 def _reap_syncer_groups():
     """Kill every process group a test started with process_groups.group_popen,
