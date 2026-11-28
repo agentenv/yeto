@@ -357,7 +357,7 @@ function paint(){
     tc.step.textContent=(fin(tr.step)?"step "+tr.step:fleet()?"not trained yet":"step —")+(sft()&&fin(tr.steps_total)?" / "+tr.steps_total:"");tc.outer.textContent=fin(tr.outer)?(L.W<640?"sweep ":"outer sweep ")+tr.outer:"";  // complete sweeps it applied (hover: the card's tip)
     fitText(tc.ph,st[0],tc.phw);tc.ph.style.fill=st[1]==="good"?C.ink:c;tc.dot.setAttribute("fill",c);
     tc.badge.textContent=tr.failure?(/hash/.test(tr.failure.metric)?"hash ✕":/lr/.test(tr.failure.metric)?"lr 0":"failed"):tr.lr_zero&&tr.live?"lr 0":dead?"lost":tr.syncer_link&&tr.syncer_link.state==="disconnected"&&!D.done&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state))?"link ✕":"";tc.badge.style.fill=C.bad;
-    if(!tc.badge.textContent&&straggler(tr)&&!D.done){tc.badge.textContent="straggler";tc.badge.style.fill=C.warn}  // no push merged for N merge cycles
+    if(!tc.badge.textContent&&tr.live&&straggler(tr)&&!D.done){tc.badge.textContent="straggler";tc.badge.style.fill=C.warn}  // no push merged for N merge cycles
     [tc.co?o.merged:tc.box].forEach(function(b){if(b){b.style.stroke=dead||tr.failure?C.bad:"";b.style.strokeDasharray=dead?"5 4":""}});
     o.tc.g.setAttribute("opacity",dead?0.6:1);
     var L0=tc.l,lw=tc.lw;
