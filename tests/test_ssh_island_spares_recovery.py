@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_rl_ssh_resident import Clock, _cards, b300, make_ops, spec, wait_for  # noqa: F401 - _cards: autouse
+from test_rl_ssh_resident import Clock, _cards, _crash, b300, make_ops, spec, wait_for  # noqa: F401 - _cards: autouse
 from test_ssh_island_spares import (
     NAMES,
     READING,
@@ -2643,3 +2643,45 @@ def test_the_compiled_plan_keeps_the_controller_poll(fleet_run, files):  # noqa:
     plan = fleet_run(cfg).fleet_plan()
     assert plan.controller_poll_s == 1500.0 and plan.to_json()["roster"]["controller_poll_s"] == 1500.0
     assert "controller_poll_s" not in fleet_run(_cfg(files)).fleet_plan().to_json()["roster"]
+
+
+# ------------------------------------------------------------------ M-C: a takeover reattaches first
+def _taken_over_with_a_quarantined_node(tmp_path, **kw):
+    """A running 3-node island with a spare; its launcher (host A) is lost, then another run
+    quarantines rank 2's node; a launcher on another host starts it again from the journal."""
+    shared = DirectoryObjectStore(tmp_path / "leases")
+    cluster = Cluster([*NAMES, "b300-3"])
+
+    def spares_for():
+        return IslandSpares(pool=(*islands_spec().nodes, spare(3)),
+                            records=NodeRecords(DirectoryObjectStore(tmp_path / "store"), run_id="run1",
+                                                log=lambda m: None, shared=shared))
+
+    first = make_ops(tmp_path, cluster, health_every_s=0)
+    first.add("isl", islands_spec(), spares=spares_for())
+    assert first.start("isl") == 0
+    _crash(first)  # host A is lost; the nodes run on
+    NodeRecords(DirectoryObjectStore(tmp_path / "store2"), run_id="run2", log=lambda m: None,
+                shared=shared).quarantine("b300-2", island="x", reason="XID 79 in run2")
+    again = make_ops(tmp_path, cluster, health_every_s=0, **kw)
+    again.add("isl", islands_spec(), spares=spares_for())
+    return cluster, again
+
+
+@pytest.mark.parametrize("kind", ["taken_over", "reattach_only"])
+def test_a_takeover_with_a_quarantined_node_reattaches_and_does_not_restart(tmp_path, kind):
+    """The takeover rule wins over the spares rule at the start: the running incarnation is
+    reattached (no release, no new incarnation); a spare replaces the node later, in the
+    control loop."""
+    cluster, again = _taken_over_with_a_quarantined_node(tmp_path, **{kind: {"isl"}})
+    assert again.start("isl") == 0
+    assert "isl" in again.reattached and again.islands["isl"].incarnation == 0
+    assert cluster.count("kill") == 0 and started(cluster, 1) == []  # nothing released, nothing started
+    assert started(cluster, 0) == NAMES  # only the first start
+
+
+def test_without_a_takeover_the_quarantined_node_is_replaced_at_the_start(tmp_path):
+    """The same start not taken over (a launcher restarted on its own host): main's spares rule."""
+    cluster, again = _taken_over_with_a_quarantined_node(tmp_path)
+    assert again.start("isl") == 1
+    assert started(cluster, 1) == ["b300-0", "b300-1", "b300-3"]

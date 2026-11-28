@@ -1028,6 +1028,11 @@ _SCHEDULING = (
     cli_flag("--rl-fleet-learner-id", type=int, default=None, metavar="K",
              help="with --rl-fleet-role island: the island's learner id in the fleet (its "
              "store sub-directory trainer<K>)"),
+    cli_flag("--rl-fleet-takeover", action="store_true", default=False,
+             help="with --rl-fleet-role island: the launch takes a lost control host's island launch over "
+             "(the trainer worker of an on-site control plane, fleet.syncer_service, starts it so): it adopts the "
+             "island its run store records name, never starts it afresh and never clears its STOP or START; an "
+             "island record that ended refuses it ([yeto-takeover-blocked]). Default: off"),
     cli_flag("--rl-fleet-learners", type=int, default=None, metavar="N",
              help="with --rl-fleet-role: the fleet's launched trainers (the syncer's --learners "
              "and every island's session roster)"),

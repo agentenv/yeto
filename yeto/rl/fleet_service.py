@@ -14,7 +14,8 @@ The units (:func:`unit_text`):
 * ``Restart=on-failure``, but never after an exit yeto chose itself
   (``RestartPreventExitStatus``): both services exit :data:`CONFIG_EXIT` on a configuration
   error; the control service exits :data:`CONTROL_DECIDED_EXIT` when ``run up`` ended the run
-  after a breaker trip or a failure it handled (its exit 1); the syncer service exits 2 on a
+  after a breaker trip or a failure it handled (its exit 1), and :data:`CONTROL_FENCED_EXIT`
+  when another control host drives the run now; the syncer service exits 2 on a
   refusal (another service holds the lock, a checkpoint that is not this run's, or none where
   the record says there is one), 9 on the fleet's STOP and 11 on a strict failure. A crash
   (an uncaught exception: :data:`CRASH_EXIT`, a signal) is restarted. The control unit has
@@ -72,9 +73,12 @@ CONTROL_DECIDED_EXIT = 75  # run up's exit 1: it ended the run (a breaker trip, 
 # The control unit's other refusals (exit 2: a preflight, another run up of the run) come before
 # anything is ordered and cost nothing: restarted every RESTART_SEC without a start limit
 SIGTERM_EXIT = 128 + int(signal.SIGTERM)  # a stop of the unit: a success, not restarted
+# run up's exit when another control host drives the run (yeto.rl.up_state_mirror.CONTROL_FENCED_EXIT):
+# never restarted (it would fence the new host back), no ended marker (the run goes on there)
+CONTROL_FENCED_EXIT = 76
 # exits a unit is never restarted after: yeto decided them
 CONFIG_EXIT = 10
-CONTROL_PREVENT = (CONFIG_EXIT, CONTROL_DECIDED_EXIT)
+CONTROL_PREVENT = (CONFIG_EXIT, CONTROL_DECIDED_EXIT, CONTROL_FENCED_EXIT)
 SYNCER_PREVENT = (2, 9, 10, 11)  # a refusal, the fleet's STOP, a configuration error, a strict failure
 RESTART_SEC = 30
 START_LIMIT_INTERVAL_S = 3600
@@ -1126,13 +1130,15 @@ class Heartbeat:
     def __init__(self, objects: Any, host: str, key: str | None, *, lock: Any = None, generation: int | None = None,
                  node: str | None = None, every_s: float | None = None, log: Callable[[str], None] = print,
                  stop_grace_s: float | None = None, poll_s: float | None = None, call_s: float | None = None,
-                 on_fence: Callable[[], None] | None = None) -> None:
+                 on_fence: Callable[[], None] | None = None, billed_s: float = 0.0) -> None:
         from yeto.launch.fleet_syncer import HEARTBEAT_CALL_S, POLL_S, SERVICE_BEAT_S, SERVICE_STARTING  # noqa: PLC0415
 
         self.objects, self.host, self.key, self.lock = objects, host, key, lock
         # never blocks the beat thread: a journal pipe that is full or hangs holds no fence up
         self.log = log if isinstance(log, QueuedLog) else QueuedLog(log)
         self.generation, self.node = generation, node
+        # the run's syncer hours (run up's spend): this generation from now, the earlier ones' seconds
+        self.since, self.billed_s = time.time(), float(billed_s)
         self.state = SERVICE_STARTING
         self.lost: str | None = None
         self.lost_code: int | None = None
@@ -1158,7 +1164,8 @@ class Heartbeat:
         from yeto.launch.fleet_syncer import write_service_status  # noqa: PLC0415
 
         write_service_status(self.objects, host=self.host, state=state or self.state, key=self.key,
-                             reason=reason, generation=self.generation, node=self.node)
+                             reason=reason, generation=self.generation, node=self.node, since=self.since,
+                             billed_s=self.billed_s)
 
     def beat(self, state: str | None = None, reason: str | None = None, *, wait: bool = False) -> None:
         """One heartbeat through the channel. ``wait``: a call in flight (the beat thread's) is
@@ -1445,8 +1452,12 @@ def run_syncer(config: str, *, binary: str | None = None, objects: Any = None,
             beat_log("[syncer service] the lock is no longer this service's: the syncer is stopped (SIGTERM, "
                      "SIGKILL after the grace)")
 
+    try:  # the seconds the earlier generations of this run's service ran (run up's syncer hours)
+        billed_s = fleet_syncer.service_seconds(fleet_syncer.read_service_status(objects)) or 0.0
+    except Exception:  # noqa: BLE001 - the hours of the earlier generations are not known: from 0
+        billed_s = 0.0
     beat = Heartbeat(lock.objects, host, kid, lock=lock, generation=lock.token, node=node, every_s=beat_s, log=beat_log,
-                     stop_grace_s=stop_grace_s, poll_s=poll_s, call_s=call_s, on_fence=fence)
+                     stop_grace_s=stop_grace_s, poll_s=poll_s, call_s=call_s, on_fence=fence, billed_s=billed_s)
     # the main path from the start of the syncer on (its records, the STOP reads): the heartbeat's
     # client through a channel of its own, so no store call holds it past call_s after a fence
     def lease_floor_s() -> float:

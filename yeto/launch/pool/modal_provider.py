@@ -97,6 +97,7 @@ route's), so the function itself carries what the trials need:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -250,6 +251,11 @@ class ModalProvider:
         # stops by name against it
         self.app_record = self.record.with_name(f"modal-app-{self.prefix}.json")
         self._app_stopped = False  # this process stopped the app since its last spawn
+        # the store control plane (attach_store): the record lives in the run store under the
+        # pool's lock, so another control host finds the calls (the local file is a mirror)
+        self._store: tuple[Any, str, Any] | None = None
+        self._store_rows: dict[str, dict[str, Any]] = {}
+        self._store_mutex = threading.Lock()
         # the record is rewritten from several threads (the pool starts islands in the
         # background) and processes (a manual release while the pool runs): every
         # read-modify-write holds the record's state_file_lock, or one drops another's call
@@ -261,19 +267,95 @@ class ModalProvider:
         return self._client
 
     # -- record
-    def _rows(self) -> dict[str, dict[str, Any]]:
+    def _file_rows(self) -> dict[str, dict[str, Any]]:
         try:
             return json.loads(self.record.read_text())
         except (OSError, ValueError):
             return {}
 
+    def _rows(self) -> dict[str, dict[str, Any]]:
+        if self._store is not None:  # the lock holder's record (a copy: a save that fails changes nothing)
+            return {t: dict(r) for t, r in self._store_rows.items()}
+        return self._file_rows()
+
     def _locked(self):
-        """The record's thread and process lock (not reentrant: never nest it)."""
-        return state_file_lock(self.record)
+        """The record's thread and process lock (not reentrant: never nest it); on the store
+        control plane the pool's own lock is the process lock, this one the thread lock, and
+        the tickets an earlier lock holder wrote late are read in first (:meth:`_merged`), so
+        a new ticket never takes the name of one of them."""
+        if self._store is None:
+            return state_file_lock(self.record)
+        return self._store_locked()
+
+    @contextlib.contextmanager
+    def _store_locked(self):
+        with self._store_mutex:
+            objects, _key, lock = self._store
+            self._store_rows = self._merged(objects, lock.token, self._store_rows)
+            yield
+
+    def _merged(self, objects: Any, token: int, rows: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """``rows`` with the tickets of the newest record of an earlier lock holder that ``rows``
+        lacks (a fenced holder's write can land after this holder read the store; a ticket is
+        never deleted, so one it lacks is one it never saw)."""
+        from . import store_state  # noqa: PLC0415
+
+        try:
+            earlier = store_state.read_provider_record(objects, self._store_pool, upto=int(token) - 1)
+        except Exception:  # noqa: BLE001 - an earlier holder's record that does not read adds nothing
+            earlier = None
+        if not earlier:
+            return {t: dict(r) for t, r in rows.items()}
+        return {**{t: dict(r) for t, r in earlier[1]["tickets"].items()}, **{t: dict(r) for t, r in rows.items()}}
 
     def _save(self, rows: dict[str, dict[str, Any]]) -> None:
-        """Replace the record (a temporary file of its own); callers hold :meth:`_locked`."""
+        """Replace the record (a temporary file of its own); callers hold :meth:`_locked`. On
+        the store control plane (:meth:`attach_store`) it is written to the run store under
+        this lock holder's key first (a lock another controller took raises ``LockLost``),
+        the tickets of an earlier holder's late write merged in (none is ever dropped), then
+        the local file as a mirror."""
+        if self._store is not None:
+            objects, key, lock = self._store
+            lock.guard()
+            rows = self._merged(objects, lock.token, rows)
+            app = self._app_doc()  # the deployed app's id: a pool-stop on another host stops it by name too
+            doc = {"kind": KIND, "tickets": rows, **({"app": app} if app else {}),
+                   "control": {"token": lock.token, "holder": getattr(lock, "holder", None), "saved_at": self.clock()}}
+            objects.write(key, json.dumps(doc, indent=1, sort_keys=True).encode())
+            self._store_rows = {t: dict(r) for t, r in rows.items()}
+            try:  # the local mirror (status readers on this host); never read back on this plane
+                write_json_atomic(self.record, rows)
+            except OSError:
+                pass
+            return
         write_json_atomic(self.record, rows)
+
+    def attach_store(self, objects: Any, pool: str, lock: Any) -> dict[str, Any]:
+        """Keep the record in the run store under pool ``pool``'s store ``lock`` (the store
+        control plane): the newest record of this or an earlier lock holder, else this host's
+        local file imported once. A control host that takes the run over from a lost one then
+        follows, and releases, the calls that host spawned (the local file of that host is
+        gone with it). Returns where the record came from (``source``: ``store``, ``local``
+        or ``new``)."""
+        from . import store_state  # noqa: PLC0415
+
+        found = store_state.read_provider_record(objects, pool, upto=lock.token)  # unreadable: raises
+        if found is not None:
+            rows, origin = found[1]["tickets"], {"source": "store", "key": found[0]}
+            app = found[1].get("app")
+            if isinstance(app, dict) and app and not self._app_doc():  # another host deployed it
+                with state_file_lock(self.app_record):
+                    write_json_atomic(self.app_record, dict(app))
+        elif self.record.exists():
+            rows, origin = self._file_rows(), {"source": "local", "path": str(self.record)}
+        else:
+            rows, origin = {}, {"source": "new"}
+        with self._store_mutex:
+            self._store = (objects, store_state.provider_record_key(pool, lock.token), lock)
+            self._store_pool = pool
+            self._store_rows = {t: dict(r) for t, r in rows.items()}
+            self._save(self._rows())
+        return origin
 
     def _ours(self, ticket: str) -> bool:
         return ticket.startswith(self.prefix + "-") and ticket in self._rows()
@@ -624,6 +706,11 @@ class ModalPoolOps:
         self.provider = provider if provider is not None else from_config(cfg, self.run_id)
         self._store = fence_store
         self._ready_seen: set[str] = set()
+
+    def attach_control(self, control: Any) -> dict[str, Any]:
+        """The store control plane (``store_state.PoolControl``): the provider's calls move into
+        the run store next to the pool's state, under its lock (:meth:`ModalProvider.attach_store`)."""
+        return self.provider.attach_store(control.state.objects, control.state.pool, control.lock)
 
     # -- supply
     def order(self, account: int) -> str:
