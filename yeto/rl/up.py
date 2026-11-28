@@ -2763,9 +2763,23 @@ class Run:
             argv += ["--prices", os.path.expanduser(str(dash["prices"]))]
         return argv
 
+    def dashboard_argv(self, port: str) -> list[str]:
+        """``yeto dashboard serve``. In the on-site control unit (``onsite_service``) under
+        ``parent_guard`` with this process as its parent: the unit's ``KillMode=process``
+        (which keeps the island launches running) stops only run up, so the dashboard
+        would outlive it; the guard ends it once this process is gone (a stop, a crash,
+        a SIGKILL after the stop timeout)."""
+        argv = self.yeto("dashboard", "serve", *self.dashboard_args(), "--port", port)
+        if not getattr(self, "onsite_service", False):
+            return argv
+        from yeto.rl.adapters.sampler_engines import parent_guard  # noqa: PLC0415
+
+        return [self.py, "-I", str(Path(parent_guard.__file__).resolve()), "--parent", str(os.getpid()), "--",
+                *argv]
+
     def dashboard(self) -> None:
         port = str((self.cfg.get("dashboard") or {}).get("port", 8795))
-        self._spawn("dashboard", self.yeto("dashboard", "serve", *self.dashboard_args(), "--port", port))
+        self._spawn("dashboard", self.dashboard_argv(port))
         self.mark("dashboard", url=f"http://127.0.0.1:{port}/")
 
     # -- guards
@@ -5125,6 +5139,13 @@ class ControlFenced(BaseException):
         self.handoff = bool(handoff)
 
 
+def run_repo_root() -> Path:
+    """The yeto tree this process runs (the one its island launches and pools ship)."""
+    from yeto.launch import REPO_ROOT  # noqa: PLC0415
+
+    return REPO_ROOT
+
+
 def onsite_pool_refusal(run: Run, environ: dict[str, str] | None = None) -> str | None:
     """An on-site control plane (``fleet.syncer_service``) whose pools another control host
     could not take over (:func:`yeto.rl.fleet.onsite_pool_problem`), or whose shared sky API
@@ -5135,6 +5156,11 @@ def onsite_pool_refusal(run: Run, environ: dict[str, str] | None = None) -> str 
 
     if not run.onsite_control():
         return None
+    from yeto.node.code import git_tree_problem  # noqa: PLC0415
+
+    problem = git_tree_problem(run_repo_root())  # every island launch and pool ships this tree by its commit
+    if problem:
+        return problem
     try:
         problem = fleet.onsite_pool_problem(run.cfg)
         shared = fleet.sky_api_server(run.cfg.get("fleet") or {})

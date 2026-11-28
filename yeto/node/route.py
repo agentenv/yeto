@@ -95,8 +95,7 @@ class NodeRoute:
             if self.publish_code:
                 self._code = node_code.publish_code(self.objects, *node_code.git_code_tar(self.code_ref, run=self._run))
             else:
-                sha = self._run(["git", "-C", str(node_code.REPO_ROOT), "rev-parse", "--short=12", self.code_ref],
-                                capture_output=True, text=True, check=True).stdout.strip()
+                sha = node_code.code_sha(self.code_ref, repo=node_code.REPO_ROOT, run=self._run)
                 self._code = CodeRef(sha=sha, key=node_code.code_key(sha), sha256="")
         return self._code
 

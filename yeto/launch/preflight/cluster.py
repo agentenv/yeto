@@ -499,6 +499,8 @@ def host_sections(node: Node, *, engine: str = "docker", sudo: bool = False) -> 
     else:
         root = "$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
     paths = ["/", "/var/lib/containerd", root, *[shlex.quote(p) for p in sorted(node.mounts)]]
+    if node.scratch and node.scratch not in node.mounts:  # the run's node-local data (ssh_node_storage)
+        paths.append(shlex.quote(node.scratch))
     extra = [("podman_root", podman_root(sudo))] if engine == "podman" else []
     base = list(HOST_SECTIONS_BASE)
     if sudo and engine == "docker":  # the docker info the image root and docker checks read: through sudo too
@@ -723,6 +725,8 @@ def host_checks(state: NodeState, req: Requirements, *, multi: bool, image: str 
                     f">= {req.rec_disk_free_gib / 1000:g} TB local NVMe recommended", free_gib=free)
             else:
                 add("disk", PASS, f"{free:.0f} GiB free: {where}", free_gib=free)
+        if node.scratch:
+            _scratch_check(node, req, by_path, missing, add)
         info = parse_docker_info(h["docker"].text) if _ok(h.get("docker")) else None
         image_roots = {}
         if info is not None and (state.engine == "docker" if state.by_engine else node.runtime == "docker"):
@@ -732,6 +736,12 @@ def host_checks(state: NodeState, req: Requirements, *, multi: bool, image: str 
             want = "/var/lib/containerd" if snap else str(info.get("DockerRootDir") or "/var/lib/docker")
             label = f"{want} ({'containerd image store' if snap else 'docker data root'})"
             image_roots = {label: d for d in disks if d.path == want}  # noqa: B035 - one path
+            data_root = str(info.get("DockerRootDir") or "/var/lib/docker")
+            other = next((d for d in disks if d.path == data_root), None)
+            if snap and other is not None and all(other.device + other.mountpoint != d.device + d.mountpoint
+                                                  for d in image_roots.values()):
+                # the containers' writable layers and volumes stay under the data root: its own disk
+                image_roots[f"{data_root} (docker data root)"] = other
         fix = "move it to NVMe (docker data-root; bind-mount /var/lib/containerd: it does not follow data-root)"
         if state.engine == "podman":
             root = h["podman_root"].text.strip() if _ok(h.get("podman_root")) else ""
@@ -746,8 +756,8 @@ def host_checks(state: NodeState, req: Requirements, *, multi: bool, image: str 
                                                                     else ""))
         for label, d in image_roots.items():
             if d.free_gib < req.min_image_root_free_gib:
-                add("disk_images", FAIL, f"{label} on {d.mountpoint}: {d.free_gib:.0f} GiB free", fix,
-                    free_gib=d.free_gib)
+                add("disk_images", FAIL, f"{label} on {d.mountpoint}: {d.free_gib:.0f} GiB free",
+                    _on_nvme_fix(d, req) if _on_nvme(d) else fix, free_gib=d.free_gib)
             else:
                 add("disk_images", PASS, f"{label} on {d.mountpoint}: {d.free_gib:.0f} GiB free")
     # docker
@@ -774,6 +784,37 @@ def host_checks(state: NodeState, req: Requirements, *, multi: bool, image: str 
         else:
             add("address", PASS, f"{node.address} on {hit[0].split()[1]}")
     return out
+
+
+def _on_nvme(d: Disk) -> bool:
+    """The disk's device is an NVMe namespace (``/dev/nvme0n1p1``): moving to NVMe is no fix."""
+    return "nvme" in d.device.rsplit("/", 1)[-1].lower()
+
+
+def _on_nvme_fix(d: Disk, req: Requirements) -> str:
+    return (f"{d.mountpoint} is already on NVMe ({d.device}): free space there (unused images and build "
+            f"cache) or give it a larger NVMe (>= {req.min_image_root_free_gib:g} GiB free)")
+
+
+def _scratch_check(node: Node, req: Requirements, by_path: Mapping[str, Disk], missing: Sequence[str],
+                   add: Callable[..., None]) -> None:
+    """The inventory's ``scratch`` (the run's node-local data): its disk, whatever disk it is on."""
+    want = node.scratch_min_free_gib if node.scratch_min_free_gib is not None else req.min_disk_free_gib
+    d = by_path.get(str(node.scratch))
+    if d is None:
+        if node.scratch in missing:
+            add("disk_scratch", FAIL, f"scratch {node.scratch} does not exist", f"mkdir -p {node.scratch} on a "
+                "local NVMe (or fix scratch in the inventory)")
+        return
+    detail = f"scratch {node.scratch} on {d.mountpoint} ({d.fstype} {d.device}) {d.free_gib:.0f} GiB free"
+    if d.free_gib < want:
+        add("disk_scratch", FAIL, detail + f" < {want:g} GiB needed",
+            (f"free space on {d.mountpoint}" if _on_nvme(d) else "put scratch on a local NVMe")
+            + f" (>= {want:g} GiB free; scratch_min_free_gib in the inventory sets the limit)", free_gib=d.free_gib)
+    elif d.fstype in ("tmpfs", "overlay"):
+        add("disk_scratch", WARN, detail + f"; {d.fstype}", "put scratch on a local NVMe", free_gib=d.free_gib)
+    else:
+        add("disk_scratch", PASS, detail, free_gib=d.free_gib)
 
 
 def _cuda_checks(state: NodeState, req: Requirements, add: Callable[..., None], *, rdma: bool) -> None:

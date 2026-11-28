@@ -1397,8 +1397,9 @@ class SshSamplerPoolOps:
     def upload_code(self, node: Node) -> str:
         """``git archive`` (gzip: a slow launcher link) of ``yeto/`` at ``code_ref`` into
         ``<workdir>/yeto/<sha>`` (idempotent: a tree already there is kept)."""
-        sha = self._run(["git", "-C", str(REPO_ROOT), "rev-parse", "--short=12", self.code_ref],
-                        capture_output=True, text=True, check=True).stdout.strip()
+        from yeto.node.code import code_sha  # noqa: PLC0415
+
+        sha = code_sha(self.code_ref, repo=REPO_ROOT, run=self._run)
         dest = f"{self.conf.workdir}/yeto/{sha}"
         archive = subprocess.Popen(["git", "-C", str(REPO_ROOT), "archive", "--format=tar.gz", self.code_ref, "yeto"],
                                    stdout=subprocess.PIPE)
