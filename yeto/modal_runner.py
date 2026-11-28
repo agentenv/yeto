@@ -2444,6 +2444,12 @@ class RoutingOps:
     def down(self, name):
         return self._for(name).down(name)
 
+    def add_relaunch_envs(self, name, envs) -> bool:
+        """The relaunch environment of an island whose ops keep its launch spec (a resident
+        ``ssh:`` island); False when its ops take none (the controller edits the task)."""
+        hook = getattr(self._for(name), "add_relaunch_envs", None)
+        return bool(hook(name, envs)) if callable(hook) else False
+
     def rl_strict_failure(self, name, job_id):
         probe = getattr(self._for(name), "rl_strict_failure", None)
         return probe(name, job_id) if probe else None

@@ -78,7 +78,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dc_replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -587,6 +587,19 @@ class SshIslandOps:
     def cluster_up(self, name: str) -> bool:
         rec = self.islands[name]
         return rec.job is not None and rec.verdict != "FAILED"
+
+    def add_relaunch_envs(self, name: str, envs: dict[str, str]) -> bool:
+        """Add ``envs`` (the fleet's relaunch environment, e.g. peer recovery) to the island's
+        next incarnations: :meth:`relaunch` starts from the island's own spec, not the
+        controller's task, and the spec is frozen. True when ``name`` is an island here."""
+        rec = self.islands.get(name)
+        if rec is None:
+            return False
+        with self._lock:
+            spec = dc_replace(rec.spec, env={**dict(rec.spec.env), **dict(envs)})
+            rec.spec = spec
+            rec.islands.spec = spec
+        return True
 
     def relaunch(self, task: Any, name: str) -> int | None:
         """Release the failed incarnation (verified) and start the next one; None when
