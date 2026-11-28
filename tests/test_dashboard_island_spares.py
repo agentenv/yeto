@@ -622,6 +622,7 @@ def test_a_wait_no_record_reports_any_more_reads_lost(tmp_path):
     assert any(t.startswith("unknown · no event for 1h0m") for t in out["texts"])
     why = "launcher may be gone · no wait report for 2h0m"  # what to act on first, the same duration format
     assert any(t.startswith(why) for t in out["texts"]) and why in out["nodes"] and why in out["tip"]
+    assert "trainer 1 unknown" in out["nodes"] and "trainer 1 lost" not in out["nodes"]  # the ended islands' line
     # an hourly report one hour and ten minutes old is still a wait
     ok = _long_wait(tmp_path / "b", 30 * 60, report_age=70 * 60)
     assert cards(ok)["1"]["spares"]["waiting"] and "wait_state" not in cards(ok)["1"]["spares"]

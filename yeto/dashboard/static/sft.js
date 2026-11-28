@@ -522,6 +522,8 @@ function naKpi(x){var t=String(x[0]),v=String(x[1]),y=x.slice();
 // a resident ssh: island's spare nodes and unhealthy nodes (the card's spares / node_health). Durations as the
 // topology cards write them (1m36s), the reasons in the topology's words (YetoTopoD)
 function hms(s){return typeof YetoTopo!=="undefined"&&YetoTopo.util?YetoTopo.util.dur(s):dur(s)}
+// a lost island whose wait for a spare node nobody reports any more reads unknown, as on its topology card
+function stWord(c){var ws=c.spares&&c.spares.wait_state;return ws&&ws.state==="frozen"&&c.status==="lost"?"unknown":c.status}
 function spEnded(c){return /^(done|stopped|left)$/.test(c.status)||!!(c.island_now&&/^(stopped|done|down|removed|failed|abandoned)$/.test(c.island_now.state))}
 var TD=function(){return typeof YetoTopoD!=="undefined"&&YetoTopoD.whyNoSpare?YetoTopoD:null};
 // the time spare waits are measured against: the topology's (its cards and tips use it too), else the page's
@@ -569,7 +571,7 @@ function rlm(V){
   var trel=rel.filter(function(r){return r.trainer!=null||fin(r.released_at)}),ltr=trel.length?trel[trel.length-1]:null;
   var toks=sum(trs.map(function(c){return sum(RR(c).map(function(r){return r.tokens}))})),bl=A.backlog,blp=bl&&bl.points&&bl.points.length?bl.points[bl.points.length-1]:null;
   var caps=sps.map(function(c){return (S[c.id]||{}).max_backlog_groups}).filter(fin);
-  var kp=[["Islands active / total",act.filter(function(c){return rlLive(c.status)}).length+" / "+act.length,["trainers "+liveTr.length+"/"+trs.length,"samplers "+sps.filter(function(c){return rlLive(c.status)}).length+"/"+sps.length].concat(act.map(function(c){return c.label+" "+c.status}),unk.length?[unk.length+" unrecognized tape(s) not counted"]:[]).join(" · ")],
+  var kp=[["Islands active / total",act.filter(function(c){return rlLive(c.status)}).length+" / "+act.length,["trainers "+liveTr.length+"/"+trs.length,"samplers "+sps.filter(function(c){return rlLive(c.status)}).length+"/"+sps.length].concat(act.map(function(c){return c.label+" "+stWord(c)}),unk.length?[unk.length+" unrecognized tape(s) not counted"]:[]).join(" · ")],
     ["Groups trained / written",k(tsum("trained_groups")||0,0)+" / "+k(ssum("groups")||0,0),(tsum("trained_groups")?"trainers trained "+k(tsum("trained_groups"),0)+" groups ("+k(toks)+" tokens)":"trainer has trained 0 groups yet")+" · samplers wrote "+k(ssum("groups")||0,0)+" groups, whole run"],
     ["Fleet tokens / s",k(tokS),(liveTr.length?"live trainers, last round":"last round of each trainer")+" · MFU not on the tapes"],
     [(f0?f0.label:"Trainer")+" step p50",!fs.length&&!trained&&(A.islands||[]).length?"not trained yet":dur(pctl(fs,0.5)),"round p50 "+dur(pctl(fr,0.5))+" · "+fs.length+" steps in range"],
@@ -610,7 +612,7 @@ function rlm(V){
       var sg=liv&&!!(c.island_now&&"straggler" in c.island_now?c.island_now.straggler:c.straggler);
       var sm=c.role!=="sampler"?spareMark(c):null,wr=sm&&c.waiting_reason==="waiting for a spare node"?null:c.waiting_reason;
       var mk=sm||(sg?["straggler","wn","y"]:null);
-      var row='<tr'+(liv?'':' class="off"')+'><td><div class="nn">'+(mk?'<i class="dot '+mk[2]+'" title="'+esc(mk[0])+'"></i>':rlDot(c.status))+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns"'+(!sm&&sg?' style="white-space:nowrap"':'')+'>'+esc([c.name,c.gpu?c.gpu+" × "+c.cards:null,c.backend_label].filter(Boolean).join(" · ")||"n/a")+' · '+(mk?'<span class="'+mk[1]+'"'+(sm?' style="white-space:nowrap"':'')+'>'+esc(mk[0])+'</span>':esc(c.status))+esc((wr?": "+wr:"")+(c.left?" ("+(c.left.reason||"")+")":"")+(c.starting&&c.startup_stage?": "+c.startup_stage.label+(fin(c.startup_stage.age_s)?" "+dur(c.startup_stage.age_s):"")+(fin(c.startup_s)?" · start "+dur(c.startup_s):""):"")+((c.launches||[]).length>1?" · launch "+(c.launches.length)+" ("+(c.launches.length-1)+" superseded)":""))+'</div></td>';
+      var row='<tr'+(liv?'':' class="off"')+'><td><div class="nn">'+(mk?'<i class="dot '+mk[2]+'" title="'+esc(mk[0])+'"></i>':rlDot(c.status))+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns"'+(!sm&&sg?' style="white-space:nowrap"':'')+'>'+esc([c.name,c.gpu?c.gpu+" × "+c.cards:null,c.backend_label].filter(Boolean).join(" · ")||"n/a")+' · '+(mk?'<span class="'+mk[1]+'"'+(sm?' style="white-space:nowrap"':'')+'>'+esc(mk[0])+'</span>':esc(stWord(c)))+esc((wr?": "+wr:"")+(c.left?" ("+(c.left.reason||"")+")":"")+(c.starting&&c.startup_stage?": "+c.startup_stage.label+(fin(c.startup_stage.age_s)?" "+dur(c.startup_stage.age_s):"")+(fin(c.startup_s)?" · start "+dur(c.startup_s):""):"")+((c.launches||[]).length>1?" · launch "+(c.launches.length)+" ("+(c.launches.length-1)+" superseded)":""))+'</div></td>';
       var hb='<td class="bar"><div class="bl">'+(fin(h)?h.toFixed(1)+" GiB"+(fin(lim)?" of "+lim+" GiB":""):"not sampled")+'</div><div class="bt"><div class="bf'+(liv?"":" idle")+'" style="width:'+pc.toFixed(1)+'%"></div>'+(fin(lim)?'<div class="bm" style="left:'+(100*lim/mx).toFixed(1)+'%"></div>':"")+'</div>'+(fin(h)?"":'<div class="ns" title="'+esc(ex.gpu_mem_note||"")+'">'+(/unavailable/.test(ex.gpu_mem_note||"")?"telemetry library missing":"enable --rl-resource-sample-interval")+'</div>')+'</td>';
       if(noHbm)hb="";
       if(c.role==="sampler"&&s){var sr=s.rounds||[],l=s.last_round||sr[sr.length-1]||{},ld=(A.releases||[]).map(function(x){return (x.loads||{})[c.id]?[x.policy_version,x.loads[c.id]]:null}).filter(Boolean).pop();
@@ -632,7 +634,7 @@ function rlm(V){
       '<td colspan="'+nc+'" class="ns" title="'+esc((c.left&&c.left.detail)||"")+'">'+esc(st+(why?": "+why:"")+" · ended before its first round")+'</td></tr>'};
   var rowNa=function(c){if(never(c))return neverRow(c);var h=rowOf(c);return flNa?h.replace(/(<[^>]*>)|\bn\/a\b/g,function(m,tag){return tag||'<span class="note" title="not on this island\'s tapes">—</span>'}):h};
   $("rNodes").innerHTML=(liveC.length?'<table class="nt">'+cols(liveC)+liveC.map(rowNa).join("")+'</table>':'<div class="empty">no active island</div>')+
-    (endC.length?'<details class="ended"'+(liveC.length?"":" open")+'><summary class="ns">'+endC.length+' island(s) that ended (left / lost / finished / stopped): '+esc(endC.map(function(c){return c.label+" "+c.status}).join(", "))+'</summary><table class="nt">'+cols(endC)+endC.map(rowNa).join("")+'</table></details>':"")+
+    (endC.length?'<details class="ended"'+(liveC.length?"":" open")+'><summary class="ns">'+endC.length+' island(s) that ended (left / lost / finished / stopped): '+esc(endC.map(function(c){return c.label+" "+stWord(c)}).join(", "))+'</summary><table class="nt">'+cols(endC)+endC.map(rowNa).join("")+'</table></details>':"")+
     (unk.length?'<details class="ended"><summary class="ns">'+unk.length+' unrecognized tape(s)</summary><table class="nt">'+(cols([]),"")+unk.map(unkRow).join("")+'</table></details>':"");
   // fleet charts
   $("rFleetH").textContent="Fleet over "+overLabel();
