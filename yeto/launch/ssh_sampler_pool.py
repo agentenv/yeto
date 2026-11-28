@@ -1639,6 +1639,23 @@ class SshSamplerPoolOps:
     def ready(self, m) -> bool:
         return self.probe(m).joined
 
+    def serving_evidence(self, m) -> bool:
+        """The run store says ``m``'s sampler serves: its node runtime wrote the ready record of
+        the ticket's current assignment, its heartbeat is fresh and no exit is recorded
+        (``yeto.node.records``). Durable, unlike the probe's JOIN grep (the container log's
+        last 2000 lines, the node's tape): a control plane that took the pool over reads it
+        too. False: no node runtime / store, or not serving."""
+        from yeto.node.records import node_status  # noqa: PLC0415
+
+        try:
+            node = self.provider.node_of_ticket(m.ticket)
+        except KeyError:
+            return False
+        route = self.node_route_for(node)
+        if route is None:
+            return False
+        return node_status(route.objects, m.ticket).state == "ready"
+
     def state_command(self, shard: str) -> str:
         p = node_paths(self.conf.workdir, shard)
         if self.conf.runtime == "venv":
@@ -1670,6 +1687,12 @@ class SshSamplerPoolOps:
         except subprocess.TimeoutExpired:
             return island_status.Probe(node=island_status.PROBE_UNREACHABLE)
         probe = island_status.Probe.parse(_text(out.stdout), out.returncode)
+        if probe.node == island_status.PROBE_OK and probe.sampler == "running" and not probe.joined:
+            try:  # the JOIN line left the log tail / the tape is elsewhere: the store's ready record
+                if self.serving_evidence(m):
+                    probe = replace(probe, joined=True)
+            except Exception as error:  # noqa: BLE001 - observation only: the probe stands as read
+                _log(f"ssh pool: {m.shard}: node records not read: {error!r}"[:300])
         if health and probe.node == island_status.PROBE_OK:
             from yeto.hw.node_health import fresh  # noqa: PLC0415
 
