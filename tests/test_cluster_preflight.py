@@ -485,8 +485,8 @@ def test_report_table_lists_fixes_for_findings():
      "host_memory", cp.FAIL, "1.6 TB"),
     (Behavior(host={"meminfo": (0, f"MemTotal: {2048 * KB_PER_GIB} kB\nMemAvailable: {900 * KB_PER_GIB} kB")}),
      "host_memory", cp.WARN, "leftover"),
-    (Behavior(host={"disk": (0, "\n".join([disk_line("/", 50, 200, mount="/"),
-                                           disk_line("/var/lib/containerd", 40, 200, mount="/"),
+    (Behavior(host={"disk": (0, "\n".join([disk_line("/", 50, 200, dev="/dev/sda2", mount="/"),
+                                           disk_line("/var/lib/containerd", 40, 200, dev="/dev/sda2", mount="/"),
                                            disk_line("/mnt/nvme/docker", 3000, mount="/mnt/nvme"),
                                            disk_line("/mnt/nvme/yeto", 1500, mount="/mnt/nvme"),
                                            disk_line("/mnt/nvme/models", 1500, mount="/mnt/nvme")]))}),
@@ -817,3 +817,62 @@ def test_the_port_probe_covers_the_ray_agent_ports_ssh_nodes_pin():
 
     ports = set(cp.Requirements().ports)
     assert set(RAY_AGENT_PORTS.values()) | {52365, 6379, 8265, 10001, 29500} <= ports
+
+
+# ------------------------------------------------------------- scratch / image root disks
+def _disk_report(node, disk_rows):
+    nodes = [node]
+    return run_pf(nodes, FakeCluster(nodes, **{node.name: Behavior(host={"disk": (0, "\n".join(disk_rows))})}))
+
+
+def test_host_probe_reads_the_scratch_disk():
+    (disk,) = [cmd for name, cmd in cp.host_sections(b300(0, scratch="/data/scratch")) if name == "disk"]
+    assert " /data/scratch;" in disk
+    (disk,) = [cmd for name, cmd in cp.host_sections(b300(0)) if name == "disk"]
+    assert "scratch" not in disk
+
+
+def test_scratch_on_its_own_small_disk_fails_although_the_mounts_are_fine():
+    node = b300(0, scratch="/data/scratch", scratch_min_free_gib=1500)
+    rows = [disk_line("/", 80, 200, dev="/dev/sda2", mount="/"),
+            disk_line("/var/lib/containerd", 3000, mount="/mnt/nvme"),
+            disk_line("/mnt/nvme/docker", 3000, mount="/mnt/nvme"),
+            *[disk_line(p, 7000, mount="/mnt/nvme") for p in sorted(node.mounts)],
+            disk_line("/data/scratch", 900, 1000, dev="/dev/sdb1", mount="/data")]
+    report = _disk_report(node, rows)
+    assert status(report, "disk", node.name) == {cp.PASS}
+    (c,) = find(report, "disk_scratch", node.name)
+    assert c.status == cp.FAIL and "/data (ext4 /dev/sdb1) 900 GiB free < 1500 GiB" in c.detail
+    assert "put scratch on a local NVMe" in c.fix
+    rows[-1] = disk_line("/data/scratch", 2000, 4000, dev="/dev/nvme1n1", mount="/data")
+    (c,) = find(_disk_report(node, rows), "disk_scratch", node.name)
+    assert c.status == cp.PASS
+    rows[-1] = disk_line("/data/scratch", 900, 4000, dev="/dev/nvme1n1", mount="/data")
+    (c,) = find(_disk_report(node, rows), "disk_scratch", node.name)
+    assert c.status == cp.FAIL and "NVMe" not in c.fix and c.fix.startswith("free space on /data")
+    rows[-1] = "/data/scratch\t-\tmissing"
+    (c,) = find(_disk_report(node, rows), "disk_scratch", node.name)
+    assert c.status == cp.FAIL and "mkdir -p /data/scratch" in c.fix
+
+
+def test_docker_data_root_on_another_disk_than_containerd_is_checked_too():
+    node = b300(0)
+    rows = [disk_line("/", 80, 200, dev="/dev/sda2", mount="/"),
+            disk_line("/var/lib/containerd", 3000, mount="/mnt/nvme"),
+            disk_line("/mnt/nvme/docker", 30, 100, dev="/dev/sdc1", mount="/mnt/docker"),
+            *[disk_line(p, 7000, mount="/mnt/nvme") for p in sorted(node.mounts)]]
+    checks = find(_disk_report(node, rows), "disk_images", node.name)
+    bad = [c for c in checks if c.status == cp.FAIL]
+    assert len(checks) == 2 and len(bad) == 1 and "docker data root" in bad[0].detail
+    assert "on /mnt/docker: 30 GiB free" in bad[0].detail and "move it to NVMe" in bad[0].fix
+
+
+def test_image_root_already_on_nvme_is_not_told_to_move_to_nvme():
+    node = b300(0)
+    rows = [disk_line("/", 80, 200, dev="/dev/sda2", mount="/"),
+            disk_line("/var/lib/containerd", 40, 3000, dev="/dev/nvme0n1p1", mount="/mnt/nvme"),
+            disk_line("/mnt/nvme/docker", 40, 3000, dev="/dev/nvme0n1p1", mount="/mnt/nvme"),
+            *[disk_line(p, 7000, mount="/mnt/nvme") for p in sorted(node.mounts)]]
+    (c,) = find(_disk_report(node, rows), "disk_images", node.name)
+    assert c.status == cp.FAIL and "move it to NVMe" not in c.fix
+    assert "already on NVMe (/dev/nvme0n1p1)" in c.fix
