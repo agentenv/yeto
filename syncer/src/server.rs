@@ -4921,9 +4921,7 @@ async fn scheduler(
                             carry.release_anchor(*member, push);
                         }
                     }
-                    r.pushes.clear();
-                    r.refused_ahead.clear();
-                    r.carry_refused.clear();
+                    r.clear_attempt_answers();
                     arrival_gaps.forget(r.t, r.p);
                     r.fold = round_fold(&cfg, &st, r.p, &r.expected_members, r.quorum_size);
                     r.started = Instant::now();
@@ -5232,19 +5230,15 @@ async fn scheduler(
                                 "push reuses an anchor whose delta was already taken"
                             );
                             rejected("anchor_reused");
-                            // Its delta carried into this very round is its answer to it.
-                            if let Some(round) = inflight.iter_mut().find(|round| {
-                                round.t == global_step && round.p == fragment_id as usize
-                            }) {
-                                if round.answer_with_carry(member) {
-                                    info!(
-                                        learner_id,
-                                        generation,
-                                        step = global_step,
-                                        fragment = fragment_id,
-                                        "the delta carried into this round answers it for the refused island"
-                                    );
-                                }
+                            // Its delta carried into this very round attempt is its answer to it.
+                            if note_carry_refused(&mut inflight, member, &push) {
+                                info!(
+                                    learner_id,
+                                    generation,
+                                    step = global_step,
+                                    fragment = fragment_id,
+                                    "the delta carried into this round answers it for the refused island"
+                                );
                             }
                             continue;
                         }
@@ -6098,9 +6092,18 @@ impl Round {
         responders
     }
 
+    /// A new attempt: the answers of the last one are dropped (own pushes, the
+    /// islands refused as ahead, and the carried deltas that answered for refused
+    /// islands; the carried deltas themselves stay).
+    fn clear_attempt_answers(&mut self) {
+        self.pushes.clear();
+        self.refused_ahead.clear();
+        self.carry_refused.clear();
+    }
+
     /// `member`'s push for this round was refused as `anchor_reused`: when a
-    /// delta of theirs is carried into this round, it answers for them
-    /// (`carry_refused`). Returns true when it does.
+    /// delta of this member (this generation) is carried into this round, it
+    /// answers for them (`carry_refused`). Returns true when it does.
     fn answer_with_carry(&mut self, member: Member) -> bool {
         if !self.carried.iter().any(|(carried, _push)| *carried == member) {
             return false;
@@ -6882,6 +6885,20 @@ impl LateCarry {
             })
             .collect()
     }
+}
+
+/// `push` of `member` was refused as `anchor_reused`. When it answers an open
+/// round attempt (same step, fragment and attempt) into which a delta of the
+/// same member is carried, that carried delta becomes the member's answer
+/// (`Round::answer_with_carry`). A refused push of an earlier attempt or step
+/// marks nothing. Returns true when it did.
+fn note_carry_refused(rounds: &mut [Round], member: Member, push: &Push) -> bool {
+    rounds
+        .iter_mut()
+        .find(|round| {
+            round.t == push.global_step && round.p == push.fragment_id as usize && round.attempt == push.round_attempt
+        })
+        .is_some_and(|round| round.answer_with_carry(member))
 }
 
 /// Log (and with dynamic membership, tape) the outcome of a late push.
@@ -13864,6 +13881,65 @@ mod tests {
         assert!(round.answer_with_carry(slow)); // once is enough; a second refusal changes nothing
         assert_eq!(round.carry_refused, vec![slow]);
         assert!(round.quorum_reached() && round.responders() == vec![&slow]);
+    }
+
+    /// A round of step 7, fragment 1, attempt 1 holding a delta of `slow`
+    /// (generation 1) carried from an earlier round.
+    fn round_with_a_carry(slow: Member) -> Round {
+        let mut round = test_round(vec![member(0, 1), slow]);
+        round.quorum_size = 1;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        assert_eq!(attach_carry(&mut round, slow, test_push_for(slow.learner_id, 4), 1), Ok(1));
+        round
+    }
+
+    #[test]
+    fn a_refused_push_marks_its_carry_only_for_its_own_step_fragment_and_attempt() {
+        let slow = member(1, 1);
+        let refused = |step: u64, fragment: u32, attempt: u32| {
+            let mut push = test_push_for(1, 4);
+            push.global_step = step;
+            push.fragment_id = fragment;
+            push.round_attempt = attempt;
+            push
+        };
+        // another attempt (a push of the attempt before, refused late), an earlier
+        // step of the fragment, another fragment: nothing is marked
+        for (step, fragment, attempt) in [(7, 1, 2), (7, 1, 0), (3, 1, 1), (7, 0, 1), (8, 1, 1)] {
+            let mut rounds = vec![round_with_a_carry(slow)];
+            assert!(!note_carry_refused(&mut rounds, slow, &refused(step, fragment, attempt)), "{step} {fragment} {attempt}");
+            assert!(rounds[0].carry_refused.is_empty() && !rounds[0].quorum_reached());
+        }
+        // of two open rounds, only the one the push answers
+        let mut other = round_with_a_carry(slow);
+        other.p = 0;
+        other.t = 8;
+        let mut rounds = vec![other, round_with_a_carry(slow)];
+        assert!(note_carry_refused(&mut rounds, slow, &refused(7, 1, 1)));
+        assert!(rounds[0].carry_refused.is_empty() && rounds[1].carry_refused == vec![slow]);
+        assert!(rounds[1].quorum_reached() && !rounds[0].quorum_reached());
+    }
+
+    #[test]
+    fn a_new_incarnation_does_not_answer_with_the_carry_of_the_old_generation() {
+        let old = member(1, 1);
+        let new = member(1, 2);
+        let mut rounds = vec![round_with_a_carry(old)];
+        rounds[0].expected_members = vec![member(0, 1), new];
+        let mut push = test_push_for(1, 4);
+        push.global_step = 7;
+        assert!(!note_carry_refused(&mut rounds, new, &push));
+        assert!(rounds[0].carry_refused.is_empty() && !rounds[0].quorum_reached());
+    }
+
+    #[test]
+    fn a_new_attempt_drops_the_carry_answers_of_the_last_one() {
+        let slow = member(1, 1);
+        let mut round = round_with_a_carry(slow);
+        assert!(round.answer_with_carry(slow) && round.quorum_reached());
+        round.clear_attempt_answers();
+        assert!(round.carry_refused.is_empty() && !round.quorum_reached());
+        assert_eq!(round.carried.len(), 1); // the carried delta itself stays in the round
     }
 
     #[test]
