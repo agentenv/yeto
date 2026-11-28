@@ -1671,6 +1671,13 @@ def trainer_leases(args: Any) -> Any:
     from .node_lease import NodeLeases, local_identity, ssh_probe
 
     path = _lease_record_path(args)
+    # an island launch of an on-site control plane: the run store's identity (the one its earlier
+    # launches, on any control host, held its nodes with) before the first lease is read or taken.
+    # The cluster preflight (yeto.cli, before launcher.run) leases here too, so it is done here and
+    # not only in launcher.run; a no-op off the on-site control plane.
+    from yeto import launcher  # noqa: PLC0415
+
+    launcher._restore_lease_identity(args)
     identity = local_identity(path)
     key = (store, f"{args.cluster_prefix}/trainer@{identity}")
     leases = _TRAINER_LEASES.get(key)

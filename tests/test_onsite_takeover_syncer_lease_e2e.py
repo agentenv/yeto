@@ -38,6 +38,8 @@ from yeto.launch import island_lifecycle as lifecycle
 from yeto.launch import node_lease, ssh_resident, ssh_trainer_island
 from yeto.launch.node_inventory import NodeList
 from yeto.launch.pool.store_lock import StoreLock
+from yeto.launch.preflight import gate
+from yeto.rl.engine import sample_roles
 from yeto.rl import island_launches as il
 from yeto.rl import trainer_worker as tw
 from yeto.rl.engine.object_store import DirectoryObjectStore
@@ -105,11 +107,15 @@ class Host:
         self.live: dict[str, list[str]] = {}
         self.starts: list[tuple[str, list[str]]] = []
         self.errors: list[str] = []
+        self.exits: dict[str, dict] = {}
 
     def enter(self) -> None:
         """This host's process state: its run directory, a fresh lease cache."""
         self.monkeypatch.setattr(runs, "RUNS_DIR", self.tmp / self.name / "runs")
         self.monkeypatch.setattr(ssh_trainer_island, "_TRAINER_LEASES", {})
+        # an island launch of this on-site control plane: run up's environment, the run store
+        self.monkeypatch.setenv(launcher.JOURNAL_FROM_STORE_ENV, "1")
+        self.monkeypatch.setattr(lifecycle, "store_objects", lambda *a, **kw: self.objects)
 
     def args(self, argv: list[str]):
         args = cli.build_parser().parse_args(["launch", *argv])
@@ -117,9 +123,13 @@ class Host:
         return args
 
     def lease_preamble(self, args) -> None:
-        """The launcher's node-lease steps before any cloud work (``launcher.run``)."""
+        """A ``yeto launch`` process's node-lease steps, in its order: the cluster preflight
+        (``yeto.cli``: ``preflight.gate.gate_nodes`` leases the island's nodes), then the
+        launcher's before any cloud work (``launcher.run``)."""
         env = {launcher.JOURNAL_FROM_STORE_ENV: "1"}
         self.enter()
+        if sample_roles.fleet_role(args) != sample_roles.FLEET_ROLE_SYNCER:
+            gate.gate_nodes(args, GPU, "inventory.yaml")
         launcher._restore_lease_identity(args, environ=env, objects=self.objects)
         ssh_resident.check(args, parse_gpu_spec(args.gpu))
         launcher._share_lease_placement(args, environ=env, objects=self.objects)
@@ -143,7 +153,10 @@ class Host:
             self.lease_preamble(args)
         except (SystemExit, ssh_trainer_island.SshIslandError) as error:
             self.errors.append(str(error))
+            self.exits[prefix] = {"exit_code": 1, "log": str(error),
+                                  "detail": "yeto launch ended before it registered its run (exit 1)"}
             return 0
+        self.exits.pop(prefix, None)
         k = int(args.rl_fleet_learner_id)
         if tw.TAKEOVER_FLAG not in argv:
             self.site.start(prefix)  # a takeover launch adopts the island; it never starts it
@@ -167,6 +180,14 @@ class Host:
                     return
             time.sleep(0.3)
 
+    def fail(self, prefix: str) -> None:
+        """The island died on its node and its launch ended 1 (its leases stay with their holder)."""
+        self.site.running.pop(prefix, None)
+        for leases in self.leases:
+            leases.stop_keeper()
+        self.live.pop(prefix, None)
+        self.exits[prefix] = {"exit_code": 1, "log": "CUDA out of memory", "detail": "exit 1"}
+
     def lose(self) -> None:
         """The host is gone: its launches stop renewing their leases and records locks."""
         self.alive.clear()
@@ -188,7 +209,7 @@ class Ops:
         return self.host.start(prefix, argv)
 
     def ended(self, prefix: str):
-        return None
+        return self.host.exits.get(prefix)
 
     def request_stop(self, prefix: str, why: str) -> None:
         raise AssertionError(f"nothing is stopped here ({prefix}: {why})")
@@ -229,7 +250,8 @@ def site(tmp_path, monkeypatch):
     return s
 
 
-def test_takeover_with_a_lease_store_records_the_syncer_and_adopts_the_island(tmp_path, monkeypatch, site):  # noqa: PLR0915
+def _taken_over(tmp_path, monkeypatch, site):  # noqa: PLR0915
+    """Host A starts the island, is lost; host B takes it over (B7). Returns host B's side."""
     lease_store = str(tmp_path / "leases")
     objects, desired = fleet(tmp_path, [island_member()], syncer=False)
     states = lifecycle.IslandStateStore(objects, log=lambda m: None)
@@ -277,9 +299,34 @@ def test_takeover_with_a_lease_store_records_the_syncer_and_adopts_the_island(tm
     # the island's node: leased again by the island's own holder only; nothing blocked
     assert _holders(lease_store) == {island_holder}
     assert not [e for e in _events(lease_store) if "blocked" in e], _events(lease_store)
-    b.lose()
     # host A's syncer launch never waited for (nor took) the island's node either
     assert getattr(a, "syncer_error", None) is None, a.syncer_error
+    return b, worker_b, lease_store, island_holder
+
+
+def test_takeover_with_a_lease_store_records_the_syncer_and_adopts_the_island(tmp_path, monkeypatch, site):
+    b, _worker, _store, _holder = _taken_over(tmp_path, monkeypatch, site)
+    b.lose()
+
+
+def test_a_relaunch_after_the_takeover_leases_as_the_same_holder(tmp_path, monkeypatch, site):
+    """B9: the island's node lease identity lives in the run store, not only in the lost host's
+    run directory: after the takeover, a relaunch of the island (it failed, e.g. OOM) passes the
+    cluster preflight and leases its node as the same holder; the island is not given up."""
+    b, worker_b, lease_store, island_holder = _taken_over(tmp_path, monkeypatch, site)
+    prefix = f"{RUN}-i0"
+    b.fail(prefix)  # the island died (OOM): its launch ended 1 after it registered its run
+    _wait(lambda: len(b.starts) >= 2, "the island was never relaunched", step=worker_b.step)
+    for _ in range(5):
+        worker_b.step()  # a refused relaunch would be relaunched again here, then given up
+    assert b.errors == [], b.errors  # no "under another launch identity" refusal
+    assert [p for p, _ in b.starts] == [prefix, prefix] and tw.TAKEOVER_FLAG not in b.starts[1][1]
+    assert prefix in b.live and site.running == {prefix: 2}  # relaunched, running again
+    rec = worker_b.load(0)
+    assert rec["state"] not in ("abandoned", "failed", "given_up") and rec["relaunches"] == 2, rec
+    assert _holders(lease_store) == {island_holder}
+    assert not [e for e in _events(lease_store) if "blocked" in e], _events(lease_store)
+    b.lose()
 
 
 def _record(host: Host) -> None:
