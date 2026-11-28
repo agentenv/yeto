@@ -308,7 +308,9 @@ class BreakerState:
         (the open sampler round included), when that scope saw at least ``min_total``;
         ``drop_rounds``: the rounds of the window that dropped anything."""
         out: dict[str, dict] = {}
-        keys = set(self.rounds) | set(self._open)
+        # In a fixed order: of two scopes with the same ratio the first one is reported, so a
+        # set's order (string hashes, PYTHONHASHSEED) must not pick it.
+        keys = sorted(set(self.rounds) | set(self._open), key=lambda key: (str(key[0]), tuple(map(str, key[1]))))
         for name, scope in keys:
             rows = list(self.rounds.get((name, scope)) or ())
             cur = self._open.get((name, scope))
