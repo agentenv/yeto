@@ -36,11 +36,42 @@ def code_key(sha: str) -> str:
     return f"{CODE_DIR}/{sha}.tar"
 
 
+def not_git_tree(repo: Path | str, why: str) -> str:
+    """Why yeto at ``repo`` cannot ship its code (``why``: what git said), and what to do."""
+    return (f"{repo} is not a git work tree ({why}): yeto ships its code to the nodes as a git archive of a "
+            "commit and names the node's tree by that commit, so it must run from a git clone. Use a `git clone` "
+            "of yeto (not a `git archive` export or a copied tree) as --yeto-dir / PYTHONPATH, or make the tree "
+            "a repository first (`git init && git add yeto && git commit -m tree`)")
+
+
+def git_tree_problem(repo: Path | str = REPO_ROOT, *, run: Callable[..., Any] = subprocess.run) -> str | None:
+    """None when ``repo`` is inside a git work tree with a commit; else :func:`not_git_tree`."""
+    try:
+        done = run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                   capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        return not_git_tree(repo, f"git did not run: {error}")
+    if done.returncode != 0:
+        return not_git_tree(repo, f"git rev-parse HEAD: exit {done.returncode}")
+    return None
+
+
+def code_sha(ref: str = "HEAD", *, repo: Path | str = REPO_ROOT, run: Callable[..., Any] = subprocess.run) -> str:
+    """The short commit of ``ref`` in ``repo`` (``git rev-parse --short=12``); a tree that
+    is no git work tree raises :class:`CodeError` saying so (:func:`not_git_tree`)."""
+    try:
+        return run(["git", "-C", str(repo), "rev-parse", "--short=12", ref], capture_output=True, text=True,
+                   check=True).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        raise CodeError(not_git_tree(repo, f"git rev-parse {ref}: exit {error.returncode}")) from error
+    except FileNotFoundError as error:
+        raise CodeError(not_git_tree(repo, f"git did not run: {error}")) from error
+
+
 def git_code_tar(ref: str = "HEAD", *, repo: Path = REPO_ROOT,
                  run: Callable[..., Any] = subprocess.run) -> tuple[str, bytes]:
     """``(short sha, tar of yeto/)`` of the commit ``ref`` (``git archive``)."""
-    sha = run(["git", "-C", str(repo), "rev-parse", "--short=12", ref], capture_output=True, text=True,
-              check=True).stdout.strip()
+    sha = code_sha(ref, repo=repo, run=run)
     data = run(["git", "-C", str(repo), "archive", "--format=tar", ref, "yeto"], capture_output=True,
                check=True).stdout
     return sha, data

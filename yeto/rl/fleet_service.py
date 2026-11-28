@@ -218,9 +218,33 @@ def _env_file_check(spec: ServiceSpec) -> list[str]:
     ]
 
 
+GIT_EXIT = 5  # --yeto-dir on the service host is no git work tree (the install script's own exit)
+
+
+def _yeto_dir_check(spec: ServiceSpec) -> list[str]:
+    """Shell lines: exit :data:`GIT_EXIT` unless ``--yeto-dir`` is a git work tree with a
+    commit on the host (run up ships its code by commit: :func:`yeto.node.code.git_tree_problem`)."""
+    d = shlex.quote(spec.yeto_dir)
+    return [f"git -C {d} rev-parse --verify --quiet 'HEAD^{{commit}}' >/dev/null 2>&1 || {{ echo "
+            f"'yeto fleet service: --yeto-dir {spec.yeto_dir} is not a git work tree on this host: run up ships "
+            "its code to the nodes as a git archive of a commit; use a git clone of yeto (not a git archive "
+            f"export or a copied tree); nothing done' >&2; exit {GIT_EXIT}; }}"]
+
+
+def yeto_dir_problem(spec: ServiceSpec, *, here: bool) -> str | None:
+    """``--yeto-dir`` checked on this machine (``here``: the unit runs on this machine, or
+    the directory exists here): None when it is a git work tree, or when it cannot be
+    checked here (``--install`` checks it on the host)."""
+    from yeto.node.code import git_tree_problem  # noqa: PLC0415
+
+    if not here and not Path(spec.yeto_dir).is_dir():
+        return None
+    return git_tree_problem(spec.yeto_dir)
+
+
 def install_script(spec: ServiceSpec, text: str) -> str:
-    """The shell script ``--install`` runs on the service host: check the env file's mode,
-    write the unit, ``systemctl enable --now``."""
+    """The shell script ``--install`` runs on the service host: check the env file's mode
+    and ``--yeto-dir`` (a git work tree), write the unit, ``systemctl enable --now``."""
     unit = f"{UNIT_DIR}/{spec.unit}"
     marker = "YETO_UNIT_EOF"
     if marker in text:
@@ -228,6 +252,7 @@ def install_script(spec: ServiceSpec, text: str) -> str:
     return "\n".join([
         "set -eu",
         *_env_file_check(spec),
+        *_yeto_dir_check(spec),
         f"sudo -n tee {shlex.quote(unit)} >/dev/null <<'{marker}'",
         text.rstrip("\n"),
         marker,
@@ -263,7 +288,7 @@ def _ssh(host: str, script: str, *, runner: Callable[..., Any] | None, what: str
     if done.returncode != 0:
         err = str(getattr(done, "stderr", "") or "").strip().splitlines()
         log(f"yeto fleet service: {what} on {host} failed (exit {done.returncode})" + (f": {err[-1]}" if err else ""))
-        return 1
+        return GIT_EXIT if done.returncode == GIT_EXIT and what.startswith("install") else 1
     return 0
 
 
@@ -273,7 +298,10 @@ def install(spec: ServiceSpec, host: str, *, runner: Callable[..., Any] | None =
     if not _SAFE_HOST.fullmatch(str(host)) or str(host).startswith("-"):
         raise ServiceError(f"--install {host!r} is not an SSH host")
     script = install_script(spec, unit_text(spec))
-    if _ssh(host, script, runner=runner, what=f"install of {spec.unit}", log=log):
+    code = _ssh(host, script, runner=runner, what=f"install of {spec.unit}", log=log)
+    if code == GIT_EXIT:
+        return 2  # a refusal: --yeto-dir is no git work tree there (said by the script)
+    if code:
         return 1
     log(f"yeto fleet service: {spec.unit} on {host}: `ssh {host} systemctl status {spec.unit}`, "
         f"`ssh {host} journalctl -u {spec.unit}`")
@@ -389,6 +417,9 @@ def main(args: Any) -> int:
                 raise ServiceError("give --print or --install HOST (or the action stop / clear-ended / fresh HOST)")
             if args.host is not None:
                 raise ServiceError(f"{args.host!r}: a host goes with stop / clear-ended / fresh, or with --install")
+            problem = yeto_dir_problem(spec, here=args.yeto_dir is None)
+            if problem:
+                raise ServiceError(problem)
             if args.print:
                 sys.stdout.write(unit_text(spec))
                 return 0

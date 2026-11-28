@@ -19,6 +19,7 @@ from yeto.launch import fleet_syncer
 from yeto.launch.pool import fleet_cli
 from yeto.rl import fleet, island_launches, up
 from yeto.rl.engine.object_store import DirectoryObjectStore
+from yeto.node import code as node_code  # imported before a test patches subprocess.run (its git default)
 
 KEY = "onsite-test-island-key"
 SECRETS = {"YETO_ISLAND_HMAC_KEY": KEY, "YETO_RL_STORE_S3_ACCESS_KEY_ID": "onsite-test-access-key-id",
@@ -293,7 +294,8 @@ def test_install_writes_the_unit_and_enables_it_and_does_nothing_else():
     commands = [line for line in script.replace(body, "").splitlines()
                 if line and not line.startswith(("mode=", "case ", "echo", "YETO_UNIT_EOF"))]
     assert commands[1].startswith("sudo -n true 2>/dev/null || ") and "exit 4" in commands[1]  # sudo itself, first
-    del commands[1]
+    assert commands[2].startswith("git -C /opt/yeto rev-parse --verify --quiet ") and "exit 5" in commands[2]
+    del commands[1:3]
     assert commands == ["set -eu", "sudo -n tee /etc/systemd/system/yeto-r-syncer.service >/dev/null <<'YETO_UNIT_EOF'",
                         "sudo -n systemctl daemon-reload", "sudo -n systemctl enable --now yeto-r-syncer.service"]
     # the env file: its mode is checked (as root: the file is the service user's), its content never read
@@ -311,10 +313,11 @@ FAKE_TOOLS = {
     "systemctl": 'echo "systemctl $*" >> "$LOG"',
     "systemd-run": 'echo "systemd-run $*" >> "$LOG"',
     "true": 'exit "${FAKE_SUDO_RC:-0}"',  # `sudo -n true`: whether sudo runs without a password
+    "git": 'echo "git $*" >> "$LOG"\nexit "${FAKE_GIT_RC:-0}"',  # --yeto-dir a git work tree (0) or not (128)
 }
 
 
-def run_script(tmp_path, script: str, mode: str, sudo_rc: int = 0) -> tuple[int, list[str], str]:
+def run_script(tmp_path, script: str, mode: str, sudo_rc: int = 0, git_rc: int = 0) -> tuple[int, list[str], str]:
     """``script`` run by bash with only fake sudo / stat / tee / systemctl / systemd-run on PATH."""
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir(exist_ok=True)
@@ -324,7 +327,8 @@ def run_script(tmp_path, script: str, mode: str, sudo_rc: int = 0) -> tuple[int,
         tool.chmod(0o755)
     log = tmp_path / f"calls-{mode}.log"
     done = _REAL_RUN(["/bin/bash", "-s"], input=script, text=True, capture_output=True, timeout=30,
-                          env={"PATH": str(bin_dir), "LOG": str(log), "FAKE_MODE": mode, "FAKE_SUDO_RC": str(sudo_rc)})
+                          env={"PATH": str(bin_dir), "LOG": str(log), "FAKE_MODE": mode, "FAKE_SUDO_RC": str(sudo_rc),
+                               "FAKE_GIT_RC": str(git_rc)})
     calls = log.read_text().splitlines() if log.exists() else []
     return done.returncode, calls, done.stderr
 
@@ -337,7 +341,7 @@ def test_the_install_script_refuses_an_env_file_others_can_read_before_it_writes
     assert calls[:3] == ["sudo true", "sudo stat -c %a /etc/yeto/r.env", "stat -c %a /etc/yeto/r.env"]
     if ok:
         assert code == 0, err
-        assert [c.split()[0] for c in calls[3:]] == ["sudo", "tee", "sudo", "systemctl", "sudo", "systemctl"]
+        assert [c.split()[0] for c in calls[3:]] == ["git", "sudo", "tee", "sudo", "systemctl", "sudo", "systemctl"]
         assert calls[-1] == "systemctl enable --now yeto-r-syncer.service"
     else:
         assert code == 3 and f"has mode {mode}" in err
@@ -3634,3 +3638,74 @@ def test_the_store_environment_given_to_a_launch_is_never_in_its_args(tmp_path, 
     del args
     gc.collect()
     assert key not in store_env._BOUND  # dropped with its args
+
+
+# -- --yeto-dir must be a git work tree (run up ships its code by commit) -------------------------
+
+def test_the_install_script_refuses_a_yeto_dir_that_is_no_git_tree_before_it_writes_anything(tmp_path):
+    code, calls, err = run_script(tmp_path, fs.install_script(spec("syncer"), fs.unit_text(spec("syncer"))), "600",
+                                  git_rc=128)
+    assert code == fs.GIT_EXIT and "--yeto-dir /opt/yeto is not a git work tree on this host" in err
+    assert "git clone" in err and calls[-1].startswith("git -C /opt/yeto rev-parse")
+    assert not any(c.startswith(("tee", "systemctl", "sudo tee")) for c in calls)
+
+
+def test_an_install_on_a_host_whose_yeto_dir_is_no_git_tree_is_a_refusal(tmp_path, monkeypatch, capsys):
+    logs: list[str] = []
+    assert fs.install(spec(), "site-a", runner=FakeSsh(rc=fs.GIT_EXIT), log=logs.append) == 2
+    ssh = FakeSsh(rc=fs.GIT_EXIT)
+    monkeypatch.setattr(fs.subprocess, "run", ssh)
+    args = fleet_cli_args(["fleet", "service", "--config", str(onsite_config(tmp_path)), "--role", "control",
+                           "--env-file", "/etc/yeto/r.env", "--install", "site-a", "--user", "yeto", "--python",
+                           "/opt/v/bin/python", "--yeto-dir", "/opt/yeto-not-here"])
+    assert fleet_cli.main(args) == 2 and len(ssh.calls) == 1
+
+
+def _exported_tree(tmp_path):
+    tree = tmp_path / "yeto-export"
+    (tree / "yeto").mkdir(parents=True)
+    (tree / "yeto" / "__init__.py").write_text("")
+    return tree
+
+
+@pytest.mark.parametrize("where", ["--print", "--install"])
+def test_a_local_yeto_dir_that_is_no_git_tree_is_refused_with_exit_2(tmp_path, monkeypatch, capsys, where):
+    tree = _exported_tree(tmp_path)
+    ssh = FakeSsh()
+    monkeypatch.setattr(fs.subprocess, "run", ssh)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    argv = ["fleet", "service", "--config", str(onsite_config(tmp_path)), "--role", "control", "--env-file",
+            "/etc/yeto/r.env", "--user", "yeto", "--python", "/opt/v/bin/python", "--yeto-dir", str(tree)]
+    argv += ["--print"] if where == "--print" else ["--install", "site-a"]
+    assert fleet_cli.main(fleet_cli_args(argv)) == 2
+    out = capsys.readouterr()
+    assert out.out == "" and ssh.calls == []
+    assert f"refused: {tree} is not a git work tree" in out.err and "git clone" in out.err
+
+
+def test_the_default_yeto_dir_is_this_checkout_and_passes(tmp_path, capsys):
+    args = fleet_cli_args(["fleet", "service", "--config", str(onsite_config(tmp_path)), "--role", "control",
+                           "--env-file", "/etc/yeto/r.env", "--print", "--user", "yeto", "--python",
+                           "/opt/v/bin/python"])
+    assert fleet_cli.main(args) == 0 and "[Service]" in capsys.readouterr().out
+
+
+def test_run_up_of_an_on_site_control_plane_refuses_a_tree_that_is_no_git_tree(tmp_path, monkeypatch):
+    tree = _exported_tree(tmp_path)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    run = types.SimpleNamespace(onsite_control=lambda: True, cfg={}, env={})
+    monkeypatch.setattr(up, "run_repo_root", lambda: tree)
+    refused = up.onsite_pool_refusal(run, environ={})
+    assert refused and refused.startswith(f"{tree} is not a git work tree (git rev-parse HEAD: exit ")
+    assert up.onsite_pool_refusal(types.SimpleNamespace(onsite_control=lambda: False), environ={}) is None
+
+
+def test_a_pool_code_upload_from_a_tree_that_is_no_git_tree_says_why(tmp_path, monkeypatch):
+    tree = _exported_tree(tmp_path)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    with pytest.raises(node_code.CodeError, match=r"is not a git work tree \(git rev-parse HEAD: exit 128\).*git clone"):
+        node_code.code_sha("HEAD", repo=tree)
+    with pytest.raises(node_code.CodeError, match="not a git work tree"):
+        node_code.git_code_tar("HEAD", repo=tree)
+    assert node_code.code_sha("HEAD") == _REAL_RUN(["git", "-C", str(node_code.REPO_ROOT), "rev-parse", "--short=12",
+                                                     "HEAD"], capture_output=True, text=True).stdout.strip()

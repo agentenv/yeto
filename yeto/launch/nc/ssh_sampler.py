@@ -187,8 +187,9 @@ def upload_code(alias: str, *, ref: str = "HEAD", run: Callable[..., Any] = subp
                 root: str = f"{NVME}/yeto") -> str:
     """``git archive`` of ``yeto/`` at ``ref`` into ``<root>/<sha>`` (default ``/mnt/nvme/yeto``;
     idempotent)."""
-    sha = run(["git", "-C", str(REPO_ROOT), "rev-parse", "--short=12", ref], capture_output=True,
-              text=True, check=True).stdout.strip()
+    from yeto.node.code import code_sha  # noqa: PLC0415
+
+    sha = code_sha(ref, repo=REPO_ROOT, run=run)
     dest = f"{root}/{sha}"
     archive = subprocess.Popen(["git", "-C", str(REPO_ROOT), "archive", "--format=tar", ref, "yeto"],
                                stdout=subprocess.PIPE)

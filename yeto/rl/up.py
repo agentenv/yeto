@@ -5125,6 +5125,13 @@ class ControlFenced(BaseException):
         self.handoff = bool(handoff)
 
 
+def run_repo_root() -> Path:
+    """The yeto tree this process runs (the one its island launches and pools ship)."""
+    from yeto.launch import REPO_ROOT  # noqa: PLC0415
+
+    return REPO_ROOT
+
+
 def onsite_pool_refusal(run: Run, environ: dict[str, str] | None = None) -> str | None:
     """An on-site control plane (``fleet.syncer_service``) whose pools another control host
     could not take over (:func:`yeto.rl.fleet.onsite_pool_problem`), or whose shared sky API
@@ -5135,6 +5142,11 @@ def onsite_pool_refusal(run: Run, environ: dict[str, str] | None = None) -> str 
 
     if not run.onsite_control():
         return None
+    from yeto.node.code import git_tree_problem  # noqa: PLC0415
+
+    problem = git_tree_problem(run_repo_root())  # every island launch and pool ships this tree by its commit
+    if problem:
+        return problem
     try:
         problem = fleet.onsite_pool_problem(run.cfg)
         shared = fleet.sky_api_server(run.cfg.get("fleet") or {})
