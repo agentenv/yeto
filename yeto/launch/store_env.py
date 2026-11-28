@@ -7,15 +7,37 @@ applied). Its own module, depending on nothing else in ``yeto.launch``: both
 from __future__ import annotations
 
 import os
+import weakref
+
+# the environment a launch was parsed for (bind_environ), by the id of its args (held weakly;
+# argparse's Namespace is not hashable): never an attribute of the args, so no copy of the
+# launch's flags (its run record, its replayed head args, the W&B config) ever holds it
+_BOUND: dict[int, tuple[weakref.ref, dict[str, str]]] = {}
+
+
+def bind_environ(args, environ) -> None:
+    """Let :func:`store_client_environ` read ``environ`` for ``args`` (the on-site syncer
+    service: run up's environment, not this process's)."""
+    key = id(args)
+    ref = weakref.ref(args, lambda _ref, key=key: _BOUND.pop(key, None))
+    _BOUND[key] = (ref, dict(environ))
+
+
+def bound_environ(args) -> dict[str, str] | None:
+    entry = _BOUND.get(id(args))
+    return entry[1] if entry is not None and entry[0]() is args else None
 
 
 def store_client_environ(args, environ=None) -> dict[str, str]:
     """The environment the S3 store client of the head and the islands reads, with
     ``--rl-object-store-endpoint`` applied: the endpoint, and ``region=auto`` when an
     endpoint is set and no region is configured (what Cloudflare R2 expects; AWS S3
-    ignores it). ``environ`` defaults to the process environment."""
+    ignores it). ``environ`` defaults to the environment bound to ``args``
+    (:func:`bind_environ`: the on-site syncer service's, run up's), else the process's."""
     from ..cloud.s3_store import ENDPOINT_ENV, PROFILE_ENV, REGION_ENV, store_endpoint, store_region
 
+    if environ is None:
+        environ = bound_environ(args)
     env = dict(os.environ if environ is None else environ)
     if getattr(args, "rl_object_store_profile", None):
         env[PROFILE_ENV] = str(args.rl_object_store_profile)

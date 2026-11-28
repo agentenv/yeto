@@ -1889,6 +1889,11 @@ class Run:
 
         if self.env.get(ISLAND_HMAC_KEY_ENV):
             return
+        plan = self.fleet_plan()
+        if plan is not None and plan.syncer_service:  # never generated: the syncer service has its own
+            from yeto.launch.fleet_syncer import key_mismatch  # noqa: PLC0415
+
+            raise RunUpConfigRefused(f"fleet.syncer_service: {key_mismatch(None, None)}")
         path = self.dir / "island_hmac.key"
         if not path.exists():
             import secrets  # noqa: PLC0415
@@ -2339,9 +2344,14 @@ class Run:
         self.state.setdefault("trainer_t0", time.time())
         self.mark("trainer")
 
-    def drain_controller(self) -> bool:
+    def drain_controller(self, *, decided: bool = False) -> bool:
         """The exit drain of the in-process controller (``rollout.drain_on_exit``), run
-        while ``main`` still runs. Left to the ``atexit`` hook it ran during interpreter
+        while ``main`` still runs. ``decided``: run up ended the run itself (its drive returned:
+        the run finished, a stop, a breaker); the on-site control unit (``onsite_service``,
+        :mod:`yeto.rl.fleet_service`) then stops the controller itself (``controller.stop``, every
+        pool drained) although ``drain_on_exit`` is false there, which only keeps the pools across
+        a SIGTERM or a crash of the unit (``drain_active`` would only detach such a controller).
+        Left to the ``atexit`` hook it ran during interpreter
         shutdown, after the Modal client had closed: a tick in flight failed with
         ``ClientClosed``, the drain waited on it forever, and the process hung holding
         the pool with its sampler still billing.
@@ -2350,11 +2360,13 @@ class Run:
         A drain that fails prints the billing banner and is not retried at exit (the
         controller leaves the active list either way). False: the drain failed."""
         controller = getattr(self, "controller", None)
-        if controller is not None and not controller.stopped and not controller.drain_on_exit \
+        drain = controller is not None and (controller.drain_on_exit
+                                            or (decided and bool(getattr(self, "onsite_service", False))))
+        if controller is not None and not controller.stopped and not drain \
                 and getattr(controller, "detached", None) is None \
                 and any(getattr(p, "control", None) is not None for p in controller.pools.values()):
             controller.detach("process exit")  # the store locks: released for the next run up
-        if controller is None or controller.stopped or not controller.drain_on_exit:
+        if controller is None or controller.stopped or not drain:
             return True
         from yeto.launch.pool import controller as ctl  # noqa: PLC0415
 
@@ -2362,7 +2374,11 @@ class Run:
         if threading.current_thread() is threading.main_thread():
             restore = signal.signal(signal.SIGTERM, _log_sigterm_during_drain)
         try:
-            ctl.drain_active("process exit")
+            if not controller.drain_on_exit:  # the on-site unit's run up ended the run (``decided``)
+                # stopped itself: drain_active would only detach a controller with drain_on_exit false
+                controller.stop("run up ended the run")
+            else:
+                ctl.drain_active("process exit")
             return True
         except Exception as error:  # noqa: BLE001 - reported with the billing banner, never re-raised
             _log(f"CRITICAL: the exit drain of the sampler pools FAILED ({error!r})"[:600])
@@ -3269,6 +3285,13 @@ class Run:
         from yeto.launch.pool.desired import trainers  # noqa: PLC0415
         from yeto.rl import fleet_session, island_launches  # noqa: PLC0415
 
+        if plan.syncer_service:
+            from yeto.launch.fleet_syncer import environ_key_id, key_mismatch  # noqa: PLC0415
+
+            refused = key_mismatch(environ_key_id(self.env), None)
+            if refused:
+                self.config_refusal = f"fleet.syncer_service: {refused}"  # a configuration error (the env file)
+                return self.config_refusal
         members = list(trainers(self.desired_doc).values())
         if not members:
             members = [{**m, "argv": [*m["argv"], *island_launches.member_table_flags(m["learner_id"])]}
@@ -4806,6 +4829,11 @@ class RunUpRefused(RuntimeError):
     """``run up`` must not go on; the message says why and what to do."""
 
 
+class RunUpConfigRefused(RunUpRefused):
+    """:class:`RunUpRefused` for a configuration error (the on-site control unit does not
+    restart it: ``args.config_refused``), such as a missing island HMAC key."""
+
+
 def forced_stop_refusal(run: Run, allow: bool, *, record: bool = True) -> str | None:
     """A breaker of an earlier ``run up`` forced the NC pool down (``nc_forced_stop``,
     spend or wall time past ``FORCE_FACTOR`` x the budget): a new ``run up`` would order
@@ -4846,16 +4874,20 @@ def ack_forced_stop(run: Run) -> None:
 
 
 def open_run(config: str, create: bool = True, missing: str | None = None, *,
-             strict_breakers: bool = True) -> Run:
+             strict_breakers: bool = True, adjust: Callable[[dict[str, Any]], None] | None = None) -> Run:
     """``Run(load_config(config))``; a config or state directory that cannot be used raises
     :class:`RunConfigError` naming the file (the CLI prints it, without a traceback).
     ``create=False`` (read-only commands) refuses a run whose state directory does not exist
     instead of creating it: the run name is most likely misspelled. ``missing="temp"``
     (``run down``) neither refuses nor creates it: the run is opened on a fresh temporary
     state directory, so the stop steps the config drives (trainer down, pool-stop, sandbox
-    teardown) still run on a control host that lost (or never had) the run's state."""
+    teardown) still run on a control host that lost (or never had) the run's state.
+    ``adjust(cfg)``: changes the compiled config before the run opens on it (the on-site
+    control unit's ``rollout.drain_on_exit``, :mod:`yeto.rl.fleet_service`)."""
     try:
         cfg = load_config(config) if strict_breakers else load_config(config, strict_breakers=False)
+        if adjust is not None:
+            adjust(cfg)
     except RunConfigError:
         raise
     except ValueError as error:  # a check of the config's content
@@ -4887,9 +4919,10 @@ def main(args: Any) -> int:
     try:
         run = open_run(args.config, create=args.rl_command != "status",
                        missing="temp" if args.rl_command == "down" else None,
-                       strict_breakers=breakers_strict(args))
+                       strict_breakers=breakers_strict(args), adjust=getattr(args, "config_adjust", None))
     except RunConfigError as error:
         print(f"{_now()} [rl up] {error}", file=sys.stderr, flush=True)
+        args.config_refused = str(error)  # the on-site control unit tells it from the other refusals
         return 2
     if args.rl_command == "status":
         print(json.dumps(run.status(), indent=1, default=str))
@@ -4910,6 +4943,7 @@ def main(args: Any) -> int:
         _log("controller in_process: the pools run in this process, so it must stay up; drop --no-monitor "
              "(or set controller: subprocess)")
         return 2
+    run.onsite_service = bool(getattr(args, "onsite_service", False))  # the on-site control unit only
     holder = run.lock_up()
     if holder is not None:
         role = (getattr(run, "lock_holder", None) or {}).get("role", "up")
@@ -4923,6 +4957,8 @@ def main(args: Any) -> int:
         return 2
     run.log_fleet_plan()
     if not args.skip_preflight and not run.preflight(dry_run=args.dry_run):
+        if getattr(run, "config_refusal", None):
+            args.config_refused = run.config_refusal  # the on-site control unit does not restart it
         log = run.dir / "preflight.log"
         _log("preflight failed: nothing ordered" + (f" (see {log})" if log.exists() else
                                                      " (the reason is the preflight line above)"))
@@ -4954,15 +4990,19 @@ def main(args: Any) -> int:
     ctrl_c = CtrlC(run)
     ctrl_c.install()
     rc = 1
+    decided = False  # run up ended the run itself (not a SIGTERM, a crash or a refusal)
     try:
         # in the try: a SIGTERM while the pools start still drains what they ordered
         run.pool()
         rc = _drive(run, args)
+        decided = True
     except RunUpRefused as error:
         _log(f"CRITICAL: run up refused: {error}")
+        if isinstance(error, RunUpConfigRefused):
+            args.config_refused = str(error)  # the on-site control unit does not restart it
         rc = 2
     finally:
-        if run.in_process and not run.drain_controller():
+        if run.in_process and not run.drain_controller(decided=decided):
             rc = rc or 1
         ctrl_c.restore()
     return rc

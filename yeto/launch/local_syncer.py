@@ -12,6 +12,10 @@ import time
 from .syncer import syncer_command, syncer_event_tape
 from .fleet import _RlStrictFailure
 
+# a LocalSyncer's process and its reaped flag change together (start, and a stop from another
+# thread); held only for that, never across a stop's wait
+_PROC_LOCK = threading.Lock()
+
 
 class LocalSyncer:
     """The syncer as a subprocess of the head node's controller job.
@@ -27,6 +31,11 @@ class LocalSyncer:
     """
 
     store_uploaders: tuple = ()  # start_store_upload: the syncer tape's run-store uploaders
+    env: dict[str, str] | None = None  # the syncer process's environment (None: this process's)
+    # how long a stop waits for the syncer to end after SIGTERM (it writes its checkpoint)
+    # before SIGKILL; None: 10 s for the shell, then 10 s for its process group
+    stop_grace_s: float | None = None
+    home: str | None = None  # where ``~`` of its paths is (its env's HOME); None: this process's
 
     def __init__(
         self,
@@ -34,11 +43,18 @@ class LocalSyncer:
         num_learners: int,
         binary: str = "~/yeto-syncer",
         log_file: str = "~/yeto-syncer.log",
+        *,
+        env: dict[str, str] | None = None,
+        stop_grace_s: float | None = None,
+        home: str | None = None,
     ):
+        self.env = None if env is None else dict(env)
+        self.stop_grace_s = None if stop_grace_s is None else float(stop_grace_s)
+        self.home = home
         self.command = syncer_command(args, num_learners, binary=binary)
-        self.binary = os.path.expanduser(binary)
-        self.log_file = os.path.expanduser(log_file)
-        self.event_tape = os.path.expanduser(syncer_event_tape(args))
+        self.binary = self._expand(binary)
+        self.log_file = self._expand(log_file)
+        self.event_tape = self._expand(syncer_event_tape(args))
         self.proc: subprocess.Popen | None = None
         # True once this proc's whole process group is confirmed gone; its
         # PGID may then be reused, so it must never be signalled again.
@@ -52,6 +68,15 @@ class LocalSyncer:
             os.path.getsize(self.event_tape) if os.path.exists(self.event_tape) else 0
         )
 
+    def _expand(self, path: str) -> str:
+        if self.home and (path == "~" or path.startswith("~/")):
+            return self.home + path[1:]
+        return os.path.expanduser(path)
+
+    def exited_ok(self) -> bool:
+        """The syncer process itself ended with exit 0 (its run is done), not an old status file."""
+        return self.proc is not None and self.proc.poll() == 0
+
     def start(self) -> None:
         if os.path.exists(self.binary):
             os.chmod(self.binary, 0o755)
@@ -62,15 +87,20 @@ class LocalSyncer:
             # pid alone can orphan the syncer, which then holds the port
             # across controller restarts; start_new_session gives the whole
             # tree its own process group for stop() to kill.
-            self._reaped = False
-            self.proc = subprocess.Popen(
+            proc = subprocess.Popen(
                 self.command,
                 shell=True,
                 stdout=log_f,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
+                env=self.env,
             )
+            # the new process and its "not reaped" together: a stop in another thread (an
+            # on-site service's fence) sees the old reaped one or the new one, never the old
+            # one as not reaped (its process group id may be reused by then)
+            with _PROC_LOCK:
+                self.proc, self._reaped = proc, False
         finally:
             log_f.close()  # Popen holds its own duplicate of the fd
         print(f"[launcher] syncer subprocess started (pid {self.proc.pid})", flush=True)
@@ -136,31 +166,43 @@ class LocalSyncer:
             up.stop()
         self.store_uploaders = ()
 
+    def terminate(self) -> None:
+        """The syncer's process group only: SIGTERM, SIGKILL after the grace (from any thread;
+        :meth:`stop` also ends the forwarders and uploads)."""
+        self._stop_tree()
+
     def _stop_tree(self) -> None:
         """Terminate the syncer's process group, even when its leader (the
         shell) already exited: members it backgrounded may still run."""
-        if self.proc is None or self._reaped:
+        with _PROC_LOCK:
+            proc, reaped = self.proc, self._reaped
+        if proc is None or reaped:
             return
-        self._signal_tree(signal.SIGTERM)
+        self._signal_tree(signal.SIGTERM, proc)
+        grace = self.stop_grace_s
+        started = time.monotonic()
         try:
-            self.proc.wait(timeout=10)
+            proc.wait(timeout=10 if grace is None else grace)
         except subprocess.TimeoutExpired:
             pass
-        deadline = time.monotonic() + 10
-        while self._group_alive() and time.monotonic() < deadline:
+        deadline = time.monotonic() + 10 if grace is None else started + grace
+        while self._group_alive(proc) and time.monotonic() < deadline:
             time.sleep(0.1)
-        if self._group_alive() or self.proc.poll() is None:
-            self._signal_tree(signal.SIGKILL)
+        if self._group_alive(proc) or proc.poll() is None:
+            self._signal_tree(signal.SIGKILL, proc)
             try:
-                self.proc.wait(timeout=5)
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
-        if self.proc.poll() is not None and not self._group_alive():
-            self._reaped = True
+        if proc.poll() is not None and not self._group_alive(proc):
+            with _PROC_LOCK:
+                if self.proc is proc:
+                    self._reaped = True
 
-    def _group_alive(self) -> bool:
+    def _group_alive(self, proc: subprocess.Popen | None = None) -> bool:
+        proc = self.proc if proc is None else proc
         try:
-            os.killpg(self.proc.pid, 0)
+            os.killpg(proc.pid, 0)
         except (ProcessLookupError, PermissionError, OSError):
             return False
         return True
@@ -209,25 +251,26 @@ class LocalSyncer:
         from .syncer import syncer_shard_count
 
         store = str(getattr(args, "rl_checkpoint_store", None) or "")
-        interval = upload_interval_s()
+        interval = upload_interval_s(environ=self.env)  # None: this process's environment
         if not is_object_store_uri(store) or interval is None:
             return
         if objects is None:
             from .trainer_island import head_store_objects
 
-            objects = head_store_objects(store, store_client_environ(args))
+            objects = head_store_objects(store, store_client_environ(args, self.env))
         self.store_uploaders = tuple(syncer_uploaders(objects, self.event_tape, shards=syncer_shard_count(args),
                                                       incarnation=syncer_incarnation(), interval_s=interval))
         print(f"[launcher] syncer tape -> {store.rstrip('/')}/tapes/syncer every {interval:.0f} s", flush=True)
 
-    def _signal_tree(self, sig: int) -> None:
+    def _signal_tree(self, sig: int, proc: subprocess.Popen | None = None) -> None:
         """Signal the syncer's whole process group (see start()), falling
         back to the direct child."""
+        proc = self.proc if proc is None else proc
         try:
-            os.killpg(self.proc.pid, sig)
+            os.killpg(proc.pid, sig)
         except (ProcessLookupError, PermissionError, OSError):
             try:
-                self.proc.send_signal(sig)
+                proc.send_signal(sig)
             except OSError:
                 pass
 

@@ -41,6 +41,9 @@ class Final(str):
     """A failure that is final at once (a job that ended in failure): no grace."""
 
 
+_FINISHED_EARLY = "the syncer finished its run"
+
+
 def _store_objects(args: Any) -> Any:
     from .island_lifecycle import store_objects
     from .storage import store_client_environ
@@ -142,9 +145,10 @@ def resolve_epoch(args: Any, role: str, *, adopted: bool, reader: Callable[[], C
     return epoch
 
 
-def record(args: Any, syncer_addr: str, num_learners: int, *, objects: Any = None) -> dict[str, Any]:
+def record(args: Any, syncer_addr: str, num_learners: int, *, objects: Any = None,
+           extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """Write ``fleet/island_syncer.json``; raises when the run store has no object API (the
-    island launches could not find the syncer)."""
+    island launches could not find the syncer). ``extra``: an on-site service's fields."""
     from ..rl.island_launches import write_syncer_record
 
     objects = objects if objects is not None else _store_objects(args)
@@ -153,7 +157,7 @@ def record(args: Any, syncer_addr: str, num_learners: int, *, objects: Any = Non
                          "has no object API here; the island launches read the syncer's address from it")
     out = write_syncer_record(objects, addr=syncer_addr, syncer_epoch=getattr(args, "rl_syncer_epoch", None),
                               learners=num_learners, max_learners=getattr(args, "rl_sync_max_learners", None),
-                              run=args.cluster_prefix)
+                              run=args.cluster_prefix, extra=extra)
     print(f"[launcher] fleet syncer at {syncer_addr} (epoch {out['syncer_epoch']}, {num_learners} launched "
           f"learner(s), ids below {out['max_learners']}) recorded in the run store (fleet/island_syncer.json)", flush=True)
     return out
@@ -282,12 +286,13 @@ def supervise(*, finished: Callable[[], bool], failed: Callable[[], str | None],
               restart: Callable[[str], bool] | None = None, stop_flag: str | os.PathLike[str] | None = None,
               sleep: Callable[[float], None] = time.sleep, poll_s: float = POLL_S,
               grace_s: float = FAILURE_GRACE_S, clock: Callable[[], float] | None = None,
-              log: Callable[[str], None] = print) -> int:
+              log: Callable[[str], None] = print, stopped: Callable[[], str | None] | None = None) -> int:
     """Poll the syncer until it ends (0), the STOP flag appears (9) or it fails for good
     (1). ``failed()``: why it is down (None: up; a :class:`Final`: failed for good now);
     ``restart(why)``: True when it was restarted (a head subprocess), False: the failure
     stands. A failure that is not final and not restarted must last ``grace_s`` in a
-    row before it ends the syncer."""
+    row before it ends the syncer. ``stopped()``: a stop that is not a local flag (an
+    on-site syncer service reads the fleet's STOP in the run store): why, or None."""
     from .fleet import RUN_STOPPED_EXIT
 
     clock = clock or time.monotonic
@@ -298,6 +303,10 @@ def supervise(*, finished: Callable[[], bool], failed: Callable[[], str | None],
             return 0
         if stop_flag is not None and os.path.exists(stop_flag):
             log(f"[launcher] fleet syncer: STOP flag {stop_flag}; ending the syncer")
+            return RUN_STOPPED_EXIT
+        why_stopped = stopped() if stopped is not None else None
+        if why_stopped:
+            log(f"[launcher] fleet syncer: {why_stopped}; ending the syncer")
             return RUN_STOPPED_EXIT
         why = failed()
         if why is None:
@@ -359,13 +368,31 @@ def probe(ops: Any, cluster: str | None, job: Any) -> tuple[str | None, Any]:
 
 def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str], head_mode: bool,
           local_syncer: Any = None, syncer_cluster: str | None = None, syncer_job: Any = None,
-          ops: Any = None, sleep: Callable[[float], None] = time.sleep) -> int:
-    """Record the syncer once it listens, then supervise it alone (module doc)."""
+          ops: Any = None, sleep: Callable[[float], None] = time.sleep,
+          record_extra: dict[str, Any] | None = None, on_record: Callable[[dict[str, Any]], None] | None = None,
+          stopped: Callable[[], str | None] | None = None, early_finish: bool = False,
+          objects: Any = None) -> int:
+    """Record the syncer once it listens, then supervise it alone (module doc). ``objects``:
+    the run store the records go to (default: a client from this process's environment).
+    An on-site syncer service: ``record_extra``, the fields it adds to each record it
+    writes; ``on_record(record)``, called after each record; ``stopped``, the fleet's STOP
+    in the run store (:func:`supervise`); ``early_finish``, a head syncer that finished its
+    run before it was seen listening (resumed at its last step) ends the wait: 0. ``stopped``
+    is asked during that wait too: a reason there (the service fenced, the fleet's STOP)
+    ends it at once, :data:`RUN_STOPPED_EXIT`, with nothing recorded."""
     from .. import runs
+    from .fleet import RUN_STOPPED_EXIT
 
+    ended_wait: list[str] = []
     if head_mode:
         def dead() -> str | None:
+            why = stopped() if stopped is not None else None
+            if why:  # never waited out past the service's lease, nor past the fleet's STOP
+                ended_wait.append(why)
+                return Final(f"stopped: {why}")
             reason = local_syncer.probe()
+            if reason is None and early_finish and local_syncer.exited_ok():  # never an old status.json
+                return Final(_FINISHED_EARLY)
             return None if reason is None else Final(f"the syncer process ended ({getattr(reason, 'reason', reason)})")
     else:
         ops = ops or _sky_ops()
@@ -375,10 +402,19 @@ def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str]
     never = wait_listening(lambda: syncer_listening(args, head_mode=head_mode, syncer_cluster=syncer_cluster,
                                                     syncer_job=syncer_job, ops=ops),
                            dead, where=syncer_addr, sleep=sleep)
+    if ended_wait:
+        print(f"[launcher] fleet syncer: stopped before it listened ({ended_wait[0]}); nothing recorded",
+              file=sys.stderr, flush=True)
+        return RUN_STOPPED_EXIT
+    if never is not None and early_finish and head_mode and never.startswith(_FINISHED_EARLY):
+        print("[launcher] fleet syncer: its run is finished (before it was seen listening)", flush=True)
+        return 0
     if never is not None:
         print(f"[launcher] ERROR: fleet syncer: {never}", file=sys.stderr, flush=True)
         return 1
-    record(args, syncer_addr, num_learners)
+    recorded = record(args, syncer_addr, num_learners, objects=objects, extra=record_extra)
+    if on_record is not None:
+        on_record(recorded)
     stop_flag = runs.stop_flag_path(args.cluster_prefix)
     if head_mode:
         from .fleet import _RlStrictFailure
@@ -400,13 +436,17 @@ def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str]
                 print(f"[launcher] fleet syncer restart failed: {error}", file=sys.stderr)
                 return True
             try:  # the islands started from now on read it (same address and term)
-                record(args, syncer_addr, num_learners)
+                recorded = record(args, syncer_addr, num_learners, objects=objects, extra=record_extra)
+                if on_record is not None:
+                    on_record(recorded)
             except Exception as error:  # noqa: BLE001 - the earlier record still names it
                 print(f"[launcher] fleet syncer: record not rewritten ({error})", file=sys.stderr)
             return True
 
-        return supervise(finished=local_syncer.finished, failed=failed, restart=restart, stop_flag=stop_flag,
-                         sleep=sleep)
+        # the on-site service (early_finish): only the syncer process's own exit 0 is its end, never a
+        # status.json an earlier run of it left (a run cleared and resumed with more steps)
+        return supervise(finished=local_syncer.exited_ok if early_finish else local_syncer.finished, failed=failed,
+                         restart=restart, stop_flag=stop_flag, sleep=sleep, stopped=stopped)
     last: dict[str, Any] = {}
 
     def finished() -> bool:
@@ -420,3 +460,365 @@ def serve(args: Any, syncer_addr: str, num_learners: int, *, clusters: list[str]
     grace = getattr(args, "rl_fleet_syncer_grace_s", None)
     return supervise(finished=finished, failed=failed, stop_flag=stop_flag, sleep=sleep,
                      grace_s=FAILURE_GRACE_S if grace is None else float(grace))
+
+
+
+
+# -- an on-site syncer service (fleet.syncer_service; ``yeto fleet service --role syncer``) ---------
+#
+# The syncer of a fleet launched island by island can run as a service of its own on the
+# operator's machine (``yeto.rl.fleet_service``): a systemd unit restarts it, and it
+# resumes from its checkpoint. One service drives the syncer at a time: it holds the
+# service lock (:data:`SERVICE_LOCK`, a store lease its heartbeat renews), and the lock's
+# token is the service's generation. It writes the syncer record (``fleet/island_syncer.json``,
+# with ``service``, ``service_node``, ``service_generation`` and ``key_id``) and a heartbeat
+# (:data:`SERVICE_RECORD`): ``starting``, then ``running`` once the record is written,
+# then a final state (``finished``, ``failed``, ``stopped``). The fleet's syncer launch
+# (``--rl-fleet-syncer-service HOST``) orders no syncer: it waits for that service, checks that
+# both read the same island HMAC key, records the syncer again for this run up (a fresh ``at``)
+# and watches the heartbeat (:func:`watch_service`). On the run's STOP flag it writes the
+# fleet's STOP to the run store (:data:`ONSITE_STOP`), which ends the service too. The service
+# keeps running when the control plane is lost, so the islands keep merging meanwhile.
+
+SERVICE_RECORD = "fleet/island_syncer_service.json"
+SERVICE_SCHEMA = "yeto.fleet.syncer-service/v1"
+SERVICE_BEAT_S = 30.0  # the service rewrites its heartbeat (and renews its lock) this often
+SERVICE_STALE_S = 3 * SERVICE_BEAT_S  # no new heartbeat seen this long (this host's clock): not up
+SERVICE_LOCK = "fleet/syncer_service/lock"  # one syncer service at a time (StoreLock)
+# the service's heartbeat (its lock renewals) goes through a store client of its own with short
+# timeouts (``fleet_service.heartbeat_objects``, S3), and each heartbeat call is cut off after
+# HEARTBEAT_CALL_S whatever the client does (``fleet_service.Heartbeat``): a store that hangs
+# costs the lease a known time per call, which the lock's lease and fence budget count
+HEARTBEAT_CONNECT_TIMEOUT_S, HEARTBEAT_READ_TIMEOUT_S, HEARTBEAT_MAX_ATTEMPTS = 3.0, 5.0, 2
+HEARTBEAT_REQUEST_S = HEARTBEAT_MAX_ATTEMPTS * (HEARTBEAT_CONNECT_TIMEOUT_S + HEARTBEAT_READ_TIMEOUT_S) + 1.0  # + a backoff
+HEARTBEAT_CALL_S = 2 * HEARTBEAT_REQUEST_S  # a renewal: a LIST of the lock's tokens and the lease's PUT
+SERVICE_LOCK_TTL_S = 4 * SERVICE_BEAT_S + 7 * HEARTBEAT_CALL_S  # at least (fleet_service.service_lock_ttl_s)
+ONSITE_STOP = "fleet/onsite/STOP"  # the fleet's STOP in the run store: the on-site services end on it
+ONSITE_STOP_SCHEMA = "yeto.fleet.onsite-stop/v1"
+SERVICE_STARTING, SERVICE_RUNNING = "starting", "running"
+SERVICE_FINISHED, SERVICE_FAILED, SERVICE_STOPPED = "finished", "failed", "stopped"
+SERVICE_FINAL = frozenset({SERVICE_FINISHED, SERVICE_FAILED, SERVICE_STOPPED})
+_KEY_ID_DOMAIN = b"yeto.island-hmac-key-id/v1\0"
+
+
+def key_id(key: str | None) -> str | None:
+    """A name of the island HMAC key that tells nothing of the key (a domain-separated
+    SHA-256 prefix); None without a key. Kept in the run store so that two hosts can tell
+    whether they read the same key, never the key itself."""
+    if not key:
+        return None
+    import hashlib
+
+    return hashlib.sha256(_KEY_ID_DOMAIN + str(key).encode()).hexdigest()[:16]
+
+
+def environ_key_id(environ: Any = None) -> str | None:
+    from .syncer import ISLAND_HMAC_KEY_ENV
+
+    return key_id((os.environ if environ is None else environ).get(ISLAND_HMAC_KEY_ENV))
+
+
+def write_service_status(objects: Any, *, host: str, state: str, key: str | None, reason: str | None = None,
+                         generation: int | None = None, node: str | None = None,
+                         clock: Callable[[], float] = time.time) -> dict[str, Any]:
+    """The on-site syncer service's heartbeat (:data:`SERVICE_RECORD`). ``at`` is the
+    service host's clock: a reader on another host only looks whether it moves."""
+    import json
+
+    doc = {"schema": SERVICE_SCHEMA, "host": str(host), "state": str(state), "key_id": key,
+           "at": round(clock(), 3), **({"reason": str(reason)[:500]} if reason else {}),
+           **({"generation": int(generation)} if generation is not None else {}),
+           **({"node": str(node)} if node else {})}
+    objects.write(SERVICE_RECORD, json.dumps(doc, sort_keys=True).encode())
+    return doc
+
+
+def _read_doc(objects: Any, key: str, schema: str) -> dict[str, Any] | None:
+    import json
+
+    raw = objects.read(key)
+    if raw is None:
+        return None
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    return doc if isinstance(doc, dict) and doc.get("schema") == schema else None
+
+
+def read_service_status(objects: Any) -> dict[str, Any] | None:
+    return _read_doc(objects, SERVICE_RECORD, SERVICE_SCHEMA)
+
+
+def write_onsite_stop(objects: Any, *, why: str, by: str, clock: Callable[[], float] = time.time) -> dict[str, Any]:
+    """The fleet's STOP in the run store (:data:`ONSITE_STOP`): the on-site syncer service
+    ends on it (``stopped``, exit 9), whichever host it runs on."""
+    import json
+
+    doc = {"schema": ONSITE_STOP_SCHEMA, "why": str(why)[:500], "by": str(by), "at": round(clock(), 3)}
+    objects.write(ONSITE_STOP, json.dumps(doc, sort_keys=True).encode())
+    return doc
+
+
+def read_onsite_stop(objects: Any) -> dict[str, Any] | None:
+    return _read_doc(objects, ONSITE_STOP, ONSITE_STOP_SCHEMA)
+
+
+def key_mismatch(mine: str | None, theirs: str | None) -> str | None:
+    """Why this host may not use the syncer service's key (None: the same key)."""
+    from .syncer import ISLAND_HMAC_KEY_ENV
+
+    if mine is None:
+        return (f"{ISLAND_HMAC_KEY_ENV} is not set on this host: with an on-site syncer service the island HMAC "
+                "key comes from the env file both units read (none is generated: the syncer would refuse every "
+                "island)")
+    if theirs is not None and theirs != mine:
+        return (f"the island HMAC key on this host (key id {mine}) is not the syncer service's (key id {theirs}): "
+                "every island would be refused. Give both units the same env file (or the same "
+                f"{ISLAND_HMAC_KEY_ENV}); no key is generated")
+    return None
+
+
+class _Beats:
+    """Whether a heartbeat moves, by this host's monotonic clock: its ``at`` (the service
+    host's clock) is only compared with the ``at`` seen before, never with this host's time.
+    ``moved``: a heartbeat written after the first look (a new ``at``)."""
+
+    _UNSEEN = object()
+
+    def __init__(self, clock: Callable[[], float]) -> None:
+        self.clock = clock
+        self.at: Any = self._UNSEEN
+        self.since = clock()
+        self.moved = False
+
+    def see(self, status: dict[str, Any] | None) -> None:
+        at = None if status is None else status.get("at")
+        if self.at is self._UNSEEN:
+            self.at, self.since = at, self.clock()
+        elif at != self.at:
+            self.at, self.since = at, self.clock()
+            self.moved = self.moved or at is not None
+
+    def silent_s(self) -> float:
+        return self.clock() - self.since
+
+
+def watch_service(args: Any, *, objects: Any = None, sleep: Callable[[float], None] = time.sleep,
+                  clock: Callable[[], float] = time.monotonic, wait_s: float = LISTEN_WAIT_S,
+                  poll_s: float = LISTEN_POLL_S, log: Callable[[str], None] = print) -> int:
+    """The syncer launch of a fleet with an on-site syncer service (module section above):
+    0 once the service says its run finished, 9 on the run's STOP flag (written to the run
+    store as the fleet's STOP, which ends the service) or when the service stopped, 1 when
+    it failed or stayed down past the grace, :data:`CONFIG_ERROR_EXIT` when the island HMAC
+    key is missing here or is not the service's. ``clock``: this host's monotonic clock."""
+    from .. import runs
+    from ..config_errors import CONFIG_ERROR_EXIT
+    from ..rl.island_launches import read_syncer_record
+    from .fleet import RUN_STOPPED_EXIT
+
+    host = str(args.rl_fleet_syncer_service)
+    objects = objects if objects is not None else _store_objects(args)
+    if objects is None:
+        raise ValueError(f"--rl-fleet-syncer-service: the run store {getattr(args, 'rl_checkpoint_store', None)!r} "
+                         "has no object API here; the syncer service records itself in it")
+    mine = environ_key_id()
+    refused = key_mismatch(mine, None)
+    if refused:
+        log(f"[launcher] ERROR: fleet syncer service on {host}: {refused}")
+        return CONFIG_ERROR_EXIT
+    stop_flag = runs.stop_flag_path(args.cluster_prefix)
+
+    def stop_fleet() -> int:
+        try:
+            write_onsite_stop(objects, why=f"STOP flag of run {args.cluster_prefix}", by=_node())
+            log(f"[launcher] fleet syncer: the fleet's STOP is in the run store ({ONSITE_STOP}); the syncer "
+                f"service on {host} ends on it")
+        except Exception as error:  # noqa: BLE001 - the service then runs on; said
+            log(f"[launcher] ERROR: fleet syncer: the fleet's STOP was not written to the run store "
+                f"({type(error).__name__}: {error}); stop the syncer unit on {host} (`systemctl stop`)")
+        return RUN_STOPPED_EXIT
+
+    started, said, beats = clock(), False, _Beats(clock)
+    log(f"[launcher] fleet syncer: an on-site service on {host} (fleet.syncer_service); this launch starts no "
+        "syncer, it waits for the service's record in the run store")
+    left_over: list[Any] = []  # the final heartbeat an earlier service left when this wait began
+    while True:
+        status, rec = read_service_status(objects), read_syncer_record(objects)
+        ours = status is not None and status.get("host") == host
+        beats.see(status if ours else None)
+        if not left_over:
+            left_over.append(status.get("generation") if ours and status.get("state") in SERVICE_FINAL else _NOT_FINAL)
+        if (ours and status.get("state") in SERVICE_FINAL and not _newer_final(status, left_over[0])
+                and _ended_with(objects, status, rec)):
+            log(f"[launcher] fleet syncer: the syncer service on {host} ended this run (its ended marker "
+                f"{ONSITE_SYNCER_ENDED}, generation {status.get('generation')}, the syncer record's): taken as is")
+        elif ours and status.get("state") in SERVICE_FINAL and not _newer_final(status, left_over[0]):
+            if not said:
+                log(f"[launcher] fleet syncer: the syncer service heartbeat on {host} is an earlier service's final "
+                    f"one ({status.get('state')}, generation {status.get('generation')}): not this run's, waiting "
+                    "for a newer generation")
+            ours = False
+        if ours:
+            refused = key_mismatch(mine, status.get("key_id"))
+            if refused:
+                log(f"[launcher] ERROR: fleet syncer service on {host}: {refused}")
+                return CONFIG_ERROR_EXIT
+            state = status.get("state")
+            if state == SERVICE_FAILED:
+                log(f"[launcher] ERROR: fleet syncer service on {host} failed: {status.get('reason')}")
+                return 1
+            if state == SERVICE_FINISHED:
+                log(f"[launcher] fleet syncer service on {host}: its run is finished")
+                return 0
+            if state == SERVICE_STOPPED:
+                log(f"[launcher] fleet syncer service on {host} stopped: {status.get('reason')}")
+                return RUN_STOPPED_EXIT
+            if (state == SERVICE_RUNNING and beats.moved and rec is not None and rec.get("service") == host
+                    and status.get("generation") is not None):
+                written = _rerecord(objects, status, args)  # only over the record of the heartbeat's generation
+                if written is not None:
+                    rec = written
+                    break
+        if os.path.exists(stop_flag):
+            log(f"[launcher] fleet syncer: STOP flag {stop_flag} before the syncer service on {host} was up")
+            return stop_fleet()
+        if clock() - started >= wait_s:
+            log(f"[launcher] ERROR: fleet syncer: no running syncer service on {host} recorded in the run store "
+                f"within {wait_s:.0f}s (start its unit on that host: `yeto fleet service`, docs/OWN_CLUSTERS.md); "
+                "no island was started")
+            return 1
+        if not said:
+            log(f"[launcher] fleet syncer: waiting up to {wait_s:.0f}s for the syncer service on {host} (its "
+                "heartbeat must move once)")
+            said = True
+        sleep(poll_s)
+    epoch = rec.get("syncer_epoch")
+    args.rl_syncer_epoch = epoch
+    log(f"[launcher] fleet syncer service on {host} at {rec['addr']} (epoch {epoch}, generation "
+        f"{status.get('generation')}) recorded for the islands; watching its heartbeat")
+
+    def current() -> dict[str, Any] | None:
+        return read_service_status(objects)
+
+    def finished() -> bool:
+        status = current()
+        return status is not None and status.get("host") == host and status.get("state") == SERVICE_FINISHED
+
+    def service_stopped() -> str | None:
+        status = current()
+        if status is not None and status.get("host") == host and status.get("state") == SERVICE_STOPPED:
+            return f"the syncer service on {host} stopped ({status.get('reason')})"
+        return None
+
+    def failed() -> str | None:
+        try:
+            status = current()
+            rec = read_syncer_record(objects)
+        except Exception as error:  # noqa: BLE001 - not known: down for now
+            return f"its heartbeat did not read ({type(error).__name__}: {error})"
+        if status is None:
+            return "no heartbeat record"
+        if status.get("host") != host:
+            return f"the heartbeat names host {status.get('host')!r}, not {host}: no syncer service of this fleet"
+        beats.see(status)
+        refused = key_mismatch(mine, status.get("key_id"))
+        if refused:
+            return Final(refused)
+        if status.get("state") == SERVICE_FAILED:
+            return Final(f"the syncer service failed: {status.get('reason')}")
+        if beats.silent_s() > SERVICE_STALE_S:
+            return f"no new heartbeat from the syncer service on {host} for {beats.silent_s():.0f}s"
+        if status.get("state") != SERVICE_RUNNING:
+            return f"the syncer service on {host} is {status.get('state')}"
+        if rec is None or rec.get("service_generation") != status.get("generation"):
+            return (f"the syncer record (generation {None if rec is None else rec.get('service_generation')}) is not "
+                    f"the running service's (generation {status.get('generation')}) yet")
+        return None
+
+    grace = getattr(args, "rl_fleet_syncer_grace_s", None)
+    code = supervise(finished=finished, failed=failed, stop_flag=stop_flag, sleep=sleep,
+                     grace_s=FAILURE_GRACE_S if grace is None else float(grace), clock=clock, log=log,
+                     stopped=service_stopped)
+    if code == RUN_STOPPED_EXIT and os.path.exists(stop_flag):
+        return stop_fleet()
+    return code
+
+
+_NOT_FINAL = object()  # the heartbeat was not final when the wait began
+ONSITE_SYNCER_ENDED = "fleet/onsite/syncer.ended"  # the syncer service's ended marker (fleet_service.Onsite)
+
+
+def _ended_with(objects: Any, status: dict[str, Any], rec: dict[str, Any] | None) -> bool:
+    """A final heartbeat left when the wait began is this run's end after all: the syncer
+    service's ended marker is in the run store, and the syncer record is of that heartbeat's
+    generation (a control unit restarted after the syncer ended the run)."""
+    generation = status.get("generation")
+    if generation is None or rec is None or rec.get("service_generation") != generation:
+        return False
+    try:
+        return objects.read(ONSITE_SYNCER_ENDED) is not None
+    except Exception:  # noqa: BLE001 - read again at the next poll
+        return False
+
+
+def _newer_final(status: dict[str, Any], left_over: Any) -> bool:
+    """A final heartbeat the syncer launch may act on while it waits: any when the heartbeat it
+    first saw was not final, else only one of a newer generation than that left-over one."""
+    if left_over is _NOT_FINAL:
+        return True
+    generation = status.get("generation")
+    if generation is None:
+        return False
+    return left_over is None or int(generation) > int(left_over)
+
+
+def _rerecord(objects: Any, status: dict[str, Any], args: Any) -> dict[str, Any] | None:
+    """The syncer record written again for this run up (a fresh ``at``, this host's wall clock:
+    the trainer worker dials a record newer than its syncer launch), only over the service's
+    own record of ``status``'s generation: a service that restarted meanwhile (a new
+    generation) wrote its own, which is never overwritten. The write is the store's
+    conditional one (``replace_if``: only while the object still holds the bytes read). On S3
+    that is a PutObject with ``If-Match``, which the store applies against every other write
+    of the key, the service's plain one too (an endpoint that ignores ``If-Match`` is found by
+    a probe and takes the fallback). A directory store's ``replace_if`` holds a lock file the
+    service's own record write takes as well (``write_syncer_record`` through
+    ``write_exclusive``). A store without either is read again right before a plain write;
+    the window left there is that one write: a service generation that records itself
+    between that read and the write is overwritten, and the islands dial its address (the
+    same host) under the older generation until its syncer next restarts and records itself
+    again. None: not written (read again at the next poll)."""
+    import json
+
+    from ..rl.island_launches import SYNCER_RECORD, syncer_record_doc
+
+    try:
+        raw = objects.read(SYNCER_RECORD)
+        rec = json.loads(raw) if raw is not None else None
+        if not isinstance(rec, dict) or not rec.get("addr") or rec.get("service_generation") != status.get("generation"):
+            return None
+        doc = syncer_record_doc(addr=str(rec["addr"]), syncer_epoch=rec.get("syncer_epoch"),
+                                learners=int(rec.get("learners") or 0), max_learners=rec.get("max_learners"),
+                                run=str(rec.get("run") or args.cluster_prefix),
+                                extra={k: rec[k] for k in ("service", "service_node", "service_generation", "key_id")
+                                       if k in rec})
+        data = json.dumps(doc, sort_keys=True).encode()
+        replace = getattr(objects, "replace_if", None)
+        done = replace(SYNCER_RECORD, data, raw) if replace is not None else None
+        if done is None:  # no conditional write on this store: read again right before the write
+            if objects.read(SYNCER_RECORD) != raw:
+                return None
+            objects.write(SYNCER_RECORD, data)
+        elif not done:
+            return None
+        return doc
+    except Exception as error:  # noqa: BLE001 - a store error: tried again at the next poll
+        print(f"[launcher] fleet syncer: the syncer record was not written again ({type(error).__name__}: {error}); "
+              "tried again at the next poll", file=sys.stderr, flush=True)
+        return None
+
+
+def _node() -> str:
+    import socket
+
+    return socket.gethostname()

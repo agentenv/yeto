@@ -237,6 +237,27 @@ read; 2 bad input (no store, a store without an object API here, no such island,
 island this command does not drive, a fixed roster without `--end-fleet`, a `start` of an
 island that ended otherwise or still drains).
 
+### `yeto fleet service`
+
+The systemd unit of a fleet's control plane (`--role control`: `yeto run up`) or of its
+on-site syncer (`--role syncer`, `fleet.syncer_service`). See
+[OWN_CLUSTERS.md](OWN_CLUSTERS.md), "On-site control plane".
+
+| Command | Does |
+|---|---|
+| `yeto fleet service --config F --role R --env-file E --print` | write the unit to stdout |
+| `yeto fleet service --config F --role R --env-file E --install HOST` | write the unit on HOST over SSH and run `systemctl enable --now` there |
+| `yeto fleet service stop HOST --config F --role control --env-file E` | `yeto stop-run` of the fleet on the control host HOST, as the unit runs it (its user, env file, `YETO_STATE_DIR`, `YETO_RUNS_DIR`; `sudo -n systemd-run`) |
+| `yeto fleet service clear-ended HOST --config F --role R --env-file E` | remove the role's ended marker on HOST and in the run store (the syncer's also lifts the fleet's STOP), so that the unit starts the run again |
+| `yeto fleet service fresh HOST --config F --role syncer --env-file E` | let the syncer service's next start on HOST begin the syncer at the next term, for a checkpoint that is gone (the islands rejoin it); refused on a host that is not the run store record's `service_node` |
+| `yeto fleet service-run --role R --config F` | what the unit runs, in the foreground (`--clear-ended`: remove the ended marker here; `--fresh`: the syncer's next start begins at the next term; `--stop-grace-s`: the syncer's SIGTERM-to-SIGKILL grace) |
+
+Options: `--remote-config`, `--python`, `--yeto-dir`, `--user`, `--workdir` (the paths on the
+service host). Exit 2: refused (a fleet that is not per-island on the store control plane, a
+syncer role without `fleet.syncer_service`, a control role with `rollout.drain_on_exit` true,
+a run name or path the unit cannot hold). The exits of `service-run`: OWN_CLUSTERS.md, "How the
+units restart".
+
 ### `yeto merge`
 
 Merge a PEFT adapter into its base model and write SafeTensors shards.

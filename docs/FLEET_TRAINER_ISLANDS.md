@@ -33,6 +33,7 @@ admission rules, images and trainer cards are in [VERL_FLEET.md](VERL_FLEET.md).
 |---|---|
 | `fleet.launch` | `synced_group` (default, one launch) or `per_island`. |
 | `fleet.max_islands` | The most islands the fleet can ever hold. It becomes `--rl-sync-max-learners` on every launch: the syncer admits learner ids `0 .. max_islands-1`. Default: the declared islands, so nothing can be added. It must be at least the declared islands. |
+| `fleet.syncer_service` | Optional: the host of an on-site syncer service (`yeto fleet service --role syncer`). The syncer launch then orders no syncer and watches that service ([OWN_CLUSTERS.md](OWN_CLUSTERS.md), "On-site control plane"). |
 | `rollout.control_plane` | Must be `store`. The islands are members of the fleet's desired state ([FLEET_CONTROL_PLANE.md](FLEET_CONTROL_PLANE.md)). |
 | `controller` | Must be `in_process`. The trainer worker runs in the rollout controller of `yeto run up`. |
 

@@ -99,10 +99,17 @@ def fleet_flags(plan: Any) -> list[str]:
     return ["--rl-sync-max-learners", str(int(plan.max_islands))]
 
 
+SYNCER_SERVICE_FLAG = "--rl-fleet-syncer-service"  # the syncer launch of a fleet with an on-site syncer service
+
+
 def syncer_argv(group_argv: list[str], plan: Any) -> list[str]:
-    """The syncer launch (module doc): the synced-group argv, syncer role only."""
+    """The syncer launch (module doc): the synced-group argv, syncer role only. With an
+    on-site syncer service (``fleet.syncer_service``) the launch watches that service
+    instead of starting a syncer (:func:`yeto.launch.fleet_syncer.watch_service`), on
+    this host (``--controller local``: no head VM)."""
+    service = getattr(plan, "syncer_service", None)
     return [*group_argv, "--rl-fleet-role", "syncer", "--rl-fleet-learners", str(len(plan.islands)),
-            *fleet_flags(plan)]
+            *fleet_flags(plan), *((SYNCER_SERVICE_FLAG, str(service), "--controller", "local") if service else ())]
 
 
 def island_argv(trainer_argv: list[str], island: Any, plan: Any, *, learners: int,
@@ -239,13 +246,30 @@ def fleet_shape(trainer_argv: list[str]) -> str | None:
 # -- the syncer record --------------------------------------------------------------------------
 
 def write_syncer_record(objects: Any, *, addr: str, syncer_epoch: int | None, learners: int,
-                        max_learners: int | None, run: str, clock: Any = time.time) -> dict[str, Any]:
-    """The fleet syncer's address and term in the run store (the island launches dial it)."""
-    record = {"schema": SYNCER_SCHEMA, "addr": str(addr), "syncer_epoch": syncer_epoch, "learners": int(learners),
-              "max_learners": None if max_learners is None else int(max_learners), "run": str(run),
-              "at": round(clock(), 3)}
-    objects.write(SYNCER_RECORD, json.dumps(record, sort_keys=True).encode())
+                        max_learners: int | None, run: str, clock: Any = time.time,
+                        extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The fleet syncer's address and term in the run store (the island launches dial it).
+    ``extra``: fields an on-site syncer service adds (``service``, ``key_id``); none otherwise.
+    A store with ``write_exclusive`` (a directory) writes it under the lock of its
+    ``replace_if``, so the syncer launch's conditional rewrite of the record
+    (``fleet_syncer._rerecord``) never overwrites a record this write put there meanwhile."""
+    record = syncer_record_doc(addr=addr, syncer_epoch=syncer_epoch, learners=learners, max_learners=max_learners,
+                               run=run, clock=clock, extra=extra)
+    data = json.dumps(record, sort_keys=True).encode()
+    exclusive = getattr(objects, "write_exclusive", None)
+    if exclusive is not None:
+        exclusive(SYNCER_RECORD, data)
+    else:
+        objects.write(SYNCER_RECORD, data)
     return record
+
+
+def syncer_record_doc(*, addr: str, syncer_epoch: int | None, learners: int, max_learners: int | None, run: str,
+                      clock: Any = time.time, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The record :func:`write_syncer_record` writes."""
+    return {"schema": SYNCER_SCHEMA, "addr": str(addr), "syncer_epoch": syncer_epoch, "learners": int(learners),
+            "max_learners": None if max_learners is None else int(max_learners), "run": str(run),
+            "at": round(clock(), 3), **dict(extra or {})}
 
 
 def read_syncer_record(objects: Any) -> dict[str, Any] | None:
