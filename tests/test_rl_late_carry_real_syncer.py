@@ -87,11 +87,8 @@ def test_late_push_is_merged_once_into_the_next_round_of_its_fragment(make_rig):
     rig.push(0, 2, d1, base=0)
     _check(rig.bcast(0, 1, 2), ref.step(1, [d1], [1.0]))
 
-    # Round 3 (fragment 0, base 1). Island 1 answers from its old anchor 0
-    # again: that anchor already gave the carried delta, so it is refused.
-    rig.push(1, 3, d[2], base=0, c_steps=3, c_tokens=9)
-    with pytest.raises(TimeoutError):
-        rig.bcast(0, 0, 3, timeout=1.0)
+    # Round 3 (fragment 0, base 1). Island 0 answers it: the round merges its
+    # delta and island 1's carried one, each against its own base and weight.
     rig.push(0, 3, d[3], base=1, c_steps=1, c_tokens=4)
     want = ref.step(0, [d[3], d[1]], [_weight(1, 4), _weight(2, 6)])
     _check(rig.bcast(0, 0, 3), want)
@@ -102,6 +99,34 @@ def test_late_push_is_merged_once_into_the_next_round_of_its_fragment(make_rig):
     assert (carried["id"], carried["missed_step"], carried["base_version"], carried["lag"]) == (1, 1, 0, 1)
     assert "carried" not in records[1] and "carried" not in records[2]
 
+
+
+def test_a_carried_delta_answers_the_round_when_its_island_is_refused_for_the_spent_anchor(make_rig):
+    """Island 1's late delta is carried into round 3 and spends its anchor 0. Its own
+    answer to round 3 comes from the same anchor (version 1 has not reached it) and is
+    refused. The carried delta is then its answer: round 3 commits with it, without
+    island 0 (as stalled as island 1 may be) and without the quorum timeout."""
+    rig = make_rig(2, *ASYNC_K1, "--rl-sync-grace-ms", "0", total_steps=4)
+    initial = _initial(rig.layout)
+    rig.start(initial)
+    ref = Reference(rig.layout, initial, DEFAULT_LR, DEFAULT_MU)
+    d = _deltas(rig.layout, 0, 7, 3)
+
+    rig.push(0, 1, d[0], base=0, c_steps=1, c_tokens=4)
+    _check(rig.bcast(0, 0, 1), ref.step(0, [d[0]], [1.0]))
+    rig.push(1, 1, d[1], base=0, c_steps=2, c_tokens=6)  # late: carried into round 3
+    d1 = _deltas(rig.layout, 1, 8, 1)[0]
+    rig.push(0, 2, d1, base=0)
+    _check(rig.bcast(0, 1, 2), ref.step(1, [d1], [1.0]))
+
+    rig.push(1, 3, d[2], base=0, c_steps=3, c_tokens=9)  # refused: anchor 0 is spent
+    _check(rig.bcast(0, 0, 3), ref.step(0, [d[1]], [_weight(2, 6)]))  # the carried delta alone
+
+    records = _records_through(rig, 3)
+    assert records[3]["responders"] == [] and records[3]["attempt"] == 1
+    (carried,) = records[3]["carried"]
+    assert (carried["id"], carried["missed_step"], carried["base_version"], carried["lag"]) == (1, 1, 0, 1)
+    assert not [r for r in _tape(rig) if r.get("kind") == "round_attempt_timeout"]
 
 def test_late_push_beyond_the_base_lag_bound_is_dropped(make_rig):
     rig = make_rig(2, *ASYNC_K1, "--rl-sync-grace-ms", "0", total_steps=6)

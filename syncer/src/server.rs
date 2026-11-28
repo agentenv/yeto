@@ -4703,6 +4703,7 @@ async fn scheduler(
                 carried: Vec::new(),
                 carry_answers: cfg.carry_answers_round,
                 refused_ahead: Vec::new(),
+                carry_refused: Vec::new(),
                 deadline_merge: dynamic && !fixed_roster,
                 excused,
             });
@@ -4922,6 +4923,7 @@ async fn scheduler(
                     }
                     r.pushes.clear();
                     r.refused_ahead.clear();
+                    r.carry_refused.clear();
                     arrival_gaps.forget(r.t, r.p);
                     r.fold = round_fold(&cfg, &st, r.p, &r.expected_members, r.quorum_size);
                     r.started = Instant::now();
@@ -5230,6 +5232,20 @@ async fn scheduler(
                                 "push reuses an anchor whose delta was already taken"
                             );
                             rejected("anchor_reused");
+                            // Its delta carried into this very round is its answer to it.
+                            if let Some(round) = inflight.iter_mut().find(|round| {
+                                round.t == global_step && round.p == fragment_id as usize
+                            }) {
+                                if round.answer_with_carry(member) {
+                                    info!(
+                                        learner_id,
+                                        generation,
+                                        step = global_step,
+                                        fragment = fragment_id,
+                                        "the delta carried into this round answers it for the refused island"
+                                    );
+                                }
+                            }
                             continue;
                         }
                         let open = inflight.iter().any(|round| {
@@ -6041,6 +6057,13 @@ struct Round {
     carried: Vec<(Member, Push)>,
     /// `Config::carry_answers_round`, frozen at launch.
     carry_answers: bool,
+    /// Expected islands whose own push for this round was refused because a
+    /// delta of theirs carried into this round had spent its anchor
+    /// (`anchor_reused`). Until this round commits they have no newer anchor
+    /// to answer from, so the carried delta is their answer (with or without
+    /// `carry_answers`): otherwise a round only they can answer would wait
+    /// for the quorum timeout, and its new attempt would refuse them again.
+    carry_refused: Vec<Member>,
     /// Expected islands whose push for this attempt was refused as
     /// `FutureBase`: its base is ahead of this round's, which happens only
     /// after the syncer resumed from a checkpoint older than the islands'
@@ -6066,15 +6089,26 @@ impl Round {
     /// round was carried into it (see `Config::carry_answers_round`).
     fn responders(&self) -> Vec<&Member> {
         let mut responders: Vec<&Member> = self.pushes.keys().collect();
-        if !self.carry_answers {
-            return responders;
-        }
         for (member, _push) in &self.carried {
-            if self.expected_members.contains(member) && !responders.contains(&member) {
+            let answers = self.carry_answers || self.carry_refused.contains(member);
+            if answers && self.expected_members.contains(member) && !responders.contains(&member) {
                 responders.push(member);
             }
         }
         responders
+    }
+
+    /// `member`'s push for this round was refused as `anchor_reused`: when a
+    /// delta of theirs is carried into this round, it answers for them
+    /// (`carry_refused`). Returns true when it does.
+    fn answer_with_carry(&mut self, member: Member) -> bool {
+        if !self.carried.iter().any(|(carried, _push)| *carried == member) {
+            return false;
+        }
+        if !self.carry_refused.contains(&member) {
+            self.carry_refused.push(member);
+        }
+        true
     }
 
     fn quorum_reached(&self) -> bool {
@@ -11218,6 +11252,7 @@ mod tests {
             carried: Vec::new(),
             carry_answers: false,
             refused_ahead: Vec::new(),
+            carry_refused: Vec::new(),
             deadline_merge: false,
             excused: Vec::new(),
             pushes: HashMap::from([(
@@ -11306,6 +11341,7 @@ mod tests {
             carried: Vec::new(),
             carry_answers: false,
             refused_ahead: Vec::new(),
+            carry_refused: Vec::new(),
             deadline_merge: false,
             excused: Vec::new(),
             pushes: HashMap::from([(
@@ -11375,6 +11411,7 @@ mod tests {
             carried: Vec::new(),
             carry_answers: false,
             refused_ahead: Vec::new(),
+            carry_refused: Vec::new(),
             deadline_merge: false,
             excused: Vec::new(),
             pushes,
@@ -13813,6 +13850,23 @@ mod tests {
     }
 
     #[test]
+    fn a_carried_delta_answers_for_its_island_only_once_that_island_was_refused_for_the_spent_anchor() {
+        let fast = member(0, 1);
+        let slow = member(1, 1);
+        let mut round = test_round(vec![fast, slow]);
+        round.quorum_size = 1;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        assert_eq!(attach_carry(&mut round, slow, test_push_for(1, 4), 1), Ok(1));
+        assert!(!round.quorum_reached()); // carries stay outside quorum (flag off)
+        assert!(!round.answer_with_carry(fast)); // no delta of the fast island is carried here
+        assert!(!round.quorum_reached());
+        assert!(round.answer_with_carry(slow)); // its own push was refused: anchor_reused
+        assert!(round.answer_with_carry(slow)); // once is enough; a second refusal changes nothing
+        assert_eq!(round.carry_refused, vec![slow]);
+        assert!(round.quorum_reached() && round.responders() == vec![&slow]);
+    }
+
+    #[test]
     fn carried_delta_completes_a_round_once_every_expected_island_answered() {
         let fast = member(0, 1);
         let slow = member(1, 1);
@@ -13999,6 +14053,7 @@ mod tests {
             carried: Vec::new(),
             carry_answers: false,
             refused_ahead: Vec::new(),
+            carry_refused: Vec::new(),
             deadline_merge: false,
             excused: Vec::new(),
             pushes: HashMap::new(),
@@ -14689,6 +14744,102 @@ mod tests {
             ] {
                 assert!(record.contains(field), "{field} missing from {record}");
             }
+        };
+        tokio::select! {
+            result = scheduler(cfg, events_rx, registry.clone(), budget_cutoff) => panic!("scheduler ended: {result:?}"),
+            () = driver => {}
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A late delta carried into a round spends its island's anchor, so the
+    /// island's own answer to that round, from the same anchor (it has not
+    /// received the newer version yet), is refused as `anchor_reused`. The
+    /// carried delta is then that island's answer: the round commits with it
+    /// instead of waiting for another island or the quorum timeout (the
+    /// slow-downlink stall: the only island that could answer was the one
+    /// refused, and a new attempt is refused the same way).
+    #[tokio::test]
+    async fn a_carried_delta_answers_the_round_its_island_is_refused_in_for_a_spent_anchor() {
+        let layout = Layout {
+            fragments: vec![crate::state::FragmentInfo {
+                merge_mode: crate::state::MERGE_AVG,
+                tensor_numels: vec![4],
+                tensor_shapes: None,
+            }],
+        };
+        let directory = unique_test_directory("carried-anchor-answers");
+        let tape = directory.join("tape.jsonl");
+        let mut cfg = round_test_config(4);
+        cfg.learners = 1;
+        cfg.quorum = 1;
+        cfg.max_base_lag = Some(1);
+        cfg.carry_answers_round = false; // the async default: carries stay outside quorum
+        cfg.quorum_timeout_s = 3600;
+        cfg.event_tape = Some(tape.clone());
+        cfg.membership = crate::membership::MembershipConfig { max_learners: Some(2), ..Default::default() };
+        let registry: Registry =
+            Arc::new(Mutex::new(RegistryState::new(Membership::new(cfg.membership.clone(), 2))));
+        let budget_cutoff = Arc::new(BudgetCutoff::new(false, Duration::from_secs(cfg.quorum_timeout_s)));
+        let (events, events_rx) = mpsc::channel(64);
+        let (fast, slow) = (member(0, 1), member(1, 1));
+        let (fast_control, mut fast_frames) = mpsc::channel(1024);
+        let (slow_control, mut slow_frames) = mpsc::channel(1024);
+        let fast_group = scheduler_test_group(fast, &layout, fast_control);
+        let slow_group = scheduler_test_group(slow, &layout, slow_control);
+        for group in [&fast_group, &slow_group] {
+            registry.lock().unwrap().register_group(group.clone(), Instant::now()).unwrap();
+            events.send(Event::Hello { group: group.clone() }).await.unwrap();
+        }
+        events.send(Event::Init { member: fast, fragment_id: 0, values: vec![0.0; 4], sha256: [0; 32] }).await.unwrap();
+        let push_of = |learner_id: u32, step: u64, base: u64| {
+            let mut push = test_push_for(learner_id, base);
+            push.fragment_id = 0;
+            push.global_step = step;
+            push.round_attempt = 1;
+            push.outer_gradient = vec![0.5; 4];
+            push
+        };
+        let record_of = |step: u64| {
+            let tape = tape.clone();
+            async move {
+                loop {
+                    let text = std::fs::read_to_string(&tape).unwrap_or_default();
+                    let needle = format!("\"step\":{step},");
+                    if let Some(line) = text.lines().find(|line| line.contains("\"sync/responders\"") && line.contains(&needle)) {
+                        return line.to_string();
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        let driver = async {
+            // Step 1: the fast island answers and the round commits (version 1).
+            let pull = next_pull(&mut fast_frames).await;
+            assert_eq!((pull.1, pull.2), (1, 1));
+            events.send(Event::Push { member: fast, push: push_of(0, 1, 0) }).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), record_of(1)).await.expect("step 1 did not commit");
+            // Step 2 is pulled from both islands. The slow island's answer to step 1
+            // arrives now: late, it is carried into step 2 and spends its anchor 0.
+            let pull = next_pull(&mut slow_frames).await;
+            assert_eq!((pull.1, pull.2), (1, 1));
+            let pull = next_pull(&mut slow_frames).await;
+            assert_eq!((pull.1, pull.2), (2, 1));
+            events.send(Event::Push { member: slow, push: push_of(1, 1, 0) }).await.unwrap();
+            // Its answer to step 2 comes from the same anchor (version 1 has not reached
+            // it): refused as anchor_reused. The fast island does not answer step 2.
+            events.send(Event::Push { member: slow, push: push_of(1, 2, 0) }).await.unwrap();
+            let record = tokio::time::timeout(Duration::from_secs(10), record_of(2))
+                .await
+                .expect("step 2 waited for another island although the slow island's carried delta answers it");
+            // The record lists own pushes as `responded` and the carried delta under
+            // `carried`, as with --carry-answers-round.
+            for field in ["\"attempt\":1,", "\"expected\":[0,1],", "\"responded\":[],", "\"carried\":[{\"id\":1,"] {
+                assert!(record.contains(field), "{field} missing from {record}");
+            }
+            let text = std::fs::read_to_string(&tape).unwrap();
+            assert!(text.contains("\"reason\":\"anchor_reused\""), "the second push was not refused: {text}");
+            assert!(!text.contains("\"kind\":\"round_attempt_timeout\""), "{text}");
         };
         tokio::select! {
             result = scheduler(cfg, events_rx, registry.clone(), budget_cutoff) => panic!("scheduler ended: {result:?}"),
