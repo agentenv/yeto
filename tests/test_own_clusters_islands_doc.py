@@ -1,7 +1,8 @@
 """docs/OWN_CLUSTERS.md, "Islands that lag, join or leave": every command of the section
 parses, the ``yeto fleet island`` ones run in the doc's order on a seeded per-island fleet
-(local store), each dry run writes nothing, and the flags and events the section names are
-the code's."""
+(local store; the join checks run on the real node health checker over recorded tool
+outputs, the real placement and real leases on a directory store), each dry run writes
+nothing, and the flags, events and refusal the section shows are the code's."""
 
 from __future__ import annotations
 
@@ -11,9 +12,11 @@ import types
 from pathlib import Path
 
 from test_fleet_island_changes import fleet_store  # noqa: F401 - fixture
+from test_island_join import XID_79, Ssh, _hold, _inventory
 
+from yeto.launch import island_join as ij
 from yeto.launch import island_straggler as st
-from yeto.rl import fleet, fleet_islands
+from yeto.rl import fleet_islands
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "OWN_CLUSTERS.md"
 SECTION = "## Islands that lag, join or leave"
@@ -56,23 +59,54 @@ def test_the_section_names_the_code_s_flags_and_events():
             assert f"`{field}`" in text, field
 
 
-def test_the_section_commands_run_in_order(fleet_store, capsys):  # noqa: F811
+def test_the_section_commands_run_in_order(fleet_store, tmp_path, monkeypatch, capsys):  # noqa: F811
     from yeto.cli import build_parser
 
-    cfg, _objects, store, run_cli, _samplers = fleet_store
+    _cfg, _objects, store, run_cli, samplers = fleet_store
     argvs = commands()
     assert {a[1] for a in argvs} == {"fleet", "island"}
     for argv in argvs:
         build_parser().parse_args(argv[1:])
-    plan = fleet.plan_of(cfg)  # the island the section removes
-    entry = dict(cfg["islands"][1]["samplers"][0], name="sglang-north")
-    member, pools = fleet_islands.compile_island(cfg, plan, k=2, name="north", gpu="modal:1x2xh100", usd_per_h=8.0,
-                                                 samplers=[entry])
-    store.update(lambda d: fleet_islands.add(d, member, pools), note="add north")
+    ssh = Ssh()  # every node answers healthy (the recorded 8 x B300 IB node)
+    monkeypatch.setattr("yeto.launch.ssh_trainer_island.SshOps", lambda: ssh)
+    monkeypatch.setattr(fleet_islands, "launch_dry_run", lambda member, **kw: None)
+    monkeypatch.setattr(fleet_islands, "session_check", lambda *a, **kw: None)
+    inventory = _inventory(tmp_path / "north.inventory.yaml", ["b300-4", "b300-5"])
     for argv in (a for a in argvs if a[:3] == ["yeto", "fleet", "island"]):
-        rest = argv[3:]
+        rest = [str(samplers) if a == "north.samplers.json" else str(inventory) if a == "north.inventory.yaml"
+                else a for a in argv[3:]]
         config = rest.index("--config")
         del rest[config:config + 2]
         before = store.read()["generation"]
         assert run_cli(*rest) == 0, (argv, capsys.readouterr().err)
+        out = capsys.readouterr().out
         assert store.read()["generation"] == before + (0 if "--dry-run" in argv else 1)
+        if argv[3] == "add":
+            assert "nodes pass the join checks" in out
+
+
+def test_the_refusal_the_section_shows_is_the_command_s(tmp_path):
+    """The real checker reads b300-5's recorded output with an Xid 79 of this boot, and the
+    real leases show b300-4 held by another run."""
+    from yeto.launch.node_inventory import load_inventory
+
+    store = str(tmp_path / "leases")
+    nodes = load_inventory(_inventory(tmp_path / "inv.yaml", ["b300-4", "b300-5"], lease_store=store))
+    _hold(store, nodes[0], "other-run/trainer")
+    out = ij.check(nodes, need=2, run_id="r-i2", lease_store=store, ssh=Ssh({"b300-5": XID_79}),
+                   inventory=nodes)
+    line = "fleet island: refused: island north's nodes cannot join: " + "; ".join(out.refusals)
+    assert line in section()
+
+
+def test_the_section_states_the_join_rules_of_the_code():
+    text = section()
+    assert "half the fastest" in text and ij.RATE_FRACTION == 0.5
+    from yeto.launch.ssh_trainer_island import DEFAULT_NODE_LEASE_WAIT_S
+
+    assert f"({DEFAULT_NODE_LEASE_WAIT_S:.0f} s by default)" in text
+    for word in ("`min_ib_gbps`", "`--force`", "`--island-env`", "`<prefix>-m<n>/trainer`", "exit 3",
+                 "yeto fleet island move --gpu ssh:", "`adm` or `systemd-journal`", "fabric_manager_absolute", "same fabric group",
+                 "trainer-spare", "fleet/nodes/<name>/quarantine.json",
+                 "`--rl-node-lease-wait-s`"):
+        assert word in text, word

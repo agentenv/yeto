@@ -965,7 +965,7 @@ exactly as before.
 A fleet of `ssh:` trainer islands on your own machines uses the same fleet mechanisms as any
 other island fleet ([FLEET_TRAINER_ISLANDS.md](FLEET_TRAINER_ISLANDS.md)). This section
 covers what is specific to `ssh:` islands: how a slow or stuck island is reported, and what
-happens when one leaves.
+is checked before an island joins.
 
 ### An island that lags
 
@@ -1106,6 +1106,72 @@ reported then, and training is not affected. This happens:
   window is 31 minutes. This is counted only after the first record about
   the launch's islands, so a fleet whose trainers are still starting is not reported. Once
   records are read again, the launch writes `island_straggler_available`.
+
+### Adding an island
+
+With `fleet.launch: per_island`, add an `ssh:` island with its own node inventory. Its
+inventory lists the island's trainer nodes, in the format of `--rl-node-inventory`:
+
+```bash
+yeto fleet island add --config run.json --name north --gpu ssh:2x8xb300@bm --usd-per-h 0 \
+    --samplers north.samplers.json --inventory north.inventory.yaml --dry-run
+yeto fleet island add --config run.json --name north --gpu ssh:2x8xb300@bm --usd-per-h 0 \
+    --samplers north.samplers.json --inventory north.inventory.yaml
+```
+
+The island's launch gets `--rl-node-inventory` with the inventory's absolute path. Before
+anything is written, and in the dry run too, the command checks the inventory's trainer
+nodes and prints the nodes the island takes:
+
+| Check | Refused when |
+|---|---|
+| Count | Without `lease_store`: the inventory does not list as many trainer nodes as `--gpu` says. With `lease_store` it may list more, as for a launch: the island takes as many as it needs of the free, healthy ones (below). |
+| In this fleet | A node is a trainer node, or a spare (`trainer-spare`), of another `ssh:` island whose inventory has no `lease_store`, or another one: the same name, or the same machine (its SSH target without `user@`, or its `address`, in any case). For an island on the same `lease_store` (`file:///x` and `/x` are one store), its launch's lease says which nodes it holds; a lease is taken by node name, so the same machine under another name in its inventory counts as its node. |
+| Health | One SSH call per node runs the node health check of its device family, the check the island's launch runs while it trains. A node joining has no earlier check to compare with, so it is judged on absolute rules: a hardware Xid in the kernel log of this boot, a volatile uncorrectable ECC count above 0, a fabric manager that one check alone judges bad (`fabric_manager_absolute`, see [NODE_RUNTIME.md](NODE_RUNTIME.md): a node with NVSwitch of its own whose `nvidia-fabricmanager` is not `active`; a fabric managed off-host passes, one it cannot judge does not read), fewer GPUs than `cards_per_node`, an NVLink fabric not `Completed`. A multi-node island also needs its ports `Active`: those of `NCCL_IB_HCA` (the island's own `--island-env` value wins over the node's `env`), else the fabric's ports that NCCL takes. Each port runs at no less than the node's `min_ib_gbps` when the inventory sets it; else at no less than half the fastest of these ports on the island's nodes of the same fabric group. A check that does not read is refused: no answer, `nvidia-smi` or the fabric state timed out, a check still stuck on the node, an output cut off, the IB tools unread, or a kernel log the SSH user cannot read (`dmesg` restricted: add the user to the `adm` or `systemd-journal` group). With `--force` such a check is a WARNING and the node joins. A node found unhealthy is refused with `--force` too. A device family without a health check, or a node with `node_health: off`, is a note. |
+| Fabric group | The inventory declares `fabric_group` and no one group holds the island's nodes. An inventory without any `fabric_group` only gets a note. |
+| Lease | The inventory's `lease_store` shows a node leased to another run, or to another island of this fleet. A lease of the island's own launch (`<prefix>/trainer`, or `<prefix>-m<n>/trainer` after a move) is not a refusal. A lease that does not read is refused. Without `lease_store` this is not checked, and a note says so. |
+| Quarantine | A node quarantined after a spare replaced it (`nodes/<name>/quarantine.json` in the `lease_store`, any run's; `fleet/nodes/<name>/quarantine.json` in the run's `--rl-checkpoint-store`) until `yeto cluster release-node`. Without `lease_store` it is refused; with one it is left out as the launch's pick leaves it out. A record that does not read counts as a quarantine. Without `lease_store`, a run store that does not open refuses (with `--force`, a WARNING); with `lease_store` it is a WARNING, as the lease store holds every run's quarantines. Without a checkpoint store this is not checked, and a note says so. |
+
+With `lease_store`, the nodes held by another run or island are left out, and the island
+must fit on the healthy rest (one fabric group in a grouped inventory, else any). When it
+does not, the refusal names each node left out and why. The launch picks by leases only,
+under a holder of its own (after a move, the nodes the island's earlier incarnation holds
+are not its own): it takes the free nodes in the inventory's order (the free and the
+earlier incarnation's ones when too few are free), and the rest when those are taken
+meanwhile. So:
+
+- any unhealthy candidate refuses, as a pick may come to it: take that node out of the
+  trainer nodes (`roles`) or clear its fault;
+- a node of an island on no or another `lease_store`, or the same machine under another
+  name, looks free to the launch: a pick that would take it refuses (`launch would take
+  ...`): give both islands the same `lease_store` and one name per machine, or use
+  inventories without shared nodes.
+
+Limits:
+
+- Two adds on one `lease_store` that run before either island launches see no lease of
+  the other, so both may list the same nodes. Their launches then take the leases one
+  after the other: the later one waits for free nodes, up to `--rl-node-lease-wait-s`
+  (3600 s by default), and fails after that. Add the next island once the previous one
+  runs, or give the islands inventories without shared nodes.
+
+A refusal exits 2, names every problem, and writes nothing. No learner id is claimed:
+
+```text
+fleet island: refused: island north's nodes cannot join: node b300-4 is leased to run other-run; node b300-5 is not healthy: GPU 5 XID 79 (a hardware Xid in the kernel log of this boot: fix the GPU and reboot the node, a new boot starts a new log, then add the island again); 0 of 2 trainer node(s) are free and healthy, 2 needed
+```
+
+The checks run again when the island is written, on the desired state then: another
+island added since the dry run, or one that took the learner id this add checked under,
+refuses the write (exit 3), naming its nodes.
+
+`yeto fleet island move --gpu ssh:...` runs the same checks on the nodes the island moves
+onto (`--inventory` replaces the island's inventory; without it the island keeps its own),
+with the same `--force`.
+
+Once the island is written, the trainer worker starts its launch. The island joins the
+running syncer session, catches up to the newest merged weights, and then answers rounds
+like the other islands. The other islands' processes keep running; they are not restarted.
 
 ### Removing an island
 

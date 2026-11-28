@@ -309,6 +309,7 @@ class SshIslandOps:
             env = {**dict(node.env), **dict(spec.env)}  # the job's own order (node_env): the island's wins
             out[rank] = node_health.HealthWatch(node.device_family, hcas=node_health.hcas_of(env.get("NCCL_IB_HCA")),
                                                 multi=len(spec.nodes) > 1, expect_gpus=node.cards_per_node,
+                                                min_ib_gbps=getattr(node, "min_ib_gbps", None),
                                                 clock=time.time, every_s=self.health_every_s,
                                                 fabric=node.fabric if node.fabric in RDMA_FABRICS else None)
         return out

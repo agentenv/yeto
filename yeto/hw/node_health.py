@@ -47,7 +47,9 @@ XID cursor). It judges two jobs at once (:class:`HealthResult`):
   with NVSwitch at the first read (:meth:`CudaChecker._fabric_manager`,
   :func:`fabric_manager_absolute`);
 * ``ok_multi``: also every port the job's ``NCCL_IB_HCA`` names exists, is ``Active``
-  and runs at no less than its rate at the first check (or ``min_ib_gbps``). False
+  and runs at no less than its rate at the first check and ``min_ib_gbps``; without
+  ``NCCL_IB_HCA``, one of the fabric's ports is active and, with ``min_ib_gbps``, every
+  active one runs at no less. False
   whenever ``ok_single`` is; None when the GPUs pass but the job names HCAs and the IB
   tools did not read (a read failure of the multi-node job: ``IB tools unread``).
 
@@ -946,6 +948,10 @@ class CudaChecker(Checker):
             if not any(p.active for p in picked):
                 down = ", ".join(f"{_port_label(p)} {(p.state or 'unknown').upper()}" for p in picked) or "none found"
                 out.append(f"no active {self.fabric} port ({down})")
+            elif self.min_ib_gbps is not None:  # the inventory's least rate: every active port NCCL may use
+                out += [f"{_port_label(p)} rate {p.rate_gbps:g} < {self.min_ib_gbps:g} Gb/s"
+                        for p in natural_order(picked)
+                        if p.active and p.rate_gbps is not None and p.rate_gbps < self.min_ib_gbps * 0.999]
             selected = []
         else:
             selected = []
@@ -954,7 +960,9 @@ class CudaChecker(Checker):
             if not p.active:
                 out.append(f"{label} port {(p.state or 'unknown').upper()}")
                 continue
-            base = self.min_ib_gbps if self.min_ib_gbps is not None else rates.get(label)
+            # the first check's rate, and the declared least one: a low min_ib_gbps never hides a slower port
+            known = [float(b) for b in (self.min_ib_gbps, rates.get(label)) if b is not None]
+            base = max(known) if known else None
             if p.rate_gbps is not None and base is not None and p.rate_gbps < float(base) * 0.999:
                 out.append(f"{label} rate {p.rate_gbps:g} < {float(base):g} Gb/s")
         for p in ports:  # every active port's best rate: the baseline of a later job port
