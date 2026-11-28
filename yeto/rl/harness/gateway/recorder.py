@@ -72,6 +72,11 @@ PUBLIC_HOST_ENV = records_env.PROXY_PUBLIC_HOST_ENV
 PUBLIC_BASE_ENV = records_env.PROXY_PUBLIC_BASE_ENV
 SECRET_FILE_ENV = records_env.PROXY_SECRET_FILE_ENV
 MIN_SECRET_CHARS = 24
+# aclose(): the longest wait for a request still in the server before it is cancelled,
+# and again for its cancelled handler to end (one blocked in the engine). AgenticRound.close
+# starts the stop as it cancels the trials: both waits fit in the trials' grace
+# (agentic_round.CLOSE_WAIT_S, 2 s), so the stop adds nothing to the close.
+SHUTDOWN_TIMEOUT_S = 1.0
 
 # verl sampling keys -> SamplingParams fields; other keys (``logprobs``) do not change sampling.
 CHECKED_SAMPLING = ("temperature", "top_p", "top_k", "repetition_penalty")
@@ -206,7 +211,7 @@ class ProxyTokenRecorder:
                     outer = web.Application()
                     outer.add_subapp(f"{self._prefix}/", app)
                     app = outer
-                runner = web.AppRunner(app)
+                runner = web.AppRunner(app, shutdown_timeout=SHUTDOWN_TIMEOUT_S)
                 await runner.setup()
                 site = web.TCPSite(runner, self.host, self.port)
                 await site.start()
@@ -261,7 +266,10 @@ class ProxyTokenRecorder:
         return self.proxy.backend.template.decode(list(ids))
 
     async def aclose(self) -> None:
-        """Stop the HTTP server (tests; a worker process keeps it for its life)."""
+        """Stop the HTTP server: it stops listening, gives the requests still in it up to
+        ``SHUTDOWN_TIMEOUT_S`` and then cancels them (aiohttp does not cancel a handler
+        whose client left). ``AgenticRound.close`` calls it at the end of the island; a
+        later :meth:`open` starts a new server."""
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner, self._base_url = None, None

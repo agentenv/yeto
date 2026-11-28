@@ -153,6 +153,7 @@ ABANDON_GRACE_S = 120.0
 WAIT_EVENT = "rl_agentic_waiting"
 WAIT_BEAT_S = 60.0
 CLOSE_WAIT_S = 2.0  # close(): the longest wait for the cancelled trials to end
+LOOP_CLOSE_WAIT_S = 2.0  # LoopThread.close(): the longest wait for the loop's other tasks to end
 RETRY_EVENT = "rl_agentic_trial_retry"
 LOST_EVENT = "rl_agentic_trial_lost"  # one token_alignment loss: error, call, token window, trial_dir
 DEFAULT_INFRA_RETRIES = 2  # per trial slot (spec agentic.infra_retries)
@@ -179,12 +180,48 @@ class LoopThread:
         self._thread = threading.Thread(target=self.loop.run_forever, name="agentic-round", daemon=True)
         self._thread.start()
 
-    def run(self, coro: Any) -> Any:
-        return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
+    def run(self, coro: Any, timeout: float | None = None) -> Any:
+        """``coro``'s result; with ``timeout``, a coroutine still running then is
+        cancelled and :class:`TimeoutError` raised."""
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise
+
+    def cancel_pending(self, timeout_s: float) -> None:
+        """Cancel every task still pending on the loop (a recorder request still in the
+        engine: aiohttp does not cancel a handler whose client left) and give them up to
+        ``timeout_s`` to end."""
+
+        async def cancel() -> None:
+            tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.wait(tasks, timeout=timeout_s)
+
+        if self._thread.is_alive() and not self.loop.is_closed():
+            asyncio.run_coroutine_threadsafe(cancel(), self.loop).result(timeout=timeout_s + 5)
 
     def close(self) -> None:
+        """Cancel what still runs on the loop, stop it and close it. A loop that is only
+        stopped keeps its tasks and its selector until the garbage collector finds them,
+        in whatever runs then ("Task was destroyed but it is pending!", unclosed loop)."""
+        if self.loop.is_closed():
+            return
+        try:
+            self.cancel_pending(LOOP_CLOSE_WAIT_S)
+            if self._thread.is_alive():
+                asyncio.run_coroutine_threadsafe(self.loop.shutdown_asyncgens(), self.loop).result(
+                    timeout=LOOP_CLOSE_WAIT_S)
+        except Exception:  # noqa: BLE001 - still stop the loop
+            pass
         self.loop.call_soon_threadsafe(self.loop.stop)
         self._thread.join(timeout=10)
+        if not self._thread.is_alive():
+            self.loop.close()
 
 
 def session_id(*parts: Any) -> str:
@@ -551,6 +588,7 @@ class AgenticRound(EngineRound):
         self.abandon_grace_s = float(abandon_grace_s)
         self._detached: set[asyncio.Task] = set()  # cancelled trials the drain stopped waiting for
         self._closing: set[asyncio.Task] = set()  # recorder sessions of detached trials being closed
+        self._closed = False  # close() ran (or runs): a second close does nothing
         self.detached_total = 0
         self.release_poll_s = float(release_poll_s)
         self.wait_s = float(wait_s)
@@ -626,23 +664,61 @@ class AgenticRound(EngineRound):
 
     def close(self) -> int:
         """End of the island: cancel the trials still running, delete the pooled
-        boat sandboxes (the account returns to the sandboxes other runs hold) and
-        stop the loop; returns the VMs deleted."""
+        boat sandboxes (the account returns to the sandboxes other runs hold), then
+        stop the recorder's server and the loop; returns the VMs deleted. The loop runs
+        while the pools are deleted, so a cancelled trial's cleanup that outlives the
+        trials' grace (a sandbox delete under ``asyncio.shield``) still runs then. Only
+        the recorder's own connections are cut, and only the loop's close cancels what
+        is left on it. A second close does nothing."""
+        if self._closed:
+            return 0
+        self._closed = True
         deleted = 0
+        stopping = None
         try:
             try:
-                self._on_loop(self._cancel_all, "closed")
-                self.loop.run(self._wait_cancelled(CLOSE_WAIT_S))
+                self._on_loop(self._cancel_all, "closed", timeout=CLOSE_WAIT_S + 5)  # bounded: a blocked loop
+                stopping = self._start_recorder_stop()
+                self.loop.run(self._wait_cancelled(CLOSE_WAIT_S), timeout=CLOSE_WAIT_S + 5)
             except Exception:  # noqa: BLE001 - the loop may be gone already
                 pass
             from yeto.rl.harness.harbor.boat_pool import close_pools_now
 
             deleted = int(close_pools_now() or 0)
         finally:
-            self.loop.close()
+            try:
+                self._finish_recorder_stop(stopping)
+            finally:
+                self.loop.close()
         self.emit("rl_agentic_close", boat_vms_deleted=deleted, lost_total=dict(sorted(self.lost.items())),
                   trials_total=self.trials)
         return deleted
+
+    def _start_recorder_stop(self) -> concurrent.futures.Future | None:
+        """Start stopping the recorder's HTTP server on this round's loop, once the
+        trials are cancelled: it stops listening and, within the trials' grace (twice the
+        recorder's ``SHUTDOWN_TIMEOUT_S``), cancels the requests still in it (aiohttp does
+        not cancel a handler whose client left) and waits for them. Nothing else on the
+        loop is touched."""
+        aclose = getattr(self.recorder, "aclose", None)
+        if aclose is None:
+            return None
+        return asyncio.run_coroutine_threadsafe(aclose(), self.loop.loop)
+
+    def _finish_recorder_stop(self, stopping: concurrent.futures.Future | None) -> None:
+        """Wait (bounded) for the server stop :meth:`_start_recorder_stop` started, then
+        for the trials it ended: a trial whose request the stop cut sees the connection
+        close a few loop turns later, and ends then rather than by the loop's close.
+        Errors do not fail the close (the loop closes anyway)."""
+        if stopping is None:
+            return
+        from yeto.rl.harness.gateway.recorder import SHUTDOWN_TIMEOUT_S
+
+        try:
+            stopping.result(timeout=2 * SHUTDOWN_TIMEOUT_S + 1)
+            self.loop.run(self._wait_cancelled(SHUTDOWN_TIMEOUT_S), timeout=SHUTDOWN_TIMEOUT_S + 5)
+        except (Exception, asyncio.CancelledError):  # noqa: BLE001 - the loop closes anyway
+            stopping.cancel()
 
     # ------------------------------------------------------------------ trials
     def _task(self, item: PromptItem, session: str) -> Any:
@@ -676,12 +752,12 @@ class AgenticRound(EngineRound):
                                    segmented=True)  # one sample per compaction segment (module doc)
 
     # ------------------------------------------------------------------ the stream (loop thread)
-    def _on_loop(self, fn: Callable[..., Any], *args: Any) -> Any:
-        """Run ``fn`` on the loop thread and return its result."""
+    def _on_loop(self, fn: Callable[..., Any], *args: Any, timeout: float | None = None) -> Any:
+        """Run ``fn`` on the loop thread and return its result (:meth:`LoopThread.run`)."""
         async def call() -> Any:
             return fn(*args)
 
-        return self.loop.run(call())
+        return self.loop.run(call(), timeout=timeout)
 
     def _busy_now(self) -> float:
         return self._busy + len(self._running) * (self.clock() - self._busy_mark)
