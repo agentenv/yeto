@@ -71,36 +71,121 @@ def _weight(c_steps, c_tokens):
 
 
 def test_late_push_is_merged_once_into_the_next_round_of_its_fragment(make_rig):
-    rig = make_rig(2, *ASYNC_K1, "--rl-sync-grace-ms", "0", total_steps=4)
+    rig = make_rig(2, *ASYNC_K1, "--rl-sync-grace-ms", "0", total_steps=6)
     assert "--quorum 1" in rig.command and "--max-base-lag 2" in rig.command
     initial = _initial(rig.layout)
     rig.start(initial)
     ref = Reference(rig.layout, initial, DEFAULT_LR, DEFAULT_MU)
-    d = _deltas(rig.layout, 0, 7, 4)
+    d = _deltas(rig.layout, 0, 7, 6)
 
     # Round 1 (fragment 0, base 0) closes on island 0 alone.
     rig.push(0, 1, d[0], base=0, c_steps=1, c_tokens=4)
     _check(rig.bcast(0, 0, 1), ref.step(0, [d[0]], [1.0]))
     # Island 1's delta for round 1 arrives late; fragment 1 has round 2 open.
     rig.push(1, 1, d[1], base=0, c_steps=2, c_tokens=6)
+    d1 = _deltas(rig.layout, 1, 8, 2)
+    rig.push(0, 2, d1[0], base=0)
+    _check(rig.bcast(0, 1, 2), ref.step(1, [d1[0]], [1.0]))
+
+    # Round 3 (fragment 0, base 1). Island 1 answers from its old anchor 0
+    # again: that anchor already gave the carried delta, so it is refused. The
+    # carried delta is then island 1's answer, and with no grace (0 ms) round 3
+    # commits with it at once (before this change it waited for island 0).
+    rig.push(1, 3, d[2], base=0, c_steps=3, c_tokens=9)
+    _check(rig.bcast(0, 0, 3), ref.step(0, [d[1]], [_weight(2, 6)]))
+    # Island 0's answer to round 3 is now late: carried into round 5, the
+    # fragment's next round, with island 0's own push for it.
+    rig.push(0, 3, d[3], base=1, c_steps=1, c_tokens=4)
+    rig.push(0, 4, d1[1], base=1)
+    _check(rig.bcast(0, 1, 4), ref.step(1, [d1[1]], [1.0]))
+    rig.push(0, 5, d[4], base=2, c_steps=1, c_tokens=4)
+    records = _records_through(rig, 5)
+    (late,) = records[5]["carried"]
+    assert (late["id"], late["missed_step"], late["base_version"], late["lag"]) == (0, 3, 1, 2)
+    (own,) = records[5]["responders"]
+    _check(rig.bcast(0, 0, 5), ref.step(0, [d[4], d[3]], [own["weight"], late["weight"]]))
+
+    assert records[3]["responders"] == [] and records[3]["attempt"] == 1
+    (carried,) = records[3]["carried"]
+    assert (carried["id"], carried["missed_step"], carried["base_version"], carried["lag"]) == (1, 1, 0, 1)
+    assert "carried" not in records[1] and "carried" not in records[2] and "carried" not in records[4]
+    assert not [r for r in _tape(rig) if r.get("kind") == "round_attempt_timeout"]
+
+
+def test_within_the_grace_window_a_refused_islands_round_still_takes_the_others_answer(make_rig):
+    """The same pushes with a 5 s grace window: the refused island's carried delta reaches
+    the quorum and arms the grace, as an own push does. Island 0's answer, sent right
+    after, is merged into round 3 with the carried delta: the same merge as before this
+    change (which waited for island 0 and then for the grace)."""
+    rig = make_rig(2, *ASYNC_K1, "--rl-sync-grace-ms", "5000", "--rl-sync-grace-min-ms", "5000",
+                   total_steps=4)
+    initial = _initial(rig.layout)
+    rig.start(initial)
+    ref = Reference(rig.layout, initial, DEFAULT_LR, DEFAULT_MU)
+    d = _deltas(rig.layout, 0, 7, 4)
+
+    rig.push(0, 1, d[0], base=0, c_steps=1, c_tokens=4)
+    _check(rig.bcast(0, 0, 1), ref.step(0, [d[0]], [1.0]))  # after the grace: island 1 is silent
+    rig.push(1, 1, d[1], base=0, c_steps=2, c_tokens=6)  # late: carried into round 3
     d1 = _deltas(rig.layout, 1, 8, 1)[0]
     rig.push(0, 2, d1, base=0)
     _check(rig.bcast(0, 1, 2), ref.step(1, [d1], [1.0]))
 
-    # Round 3 (fragment 0, base 1). Island 1 answers from its old anchor 0
-    # again: that anchor already gave the carried delta, so it is refused.
-    rig.push(1, 3, d[2], base=0, c_steps=3, c_tokens=9)
-    with pytest.raises(TimeoutError):
-        rig.bcast(0, 0, 3, timeout=1.0)
-    rig.push(0, 3, d[3], base=1, c_steps=1, c_tokens=4)
-    want = ref.step(0, [d[3], d[1]], [_weight(1, 4), _weight(2, 6)])
-    _check(rig.bcast(0, 0, 3), want)
-
+    rig.push(1, 3, d[2], base=0, c_steps=3, c_tokens=9)  # refused: anchor 0 is spent
+    rig.push(0, 3, d[3], base=1, c_steps=1, c_tokens=4)  # within the grace
+    _check(rig.bcast(0, 0, 3), ref.step(0, [d[3], d[1]], [_weight(1, 4), _weight(2, 6)]))
     records = _records_through(rig, 3)
     assert [r["id"] for r in records[3]["responders"]] == [0]
     (carried,) = records[3]["carried"]
     assert (carried["id"], carried["missed_step"], carried["base_version"], carried["lag"]) == (1, 1, 0, 1)
-    assert "carried" not in records[1] and "carried" not in records[2]
+
+
+@pytest.mark.parametrize("roles", [(), ("--rl-sample-role", "trainer", "--rl-sampler-follow", "trainer",
+                                    "--rl-max-policy-age", "4", "--rl-checkpoint-store", "/srv/late-carry-store",
+                                    "--rl-island-buffer-shards", "0:pool-a", "--rl-island-buffer-shards", "1:pool-b")],
+                         ids=["decoupled", "follow-trainer"])
+def test_a_round_only_a_refused_island_can_answer_commits_with_its_carried_delta(make_rig, roles):
+    """The slow-downlink stall, on the launcher-built syncer of the decoupled preset and of
+    a follow-trainer launch (whose trainers push): island 1's late delta is carried into
+    round 3, its answer from the spent anchor is refused, and island 0 does not answer
+    round 3 at all. Round 3 commits with the carried delta in attempt 1; before this change
+    it waited for island 0 or the quorum timeout, and every later round behind it."""
+    rig = make_rig(2, *ASYNC_K1, "--rl-sync-grace-ms", "0", *roles, total_steps=4)
+    initial = _initial(rig.layout)
+    rig.start(initial)
+    ref = Reference(rig.layout, initial, DEFAULT_LR, DEFAULT_MU)
+    d = _deltas(rig.layout, 0, 7, 3)
+    rig.push(0, 1, d[0], base=0, c_steps=1, c_tokens=4)
+    _check(rig.bcast(0, 0, 1), ref.step(0, [d[0]], [1.0]))
+    rig.push(1, 1, d[1], base=0, c_steps=2, c_tokens=6)  # late: carried into round 3
+    d1 = _deltas(rig.layout, 1, 8, 1)[0]
+    rig.push(0, 2, d1, base=0)
+    _check(rig.bcast(0, 1, 2), ref.step(1, [d1], [1.0]))
+    rig.push(1, 3, d[2], base=0, c_steps=3, c_tokens=9)  # refused: anchor 0 is spent
+    _check(rig.bcast(1, 0, 3), ref.step(0, [d[1]], [_weight(2, 6)]))  # island 1 gets version 3 too
+    records = _records_through(rig, 3)
+    assert records[3]["responders"] == [] and records[3]["attempt"] == 1
+    assert not [r for r in _tape(rig) if r.get("kind") == "round_attempt_timeout"]
+    rig.permit(0, 4)  # the next round is pulled: nothing waits behind round 3
+
+
+def test_a_fixed_roster_and_a_single_island_merge_as_before(make_rig):
+    """A fixed roster (quorum = islands, no base lag) and one island alone: every round
+    merges every island's push, nothing is carried (unchanged)."""
+    fixed = make_rig(2, "--rl-sync-quorum", "2", "--rl-sync-max-base-lag", "0", total_steps=2)
+    alone = make_rig(1, *ASYNC_K1, total_steps=2)
+    for rig in (fixed, alone):
+        initial = _initial(rig.layout)
+        rig.start(initial)
+        ref = Reference(rig.layout, initial, DEFAULT_LR, DEFAULT_MU)
+        islands = range(len(rig.clients))
+        for step, fid in ((1, 0), (2, 1)):
+            deltas = _deltas(rig.layout, fid, 10 + step, len(islands))
+            for island in islands:
+                rig.push(island, step, deltas[island], base=0)
+            _check(rig.bcast(0, fid, step), ref.step(fid, deltas, [1.0] * len(deltas)))
+        records = _records_through(rig, 2)
+        assert all("carried" not in records[t] and len(records[t]["responders"]) == len(islands) for t in (1, 2))
 
 
 def test_late_push_beyond_the_base_lag_bound_is_dropped(make_rig):
