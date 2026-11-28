@@ -27,8 +27,11 @@ def test_the_doc_names_the_compile_keys():
     for key in ("launch", "max_islands"):
         assert key in fleet.FLEET_KEYS and f"fleet.{key}" in text
     assert fleet.LAUNCH_PER_ISLAND in text and fleet.LAUNCH_SYNCED_GROUP in text
-    # no take-over of a lost host yet: the doc says so and names no option for it
-    assert "not supported yet" in text and "--take-over" not in text
+    # a lost host's islands: taken over only under an on-site control plane, SSH and Modal only,
+    # never sky; the doc states that scope (no "not supported yet") and names no option for it
+    assert "not supported yet" not in text and "--take-over" not in text
+    assert "takes over the SSH and Modal islands of a lost control host" in text.replace("\n", " ")
+    assert "never takes over a sky island" in text.replace("\n", " ")
     assert "A move resumes from the island's latest release; its local\n  training after that release is lost." in text
 
 

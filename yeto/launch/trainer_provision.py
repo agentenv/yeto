@@ -336,6 +336,15 @@ class ModalSource(Source):
                 island_ops.calls[name] = call_id
                 prov.results[name] = (call_id, None)
                 print(f"[launcher] learner {cfg.learner_id} on Modal as {name}: adopted call {call_id}")
+                if getattr(prov.args, "rl_fleet_takeover", False):
+                    # taken over from a lost control host: its call is in that host's ledger only;
+                    # recorded here too, so `yeto cleanup` on this host can still release it
+                    from yeto.cost.ledger import record_safely
+
+                    record_safely("created", "modal_call", call_id, cfg.function_name, app_name=modal_ops.app_name,
+                                  app_id=getattr(getattr(modal_ops, "_app", None), "app_id", None),
+                                  learner_id=getattr(cfg, "learner_id", None), adopted="takeover",
+                                  ledger=getattr(modal_ops, "ledger", None))
                 continue
             print(f"[launcher] launching learner {cfg.learner_id} on Modal as {name}")
             prov.on_order(name)
@@ -442,7 +451,9 @@ def start_resident_ssh(args, tasks, names, results, errors, events_dir, collecto
     from .island_spares import spares_from_args
 
     ops = SshIslandOps(run_id=args.cluster_prefix, journal_dir=runs.run_dir(args.cluster_prefix) / RESIDENT_DIR,
-                       events_dir=events_dir, sink_for=sink_for)
+                       events_dir=events_dir, sink_for=sink_for,
+                       reattach_only=frozenset(getattr(args, "_reattach_only", ()) or ()),
+                       taken_over=frozenset(getattr(args, "_taken_over", ()) or ()))
     for name in sorted(names):
         # an inventory with trainer-spare nodes: a lost node is replaced (island_spares); else None
         spares = spares_from_args(args, tasks[name], island_index=(island_index or {}).get(name),

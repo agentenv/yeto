@@ -104,6 +104,8 @@ if TYPE_CHECKING:
     from .island_spares import IslandSpares
 
 RESIDENT_DIR = "ssh-islands"  # under the run dir
+# an island launch that may only reattach and cannot (yeto.rl.trainer_worker.TAKEOVER_BLOCKED_MARKER)
+TAKEOVER_BLOCKED_MARKER = "[yeto-takeover-blocked]"
 UNREACHABLE_POLLS = 3
 MAX_REFOLLOWS = 5
 WORKER_EXIT_GRACE_S = 120.0
@@ -220,8 +222,17 @@ class SshIslandOps:
                  kill_grace_s: int = KILL_GRACE_S, clock: Callable[[], float] = time.monotonic,
                  health_every_s: float = HEALTH_EVERY_S, worker_exit_grace_s: float = WORKER_EXIT_GRACE_S,
                  unreachable_polls: int = UNREACHABLE_POLLS, max_refollows: int = MAX_REFOLLOWS,
-                 log: Callable[[str], None] | None = None, wall: Callable[[], float] = time.time) -> None:
+                 log: Callable[[str], None] | None = None, wall: Callable[[], float] = time.time,
+                 reattach_only: frozenset[str] | set[str] = frozenset(),
+                 taken_over: frozenset[str] | set[str] = frozenset()) -> None:
         self.run_id = str(run_id)
+        # islands this launch may only reattach to (an on-site control plane took a moving or
+        # stopping island over: its journal came from the store, its STOP is set): a start
+        # that would release or launch an incarnation is refused (TAKEOVER_BLOCKED_MARKER)
+        self.reattach_only = frozenset(reattach_only)
+        # islands whose journal an on-site control plane restored from the run store (a takeover):
+        # a quarantined node does not release their running incarnation at the start
+        self.taken_over = frozenset(taken_over)
         self.journal_dir = Path(journal_dir)
         self.events_dir = None if events_dir is None else Path(events_dir)
         self.ops = ops or SshOps()
@@ -329,13 +340,33 @@ class SshIslandOps:
         self._keep_quarantined_leases(rec)
         self._release_stale_leases(rec)
         jobs = read_jobs(self.jobs_path(name))
+        if not jobs and name in self.reattach_only:
+            raise SshIslandError(f"{TAKEOVER_BLOCKED_MARKER} ssh: island {name}: taken over while moving or stopping, "
+                                 "but no incarnation is journaled here: nothing to reattach to, nothing started")
+        # a takeover (an on-site control plane on another host: the journal came from the run
+        # store) reattaches first: a quarantined node does not release a running incarnation
+        # here; the control loop replaces it later by the spares rules
+        taken_over = bool(jobs) and (name in self.reattach_only or name in self.taken_over)
         if not jobs and not lost:
             return self._launch(rec, 0)
-        if lost:
+        if lost and taken_over and (name in self.reattach_only or self._runs_whole(rec, max(int(k) for k in jobs))):
+            self.log(f"[launcher] {name}: taken over with quarantined node(s) "
+                     f"({'; '.join(lost[r] for r in sorted(lost))}); reattaching only (nothing released), a spare "
+                     "replaces them later in the control loop")
+        elif lost:
             return self._start_without(rec, lost, max(int(k) for k in jobs) if jobs else None)
         last = max(int(k) for k in jobs)
         states = [rec.islands.node_state(last, rank) for rank in range(len(rec.spec.nodes))]
         silent = [rec.spec.nodes[r].name for r, st in enumerate(states) if st is None]
+        if name in self.reattach_only and (silent or not (all(st.running for st in states) or (
+                states[0].state == "exited" and states[0].rc == 0))):
+            detail = ", ".join(f"{rec.spec.nodes[r].name}={'silent' if st is None else st.state}"
+                               for r, st in enumerate(states))
+            why = (f"{TAKEOVER_BLOCKED_MARKER} ssh: island {name}: taken over while moving or stopping, its incarnation "
+                   f"{last} is not running on every node ({detail}); this launch may only reattach to it, so it "
+                   "neither releases nor starts anything")
+            self.log(f"[launcher] {why}")
+            raise SshIslandError(why)
         if silent:
             raise SshIslandError(
                 f"ssh: island {name}: incarnation {last} is recorded in {self.jobs_path(name)}, and nodes "
@@ -355,6 +386,13 @@ class SshIslandOps:
             raise SshIslandError(f"ssh: island {name}: incarnation {last} could not be confirmed stopped; "
                                  "refusing to start another copy on the same cards")
         return self._launch(rec, last + 1)
+
+    def _runs_whole(self, rec: _Island, incarnation: int) -> bool:
+        """Incarnation ``incarnation`` runs on every node of the island (or ended with rank 0 exit 0)."""
+        states = [rec.islands.node_state(incarnation, rank) for rank in range(len(rec.spec.nodes))]
+        if any(st is None for st in states):
+            return False
+        return all(st.running for st in states) or (states[0].state == "exited" and states[0].rc == 0)
 
     def _take_lock(self, rec: _Island) -> None:
         if rec.lock is not None:

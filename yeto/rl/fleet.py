@@ -128,7 +128,8 @@ PLAN_OBJECT = f"{FLEET_DIR}/plan.json"  # the plan in the run store
 DISPENSE_DIR = f"{FLEET_DIR}/dispense"  # the fleet's task ledger root (store_dispense.FLEET_DISPENSE_DIR)
 DISPENSE_MODES = ("fleet", "island")
 FLEET_KEYS = frozenset({"trainer_argv", "dispense", "step_s", "sandbox_usd_per_h", "fixed_roster", "min_islands",
-                        "island_lease_s", "launch", "max_islands", "waiting_absent_after_s", "syncer_service"})
+                        "island_lease_s", "launch", "max_islands", "waiting_absent_after_s", "syncer_service",
+                        "takeover_margin_s", "sky_api_server"})
 # fleet.syncer_service: the host of an on-site syncer run as a service (``yeto fleet service``):
 # a host name or IPv4 address, or an IPv6 address in brackets ([addr]), the islands dial, no
 # port (the syncer's ports are its own; "host:port" is built from it)
@@ -555,6 +556,8 @@ def _fleet_section(cfg: dict[str, Any]) -> tuple[list[str], str]:
     if "max_islands" in section and launch != LAUNCH_PER_ISLAND:
         raise _err("fleet.max_islands applies to fleet.launch per_island (islands added while the fleet trains)")
     syncer_service(section)
+    takeover_margin_s(section)
+    sky_api_server(section)
     return argv, str(dispense)
 
 
@@ -572,6 +575,91 @@ def syncer_service(section: dict[str, Any]) -> str | None:
         raise _err(f"fleet.syncer_service must be the syncer host's name or address the islands dial, without a "
                    f"port; an IPv6 address in brackets, [addr] (got {host!r})")
     return host
+
+
+DEFAULT_TAKEOVER_MARGIN_S = 60.0
+MAX_TAKEOVER_MARGIN_S = 600.0  # a margin past this leaves a lost host's islands without a controller too long
+
+
+def takeover_margin_s(section: dict[str, Any]) -> float:
+    """``fleet.takeover_margin_s`` (validated; default :data:`DEFAULT_TAKEOVER_MARGIN_S`): an
+    on-site control plane (``fleet.syncer_service``) takes a lost host's island launch over
+    only this long after its records lock's lease ran out (the two hosts' clocks may differ
+    by up to this much)."""
+    value = section.get("takeover_margin_s")
+    if value is None:
+        return DEFAULT_TAKEOVER_MARGIN_S
+    if section.get("syncer_service") is None:
+        raise _err("fleet.takeover_margin_s applies to a fleet with fleet.syncer_service (an on-site control plane)")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise _err(f"fleet.takeover_margin_s must be a number of seconds >= 0 (got {value!r})")
+    if value > MAX_TAKEOVER_MARGIN_S:
+        raise _err(f"fleet.takeover_margin_s must be at most {MAX_TAKEOVER_MARGIN_S:.0f} s (got {value!r}): a lost "
+                   "control host's islands would wait that long for a controller")
+    return float(value)
+
+
+SKY_API_SERVER_ENV = "SKYPILOT_API_SERVER_ENDPOINT"  # sky's own: where its client sends every request
+_LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", ""})
+
+
+def sky_api_server(section: dict[str, Any]) -> str | None:
+    """``fleet.sky_api_server`` (validated; None: unset): the sky API server every control host
+    of an on-site control plane (``fleet.syncer_service``) shares, ``http(s)://host[:port]``
+    and not this machine's own (a loopback address names a different server on each host).
+    With it, a sky pool's clusters are the same sky state on whichever host run up is on
+    (:func:`onsite_pool_problem`)."""
+    value = section.get("sky_api_server")
+    if value is None:
+        return None
+    if section.get("syncer_service") is None:
+        raise _err("fleet.sky_api_server applies to a fleet with fleet.syncer_service (an on-site control plane)")
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    parsed = urlparse(value) if isinstance(value, str) else None
+    try:
+        port_ok = parsed is not None and (parsed.port is None or parsed.port > 0)
+    except ValueError:
+        port_ok = False
+    if (parsed is None or parsed.scheme not in ("http", "https") or not port_ok
+            or (parsed.hostname or "").lower() in _LOOPBACK or parsed.username or parsed.password):
+        raise _err(f"fleet.sky_api_server must be the shared sky API server's http(s)://HOST[:PORT] (not a loopback "
+                   f"address, no credentials; every control host's {SKY_API_SERVER_ENV}), got {value!r}")
+    return str(value).rstrip("/")
+
+
+def onsite_pool_problem(cfg: dict[str, Any]) -> str | None:
+    """Why an on-site control plane (``fleet.launch per_island`` and ``fleet.syncer_service``)
+    cannot run the pools of ``cfg`` (None: it can, or the run has no on-site control plane).
+    A control host that takes the run over from a lost one must see what that host ordered:
+
+    * a ``sky`` pool's clusters are in the sky API server's state; a server of its own on each
+      host would read the other host's clusters as gone (preempted) and order them again, while
+      they bill to their hard cap. Allowed with ``fleet.sky_api_server`` (one server for all hosts);
+    * an ``nc`` pool's leases are in the National Compute client's ledger on the host that
+      ordered them: another host can neither follow nor release them. Never.
+
+    ``ssh`` pools keep their records in the run store, and ``modal`` pools on the store control
+    plane too (``yeto.launch.pool.modal_provider.ModalProvider.attach_store``)."""
+    plan = plan_of(cfg)
+    if plan is None or not plan.per_island or not plan.syncer_service:
+        return None
+    shared = sky_api_server(cfg.get("fleet") or {})
+    for island in plan.islands:
+        for pool in island.pools:
+            if pool.provider == "sky" and shared is None:
+                return (f"pool {pool.name} (island {island.name}) is a sky pool, and an on-site control plane "
+                        "(fleet.syncer_service) moves to another host when its host is lost: that host's own sky API "
+                        "server would not know this host's sky clusters, read them as preempted and order them again "
+                        "while they bill until their hard cap. Run one sky API server for every control host and name "
+                        f"it in fleet.sky_api_server (each host's {SKY_API_SERVER_ENV}; docs/OWN_CLUSTERS.md), or use "
+                        "ssh or Modal pools")
+            if pool.provider == "nc":
+                return (f"pool {pool.name} (island {island.name}) is a National Compute pool, and an on-site control "
+                        "plane (fleet.syncer_service) moves to another host when its host is lost: its leases are in the "
+                        "client ledger of the host that ordered them, which another host can neither follow nor release "
+                        "(docs/OWN_CLUSTERS.md, Limits). Use ssh or Modal pools, or run the fleet without fleet.syncer_service")
+    return None
 
 
 def roster_options(cfg: dict[str, Any]) -> tuple[bool, int, float | None]:

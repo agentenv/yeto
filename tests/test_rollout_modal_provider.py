@@ -1339,3 +1339,78 @@ def test_the_call_body_writes_its_started_marker_before_the_sampler_joins(tmp_pa
                          root=str(tmp_path / "rollout"))
     assert order == ["pool-ready/m-0/t.1.started.json"]  # once, first; no join on the tape: no ready marker
     assert started_key("pool-ready/m-0/t.1.json") == "pool-ready/m-0/t.1.started.json"
+
+
+# -- the store control plane: the calls in the run store, so another control host follows them --------
+
+def _control(objects, *, at: float):
+    from yeto.launch.pool import store_state
+
+    return store_state.open_pool_control(objects, "i0-modal", "m", ttl_s=120.0, clock=lambda: at)
+
+
+def test_on_the_store_control_plane_another_host_follows_and_releases_the_calls(tmp_path, monkeypatch):
+    """Host A's pool spawned a call; host A is lost with its local record. Host B (another state
+    directory, no file) attaches under the next lock token: it reads the call from the run store,
+    follows it and releases it; nothing is ordered again."""
+    from yeto.launch.pool import store_state
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    client = FakeClient()
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "host-a"))
+    a = ModalProvider("run-m", slots=[1, 2], client=client)
+    control_a = _control(objects, at=1000.0)
+    assert a.attach_store(objects, "i0-modal", control_a.lock) == {"source": "new"}
+    ticket = a.order(1)
+    call = a.spawn(ticket, {"shard": "m-0"})
+    assert store_state.read_provider_record(objects, "i0-modal")[1]["tickets"][ticket]["call"] == call
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "host-b"))  # host A's file is gone with it
+    b = ModalProvider("run-m", slots=[1, 2], client=client)
+    assert not b.record.exists() and b.status(1, ticket).end_reason == "released"  # what host B saw before
+    control_b = _control(objects, at=1000.0 + 600)  # host A's pool lease ran out
+    assert b.attach_store(objects, "i0-modal", control_b.lock)["source"] == "store"
+    assert b.status(1, ticket).state == "active" and b.run_tickets() == [(1, ticket)]
+    assert not b.account_free(1)  # its slot is still taken: nothing is ordered on it
+    assert b.release(1, ticket)["state"] == "ended" and ("cancel", call) in client.log
+    assert [x for x in client.log if x[0] == "spawn"] == [("spawn", call, "m-0")]  # spawned once
+    rows = store_state.read_provider_record(objects, "i0-modal")[1]["tickets"]
+    assert rows[ticket]["open"] is False and b.record.exists()  # the local file is the mirror
+
+
+def test_a_late_write_of_the_lost_holder_is_kept(tmp_path, monkeypatch):
+    """Host A's pool spawned one more call after host B read the store: host B's next save keeps
+    host A's ticket (its call would bill unseen otherwise)."""
+    from yeto.launch.pool import store_state
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    client = FakeClient()
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "host-a"))
+    a = ModalProvider("run-m", slots=[1, 2], client=client)
+    control_a = _control(objects, at=1000.0)
+    a.attach_store(objects, "i0-modal", control_a.lock)
+    first = a.order(1)
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "host-b"))
+    b = ModalProvider("run-m", slots=[1, 2], client=client)
+    b.attach_store(objects, "i0-modal", _control(objects, at=1000.0 + 600).lock)
+    late = {"slot": 2, "n": 2, "open": True, "ordered_at": 1.0, "call": "fc-late"}
+    key = store_state.provider_record_key("i0-modal", control_a.lock.token)
+    doc = json.loads(objects.read(key))
+    objects.write(key, json.dumps({**doc, "tickets": {**doc["tickets"], "yeto-smp-run-m-2": late}}).encode())
+    b.order(1)  # a save of host B
+    rows = store_state.read_provider_record(objects, "i0-modal")[1]["tickets"]
+    assert set(rows) >= {first, "yeto-smp-run-m-2"} and not b.account_free(2)
+
+
+def test_the_pool_ops_attach_the_provider_to_the_pool_s_control(tmp_path):
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    ops, _client, _store = _ops(tmp_path)
+    control = _control(objects, at=1000.0)
+    assert ops.attach_control(control)["source"] in ("new", "local")
+    ops.provider.order(1)
+    from yeto.launch.pool import store_state
+
+    assert store_state.read_provider_record(objects, "i0-modal")[1]["kind"] == "modal"

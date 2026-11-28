@@ -460,6 +460,18 @@ def start_key(island: int) -> str:
     return f"{STATE_DIR}/{int(island)}/START"
 
 
+def lock_prefix(island: int) -> str:
+    """The single-writer lock of island ``island``'s records, held by its island launch
+    (``yeto.launcher._island_records_lock``)."""
+    return f"{STATE_DIR}/{int(island)}/lock"
+
+
+def takeover_key(island: int, token: int) -> str:
+    """The note of the control host that took island ``island``'s launch over with records
+    lock token ``token`` (information only: the lock's token is the fence)."""
+    return f"{STATE_DIR}/{int(island)}/takeover/{int(token):08d}.json"
+
+
 def controller_identity() -> dict[str, Any]:
     """Who supervises: host, PID and a fencing token unique to this process."""
     return {"host": socket.gethostname(), "pid": os.getpid(), "token": uuid.uuid4().hex[:16],
@@ -486,6 +498,14 @@ class Fence(Protocol):
 class IslandRecordsFenced(RuntimeError):
     """This controller lost the island records' single-writer lock (another launcher took
     them over): it orders, relaunches and tears down nothing of the fleet any more."""
+
+
+class IslandRecordsHandedOff(RuntimeError):
+    """The control host that started this launch was fenced and asked it to hand its island
+    over (:attr:`IslandStateStore.handoff_flag`): it acts as fenced (nothing ordered or torn
+    down any more; its records lock is released at its end), the island trains on."""
+
+    by = "hand-off"
 
 
 class IslandRecordsUnconfirmed(RuntimeError):
@@ -546,6 +566,9 @@ class IslandStateStore:
         self._thread: threading.Thread | None = None
         self._closed = False
         self._ended = False  # closed: nothing more is written or guarded (the lock may be released)
+        # an on-site control plane's island launch: the hand-off flag its fenced control host
+        # writes (yeto.runs.handoff_flag_path); once there, this store acts as fenced
+        self.handoff_flag: Any = None
 
     def _warn(self, what: str, error: BaseException) -> None:
         kind = f"{what}:{type(error).__name__}"
@@ -667,12 +690,29 @@ class IslandStateStore:
             self._start()
         self._wake.set()
 
+    def _handed_off(self) -> bool:
+        """The hand-off flag is there (checked now; set once, sticky as a lost lock)."""
+        flag = self.handoff_flag
+        if flag is None or self.fenced is not None or self._ended:
+            return False
+        try:
+            there = os.path.exists(flag)
+        except (OSError, ValueError):
+            return False
+        if there:
+            self.fenced = IslandRecordsHandedOff(
+                f"hand-off: the control host that started this launch was fenced ({flag}); the control host "
+                "that drives the run takes the island over")
+            self.log(f"[launcher] island state store: {self.fenced}; this controller writes no island record "
+                     "any more, tears nothing down and releases the island records' lock at its end"[:400])
+        return there
+
     def _fence_holds(self) -> bool:
         if self._ended:
             return False
         if self.fence is None:
             return True
-        if self.fenced is not None:
+        if self.fenced is not None or self._handed_off():
             return False
         try:
             self.fence.guard()
@@ -720,6 +760,7 @@ class IslandStateStore:
             return
         if not self._ended:
             self.keep_lease()  # a background thread that died is started again (the lease renewal)
+        self._handed_off()
         if self.fenced is None and not self._ended:
             try:
                 self.fence.guard()

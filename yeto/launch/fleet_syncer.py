@@ -520,15 +520,20 @@ def environ_key_id(environ: Any = None) -> str | None:
 
 def write_service_status(objects: Any, *, host: str, state: str, key: str | None, reason: str | None = None,
                          generation: int | None = None, node: str | None = None,
+                         since: float | None = None, billed_s: float | None = None,
                          clock: Callable[[], float] = time.time) -> dict[str, Any]:
     """The on-site syncer service's heartbeat (:data:`SERVICE_RECORD`). ``at`` is the
-    service host's clock: a reader on another host only looks whether it moves."""
+    service host's clock: a reader on another host only looks whether it moves.
+    ``since``: when this service generation started (the same clock); ``billed_s``: the
+    seconds the generations before it ran (:func:`service_hours`)."""
     import json
 
     doc = {"schema": SERVICE_SCHEMA, "host": str(host), "state": str(state), "key_id": key,
            "at": round(clock(), 3), **({"reason": str(reason)[:500]} if reason else {}),
            **({"generation": int(generation)} if generation is not None else {}),
-           **({"node": str(node)} if node else {})}
+           **({"node": str(node)} if node else {}),
+           **({"since": round(float(since), 3)} if since is not None else {}),
+           **({"billed_s": round(float(billed_s), 3)} if billed_s is not None else {})}
     objects.write(SERVICE_RECORD, json.dumps(doc, sort_keys=True).encode())
     return doc
 
@@ -548,6 +553,19 @@ def _read_doc(objects: Any, key: str, schema: str) -> dict[str, Any] | None:
 
 def read_service_status(objects: Any) -> dict[str, Any] | None:
     return _read_doc(objects, SERVICE_RECORD, SERVICE_SCHEMA)
+
+
+def service_seconds(status: dict[str, Any] | None) -> float | None:
+    """The seconds the on-site syncer service ran for this run by its heartbeat: the
+    generations before (``billed_s``) and this one from its start to its last beat, each on
+    its own host's clock (two hosts' clocks are never compared). None: no heartbeat with
+    those fields."""
+    if not isinstance(status, dict) or status.get("since") is None or status.get("at") is None:
+        return None
+    try:
+        return max(0.0, float(status.get("billed_s") or 0.0)) + max(0.0, float(status["at"]) - float(status["since"]))
+    except (TypeError, ValueError):
+        return None
 
 
 def write_onsite_stop(objects: Any, *, why: str, by: str, clock: Callable[[], float] = time.time) -> dict[str, Any]:
