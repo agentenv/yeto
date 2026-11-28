@@ -28,11 +28,16 @@ Plain rules:
   container's mount) read only directories with the marker. The staging copy
   is deleted.
 * Staging: each island process stages in a directory of its own under the
-  system temp dir (:func:`private_staging`, ``yeto-hf-export-<random>``). Two
-  island processes on one host (two islands, or two test sessions) export the
-  same round at the same time without removing each other's files: a fixed
+  system temp dir (:func:`private_staging`, ``yeto-hf-export-<pid>-<random>``).
+  Two island processes on one host (two islands, or two test sessions) export
+  the same round at the same time without removing each other's files: a fixed
   directory there would be shared, and one export's cleanup ran inside the
-  other's write.
+  other's write. The process removes its directory when it exits and the
+  directory is empty. A process that was killed leaves its directory, with a
+  ``round-<r>`` it was writing or uploading (tens of GB); the next island
+  process on the host removes the directories of processes that are gone
+  (:func:`sweep_gone_staging`), except the staging copies kept after a failed
+  upload (below), and never touches the directory of a process that runs.
 * Upload failures: removing a directory that is not there is no error (a
   first export). A failed upload (remove, put, marker) runs again after
   :data:`UPLOAD_RETRY_S` seconds, :data:`UPLOAD_ATTEMPTS` attempts in all.
@@ -56,8 +61,12 @@ model into a directory.
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
+import re
 import shutil
+import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -73,7 +82,7 @@ FINAL = "final"
 # marker in the staging directory, and the reader's marker in the store
 COMPLETE_MARKER = ".complete"
 FINAL_POINTER = "final.json"
-STAGING_PREFIX = "yeto-hf-export"  # private_staging: <system temp dir>/yeto-hf-export-<random>
+STAGING_PREFIX = "yeto-hf-export"  # private_staging: <system temp dir>/yeto-hf-export-<pid>-<random>
 UPLOAD_ATTEMPTS = 3  # one upload and two retries
 UPLOAD_RETRY_S = (10.0, 30.0)  # the waits before the second and the third attempt
 KEEP_FAILED = 2  # staging copies kept after failed uploads, per island process
@@ -137,9 +146,78 @@ def _json(fields: dict[str, Any]) -> bytes:
 
 def private_staging(prefix: str = STAGING_PREFIX) -> Path:
     """A new staging directory under the system temp dir that only this process uses
-    (module doc, Staging): ``<prefix>-<random>``, made atomically, never one another
-    process on the host made."""
-    return Path(tempfile.mkdtemp(prefix=f"{prefix}-"))
+    (module doc, Staging): ``<prefix>-<pid>-<random>``, made atomically, never one
+    another process on the host made. What processes that are gone left there is
+    removed first; this one's directory is removed at exit when it is empty."""
+    for path in sweep_gone_staging(prefix):
+        print(f"[hf-export] removed {path}: staging of an island process that is gone", file=sys.stderr)
+    path = Path(tempfile.mkdtemp(prefix=f"{prefix}-{os.getpid()}-"))
+    atexit.register(_remove_if_empty, path)
+    return path
+
+
+def _remove_if_empty(path: Path) -> None:
+    try:
+        path.rmdir()
+    except OSError:  # not empty (a staging copy kept after a failed upload), or gone
+        pass
+
+
+def _process_runs(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # another user's process
+        return True
+    except (OverflowError, ValueError):
+        return False
+    return True
+
+
+def _kept_copy(directory: Path) -> bool:
+    """A staging copy kept after a failed upload: its marker is the island's (``round``)."""
+    try:
+        return "round" in json.loads((directory / COMPLETE_MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def sweep_gone_staging(prefix: str = STAGING_PREFIX) -> list[Path]:
+    """Remove what island processes that are gone left in their staging directories
+    under the system temp dir (``<prefix>-<pid>-<random>`` of this user whose ``pid``
+    does not run), and the directory when nothing is left in it. A staging copy kept
+    after a failed upload stays (:meth:`HfRoundExports._keep`: one upload restores
+    it). Returns the paths removed; best effort, never raises."""
+    named = re.compile(rf"{re.escape(prefix)}-(\d+)-[^{re.escape(os.sep)}]+")
+    removed: list[Path] = []
+    try:
+        candidates = sorted(Path(tempfile.gettempdir()).glob(f"{prefix}-*"))
+    except OSError:
+        return removed
+    for staging in candidates:
+        found = named.fullmatch(staging.name)
+        try:
+            if (found is None or staging.is_symlink() or not staging.is_dir()
+                    or staging.stat().st_uid != os.getuid()):
+                continue
+            pid = int(found.group(1))
+            if pid == os.getpid() or _process_runs(pid):
+                continue
+            for entry in sorted(staging.iterdir()):
+                if entry.is_dir() and not entry.is_symlink():
+                    if _kept_copy(entry):
+                        continue
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+                removed.append(entry)
+            if not any(staging.iterdir()):
+                staging.rmdir()
+                removed.append(staging)
+        except OSError:
+            continue
+    return removed
 
 
 class HfRoundExports:

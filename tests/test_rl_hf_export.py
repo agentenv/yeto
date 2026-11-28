@@ -17,8 +17,11 @@ from yeto.rl.engine.hf_export import (
     FINAL_POINTER,
     HF_EXPORT_EVENT,
     ExportRounds,
+    STAGING_PREFIX,
     HfRoundExports,
     export_store_path,
+    private_staging,
+    sweep_gone_staging,
 )
 from yeto.rl.engine.resume import CheckpointStore
 
@@ -507,3 +510,88 @@ def test_the_export_plan_declines_without_a_usable_base(tmp_path):
     assert "weight_map" in base_export(tmp_path, {"a.weight": (1,)})[1]  # torn index
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"a.weight": "x.bin"}}))
     assert "not safetensors" in base_export(tmp_path, {"a.weight": (1,)})[1]
+
+
+# ---------------------------------------------------------------------- staging directories on the host
+STAGE = """
+import os, signal, sys
+from yeto.rl.engine.hf_export import private_staging
+staging = private_staging()
+print(staging, flush=True)
+mode = sys.argv[1]
+if mode in ("killed", "kept"):
+    (staging / "round-3").mkdir()
+    (staging / "round-3" / "model.safetensors").write_bytes(b"x" * 4096)  # an export cut off
+if mode == "kept":  # a staging copy kept after a failed upload: the island's marker put back
+    (staging / "round-2").mkdir()
+    (staging / "round-2" / ".complete").write_text('{"round": 2}')
+if mode == "killed":
+    os.kill(os.getpid(), signal.SIGKILL)
+if mode == "runs":
+    sys.stdin.readline()
+"""
+
+
+def _stage(tmp_path, mode, **kw):
+    import os
+    import subprocess
+    import sys
+
+    env = {**os.environ, "TMPDIR": str(tmp_path)}
+    return subprocess.Popen([sys.executable, "-c", STAGE, mode], env=env, stdout=subprocess.PIPE, text=True,
+                            **kw)
+
+
+@pytest.fixture
+def host_tmp(tmp_path, monkeypatch):
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    return tmp_path
+
+
+def test_a_process_that_exits_removes_its_empty_staging_directory(host_tmp):
+    proc = _stage(host_tmp, "exits")
+    staging = Path(proc.communicate(timeout=60)[0].strip())
+    assert proc.returncode == 0 and staging.parent == host_tmp
+    assert staging.name.startswith(f"{STAGING_PREFIX}-{proc.pid}-")
+    assert not staging.exists()
+
+
+def test_the_next_process_removes_what_a_killed_one_left_but_a_kept_copy(host_tmp):
+    killed = _stage(host_tmp, "killed")
+    left = Path(killed.communicate(timeout=60)[0].strip())
+    assert killed.returncode < 0 and (left / "round-3" / "model.safetensors").is_file()
+    kept = _stage(host_tmp, "kept")
+    with_copy = Path(kept.stdout.readline().strip())
+    kept.wait(60)
+    # it exited with a cut-off round and a kept copy in its directory: not empty, so it stays
+    assert sorted(p.name for p in with_copy.iterdir()) == ["round-2", "round-3"]
+    second = Path(_stage(host_tmp, "killed").communicate(timeout=60)[0].strip())
+    assert second.is_dir()
+    staging = private_staging()
+    try:
+        assert not left.exists()  # its cut-off round and the directory itself are gone
+        assert not second.exists()
+        assert sorted(p.name for p in with_copy.iterdir()) == ["round-2"]  # only the kept copy stays
+        assert staging.is_dir()
+    finally:
+        staging.rmdir()
+
+
+def test_the_staging_directory_of_a_process_that_runs_is_never_removed(host_tmp):
+    import subprocess
+
+    runs = _stage(host_tmp, "runs", stdin=subprocess.PIPE)
+    try:
+        theirs = Path(runs.stdout.readline().strip())
+        (theirs / "round-1").mkdir()
+        (theirs / "round-1" / "model.safetensors").write_bytes(b"x")
+        assert sweep_gone_staging() == []
+        mine = private_staging()
+        assert (theirs / "round-1" / "model.safetensors").is_file() and mine != theirs
+        mine.rmdir()
+    finally:
+        runs.communicate("\n", timeout=60)
+    assert theirs.is_dir()  # it exited with its export still there: not empty, so it stays
+    assert sweep_gone_staging() == [theirs / "round-1", theirs]  # gone now: the next sweep removes it

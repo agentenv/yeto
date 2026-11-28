@@ -928,8 +928,8 @@ def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch
     from yeto.rl import event_echo
 
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
-    # the teardown copies the dispenser log of a syncer on this machine (~/yeto-output):
-    # this run's machine is the test's own home, not the developer's
+    # the teardown copies the dispenser log of a syncer on this machine (~/yeto-output,
+    # the session's tmp directory: tests/conftest.py); its own HOME for the rest
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     def island_log(island, finalized):

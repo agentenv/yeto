@@ -71,6 +71,13 @@ def check_summary(log: Path) -> dict[str, Any]:
     return summary
 
 
+def local_path(name: str) -> Path:
+    """``name`` in this machine's ~/yeto-output (:func:`yeto.delivery.local_output_dir`)."""
+    from yeto.delivery import local_output_dir
+
+    return Path(local_output_dir()) / name
+
+
 def collect_dispense_log(args, run_dir: str | os.PathLike[str], *,
                          since_unix: float | None = None,
                          source: str = DISPENSE_LOG) -> dict[str, Any] | None:
@@ -79,7 +86,9 @@ def collect_dispense_log(args, run_dir: str | os.PathLike[str], *,
     if not dispense_planned(args):
         return None
     try:
-        src = Path(os.path.expanduser(source))
+        # this machine's ~/yeto-output (yeto.delivery.local_output_dir), where a syncer next to
+        # the launcher writes its log
+        src = local_path(RUN_DIR_LOG) if source == DISPENSE_LOG else Path(os.path.expanduser(source))
         if not src.is_file():
             print(f"[launcher] task dispenser: no log at {source} on this machine (a syncer "
                   "cluster of its own keeps it in its teardown diagnostics)", file=sys.stderr)
@@ -100,7 +109,7 @@ def collect_dispense_log(args, run_dir: str | os.PathLike[str], *,
             return out
         text = json.dumps(summary, indent=2, sort_keys=True) + "\n"
         (dest / RUN_DIR_CHECK).write_text(text, encoding="utf-8")
-        check_copy = Path(os.path.expanduser(DISPENSE_CHECK))
+        check_copy = local_path(RUN_DIR_CHECK)
         if check_copy.parent.is_dir():
             check_copy.write_text(text, encoding="utf-8")
         islands = {k: {"granted": v.get("granted"), "trained": v.get("trained"),
