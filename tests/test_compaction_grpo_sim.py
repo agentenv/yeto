@@ -42,14 +42,36 @@ def scenario(name: str, **kw) -> sim.Scenario:
 
 @pytest.fixture(scope="module")
 def runs(tmp_path_factory):
-    """Each scenario run once (two tasks of n=8; batch_count keeps its six tasks)."""
+    """Each scenario run once (two tasks of n=8; batch_count keeps its six tasks). Every
+    real sleep during a run (``time.sleep``, ``asyncio.sleep`` with a delay, any thread)
+    is recorded in the run's ``real_sleeps``."""
+    import asyncio
+    import time
+
     cache: dict[str, sim.SimRun] = {}
+    real_time_sleep, real_asyncio_sleep = time.sleep, asyncio.sleep
 
     def get(name: str) -> sim.SimRun:
         if name not in cache:
             kw = {} if name == "batch_count" else {"tasks": 2}
-            cache[name] = sim.SimRun(dataclasses.replace(sim.SCENARIOS[name], **kw),
-                                     workdir=tmp_path_factory.mktemp(name)).run()
+            slept: list[tuple[str, float]] = []
+
+            def time_sleep(seconds):
+                slept.append(("time.sleep", seconds))
+                return real_time_sleep(seconds)
+
+            async def asyncio_sleep(delay, *args, **kwargs):
+                if delay:
+                    slept.append(("asyncio.sleep", delay))
+                return await real_asyncio_sleep(delay, *args, **kwargs)
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(time, "sleep", time_sleep)
+                patch.setattr(asyncio, "sleep", asyncio_sleep)
+                run = sim.SimRun(dataclasses.replace(sim.SCENARIOS[name], **kw),
+                                 workdir=tmp_path_factory.mktemp(name)).run()
+            run.real_sleeps = slept
+            cache[name] = run
         return cache[name]
 
     return get
@@ -171,7 +193,7 @@ def test_timing_is_simulated_from_tokens_and_tool_draws(runs):
         assert all(c.cached_tokens > 0 for c in calls[1:])  # one segment: every later call extends the stream
     m = r.metrics()
     assert m["time_env_plus_llm_s"]["max"] >= m["time_env_s"]["max"] > 0
-    assert m["round_time_env_s"] > m["wall_sampler_s"]  # nothing sleeps
+    assert m["round_time_env_s"] > 0 and r.real_sleeps == []  # simulated time: nothing sleeps for it
 
 
 def test_normalization_port_matches_miles_helpers_and_trial_grpo():
