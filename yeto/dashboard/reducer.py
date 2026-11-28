@@ -322,6 +322,8 @@ def _new_island(iid: str) -> dict:
         # store tape launches (tapes/<island>/<launch>/: one per trainer restart) and
         # trainer_start_phase marks of the current launch
         "launches": {}, "launch": None, "launch_ts": None, "start_phase": None, "start_phase_ts": None,
+        # its newest island_straggler mark (fleet.jsonl), None until reported and once cleared
+        "straggler": None,
     }
 
 
@@ -1460,6 +1462,8 @@ class Reducer:
         iid = iid or _iid(r.get("island"))
         if iid is None:
             return
+        if event in STRAGGLER_EVENTS and iid not in self.islands:
+            return  # a mark for a learner no other record names: no card of its own
         isl = self.island(iid)
         # The island's timed lifecycle records in fold order (eff, seq, event, ts). A source's
         # time never goes back (eff): a clock stepped back in one file folds in write order, as on
@@ -1767,7 +1771,7 @@ class Reducer:
             # a sampler waiting at its backlog cap writes nothing until the trainers read
             "waiting_backlog": waiting, "waiting_reason": waiting_why or ("backlog full" if waiting else None),
             "role": role, "left": left, "stale_after_s": _r(warn_s), "island_now": inow,
-            "straggler": isl.get("straggler"),
+            "straggler": isl["straggler"],
             # a sampler whose pool removed or retired it but that still runs (draining, or its
             # machine not released): shown running, alerted past alerts.POOL_REMOVED_GRACE_S
             "pool_removed": ({**pool_removed, "since_s": _r(now - pool_removed["ts"])

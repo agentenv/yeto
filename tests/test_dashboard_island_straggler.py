@@ -201,3 +201,49 @@ def test_the_event_stream_shows_the_straggler_events(tmp_path):
     assert "missed_cycles" not in cleared  # its reason only
     assert 'title="lag"' in events and 'title="back"' in events
     assert "<b>island_straggler</b> trainer 1 action=wait missed_cycles=3" in events
+
+
+def test_a_mark_for_an_unknown_learner_makes_no_card():
+    """A straggler event naming a learner no other record names (a stale or foreign line):
+    no card of its own, and the known cards are left alone."""
+    plain = _reducer()
+    r = _reducer(_flagged(k=7), _cleared(k=7))
+    assert set(_cards(r)) == set(_cards(plain)) and "7" not in r.islands
+    assert all(c["straggler"] is None for c in _cards(r).values())
+
+
+def test_a_card_never_marked_carries_straggler_none():
+    """The card's straggler field is always there: None before any report, as after a clear."""
+    for card in _cards(_reducer()).values():
+        assert "straggler" in card and card["straggler"] is None
+    assert all("straggler" in c and c["straggler"] is None for c in _cards(_reducer(_flagged(), _cleared())).values())
+
+
+def test_the_straggler_time_is_kept_apart_from_the_shape_and_lifecycle_times():
+    """STRAGGLER_TS is its own key: a newer shape or lifecycle record does not make an older
+    straggler report stale, and a newer report does not make an older shape field stale."""
+    from yeto.dashboard.reducer import STRAGGLER_TS
+
+    r = _reducer()
+    end = r.max_ts
+    r.feed({"event": "island_ready", "time_unix": end + 100, "island": "fleet-qa-l1-modal", "island_id": 1,
+            "gpu": "H100"}, source="a")
+    r.feed(_flagged(at=end + 50), source="b")  # older than the ready of source a: still the newest mark
+    assert _mark_of(r)["missed_cycles"] == 3
+    r.feed(_flagged(at=end + 200), source="c")
+    r.feed({"event": "island_ready", "time_unix": end + 150, "island": "fleet-qa-l1-modal", "island_id": 1,
+            "gpu": "A100"}, source="d")  # older than the report: the shape still takes it
+    assert r.islands["1"]["gpu"] == "A100"
+    ts = r.fleet_shape_ts["1"]
+    assert ts[STRAGGLER_TS] == end + 200 and ts["gpu"] == end + 150
+    assert STRAGGLER_TS not in ("cloud", "region", "gpu", "gpus", "price_key", "cpus", "memory_gib", "name")
+
+
+def test_a_trainer_not_live_carries_no_straggler_badge(tmp_path):
+    """The badge is for an island training now: one that is down keeps its mark in the data
+    but the topology card does not draw it."""
+    r = _reducer(_flagged())
+    r.feed({"event": "island_stop", "time_unix": r.max_ts + 5, "island": "fleet-qa-l1-modal", "island_id": 1})
+    assert _mark_of(r)["missed_cycles"] == 3
+    out = _smoke(tmp_path, r)
+    assert "straggler" not in out["texts"]
