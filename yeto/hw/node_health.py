@@ -526,7 +526,8 @@ def fabric_manager_absolute(facts: Mapping[str, Any]) -> tuple[str, str]:
       fabric state judges the node);
     * NVSwitch not determined, or the state not read (a check whose ``nvidia-smi`` did not
       answer has neither): unread;
-    * a loaded unit ``inactive`` / ``failed`` (no process) on a node whose NVSwitch is soft
+    * a loaded unit ``inactive`` / ``failed`` / ``activating`` / ``deactivating`` (no
+      process; the last two: a ``Restart=`` gap, a precheck that hangs) on a node whose NVSwitch is soft
       evidence only (not :func:`nvswitch_hard`: the GPU names, another NVIDIA bridge) with
       every fabric ``Completed/Success``: by ``fm_active_enter`` (its
       ``ActiveEnterTimestampMonotonic``): 0, never active in this boot, ok (:data:`OFF_HOST`:
@@ -550,7 +551,8 @@ def fabric_manager_absolute(facts: Mapping[str, Any]) -> tuple[str, str]:
         return FM_UNREAD, "nvidia-fabricmanager state unread"
     if state == "active":
         return FM_OK, "nvidia-fabricmanager active"
-    if state in ("inactive", "failed") and facts.get("nvswitch_hard") is not True \
+    if state in ("inactive", "failed", "activating", "deactivating") \
+            and facts.get("nvswitch_hard") is not True \
             and facts.get("fabric_complete") is True:
         entered = facts.get("fm_active_enter")
         if entered is None:

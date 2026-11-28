@@ -792,6 +792,23 @@ def test_the_pool_logs_each_check_of_a_fabric_manager_restart_streak_once():
     assert "node_health_degraded" not in _names(pool)
 
 
+def test_the_pool_logs_no_fabric_manager_restart_from_a_stale_check():
+    # REV-905f L3: a stale record (the check stopped) never says its last restart again
+    clock = PoolClock()
+    cloud = Cloud(clock)
+    pool = _pool(clock, cloud, accounts=(1, 4))
+    m = _ready_member(pool, clock, cloud)
+    probe = cloud.probe
+    restarted = {"streak": 1, "nrestarts": 4, "reasons": ["nvidia-fabricmanager restarted 1x since the previous check"]}
+    health = {"verdict": "ok", "reasons": [], "at": clock.t - 1000, "every_s": 60, "fm_restarted": dict(restarted)}
+    cloud.probe = lambda member: replace(probe(member), health=dict(health)) if member.ticket == m.ticket \
+        else probe(member)
+    _run(pool, clock, clock.t + 180)
+    assert "node_health_fm_restarted" not in _names(pool)
+    assert not any(str(k).startswith("health_fm_restarted@") for k in m.alerted)
+    assert _names(pool).count("node_health_read_failed") == 1
+
+
 def test_inventory_node_health_parses_at_the_top_and_per_node():
     import pytest  # noqa: PLC0415
 

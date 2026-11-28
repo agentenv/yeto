@@ -742,7 +742,8 @@ def test_the_fabric_manager_absolute_rule_judges_one_check_alone():
     # REV-905e H1: a loaded unit stopped, no NVSwitch device seen (B300 as the ssh user, another
     # NVIDIA bridge), every fabric Completed: by whether it was active in this boot
     for soft in ({}, dict(name="NVIDIA H100 80GB HBM3", bridge=1)):
-        for state in ("inactive", "failed"):
+        # REV-905f M1: activating / deactivating too (a Restart= gap, a hung NVL5 precheck)
+        for state in ("inactive", "failed", "activating", "deactivating"):
             assert absolute(check(fm_text(state, entered=0, **soft)).facts) == ("ok", node_health.OFF_HOST)
             assert absolute(check(fm_text(state, **soft)).facts) == (
                 "bad", f"nvidia-fabricmanager {state} (NVSwitch present)")
@@ -750,13 +751,25 @@ def test_the_fabric_manager_absolute_rule_judges_one_check_alone():
                 "unread", f"nvidia-fabricmanager {state}, fabric Completed, its active time unread")
             # the fabric not Completed (or unread): bad as before
             assert absolute(check(fm_text(state, entered=0, fabric=(0, FABRIC_IN_PROGRESS), **soft)).facts)[0] == "bad"
-        assert absolute(check(fm_text("activating", entered=0, **soft)).facts)[0] == "bad"
     for hard in (B300_ROOT, HOPPER, dict(name="NVIDIA H100 80GB HBM3", pci=1)):  # a device of its own: bad
         assert absolute(check(fm_text("inactive", entered=0, **hard)).facts)[0] == "bad"
     # its own read, never carried: an unread check after a bad one is unread
     bad = check(fm_text("failed"))
     assert absolute(check(node_text(gpus=(124, "")), bad.facts).facts)[0] == "unread"
     assert absolute(check(fm_text("failed", fabric=(124, "")), bad.facts).facts)[0] == "unread"
+
+
+def test_an_off_host_fabric_manager_restarting_is_never_lost():
+    # REV-905f M1: soft NVSwitch evidence, fabric Completed, never active in this boot: a unit
+    # in its Restart= gap (activating / deactivating) and then failed stays ok
+    for soft in ({}, dict(name="NVIDIA H100 80GB HBM3", bridge=1)):
+        for mid in ("activating", "deactivating"):
+            _, rs = watch_through(fm_text(mid, entered=0, **soft), fm_text("failed", entered=0, **soft),
+                                  fm_text("failed", entered=0, **soft))
+            assert [r.verdict for r in rs] == ["ok", "ok", "ok"]
+            # it ran here (ActiveEnter > 0): bad, then lost
+            _, rs = watch_through(*[fm_text(mid, **soft) for _ in range(3)])
+            assert [r.verdict for r in rs] == ["bad_once", "lost", "lost"]
 
 
 def test_the_fabric_manager_section_reads_systemctl_and_the_nvswitch_probe(tmp_path):
