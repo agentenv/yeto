@@ -97,21 +97,30 @@ def test_reclaim_after_rehearsal_saves_within_cap(tmp_path):
 
 
 def test_overrunning_save_is_abandoned_without_half_file(tmp_path):
-    release = threading.Event()
+    release, exported = threading.Event(), threading.Event()
 
     def slow(t):
-        release.wait(5)
+        release.wait(60)
+        exported.set()
         return {"entries": [AGENTIC]}
 
     saver = s.InFlightSaver(slow, str(tmp_path), printer=lambda l: None)
     saver.last_save_s = 0.01
     h = p.ModalExitHandler("0", save=saver.save, leave=lambda: None, emit=lambda e, **f: None,
                            last_save_s=lambda: saver.last_save_s, cap_s=5.3, margin_s=5.0)
-    t0 = time.monotonic()
     ev = h.handle()
+    # the handler gave up while the export was still running: nothing is written yet
+    assert ev["outcome"] == "save timed out" and not ev["saved"] and not exported.is_set()
+    assert list(tmp_path.iterdir()) == []
+    # The abandoned save goes on in its thread. Its file appears whole (tmp + rename) or
+    # not at all: never a half file under the reclaim name.
     release.set()
-    assert ev["outcome"] == "save timed out" and not ev["saved"] and time.monotonic() - t0 < 2
-    assert not list(tmp_path.glob("reclaim-*.json"))
+    deadline = time.monotonic() + 30
+    while not saver.results and time.monotonic() < deadline:
+        time.sleep(0.01)
+    (written,) = tmp_path.glob("reclaim-*.json")
+    assert json.loads(written.read_text())["entries"] == [AGENTIC]
+    assert [f.name for f in tmp_path.iterdir()] == [written.name]
 
 
 def test_install_is_opt_in(tmp_path):

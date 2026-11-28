@@ -52,6 +52,20 @@ def _merge_records(rig):
     return {r["step"]: r for r in _tape(rig) if "responders" in r and "step" in r}
 
 
+def _records_through(rig, step, timeout=30.0):
+    """The merge records of steps 1..``step``. The syncer broadcasts a step before it
+    appends the step's tape record, so an island can hold the BCAST of ``step`` before
+    the record is on the tape: wait for it."""
+    deadline = time.monotonic() + timeout
+    while True:
+        records = _merge_records(rig)
+        if all(t in records for t in range(1, step + 1)):
+            return records
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"the tape has merge records of steps {sorted(records)}, not 1..{step}")
+        time.sleep(0.02)
+
+
 def _weight(c_steps, c_tokens):
     return c_tokens * c_tokens / c_steps
 
@@ -82,7 +96,7 @@ def test_late_push_is_merged_once_into_the_next_round_of_its_fragment(make_rig):
     want = ref.step(0, [d[3], d[1]], [_weight(1, 4), _weight(2, 6)])
     _check(rig.bcast(0, 0, 3), want)
 
-    records = _merge_records(rig)
+    records = _records_through(rig, 3)
     assert [r["id"] for r in records[3]["responders"]] == [0]
     (carried,) = records[3]["carried"]
     assert (carried["id"], carried["missed_step"], carried["base_version"], carried["lag"]) == (1, 1, 0, 1)
@@ -107,7 +121,7 @@ def test_late_push_beyond_the_base_lag_bound_is_dropped(make_rig):
     delta = _deltas(rig.layout, 0, 5, 1)[0]
     rig.push(0, 5, delta, base=3)
     _check(rig.bcast(0, 0, 5), ref.step(0, [delta], [1.0]))
-    assert all("carried" not in r for r in _merge_records(rig).values())
+    assert all("carried" not in r for r in _records_through(rig, 5).values())
     assert rig.process.poll() is None
 
 
@@ -127,7 +141,7 @@ def test_strict_control_still_drops_a_late_push(make_rig):
     d3 = _deltas(rig.layout, 0, 5, 1)[0]
     rig.push(0, 3, d3, base=1)
     _check(rig.bcast(0, 0, 3), ref.step(0, [d3], [1.0]))
-    assert all("carried" not in r for r in _merge_records(rig).values())
+    assert all("carried" not in r for r in _records_through(rig, 3).values())
 
 
 # ---- many rounds with free-running islands -----------------------------------------

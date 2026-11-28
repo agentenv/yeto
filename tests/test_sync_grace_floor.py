@@ -251,10 +251,11 @@ def test_the_floor_waits_for_a_peer_when_the_adaptive_window_collapses(
 @pytest.mark.parametrize("terminal_ms", ["0", "20000"])
 def test_the_terminal_grace_merges_a_late_delta_of_a_last_round(make_rig, monkeypatch, terminal_ms):
     """P=2 fragments, one RL round: steps 1 and 2 are both last rounds, with
-    no grace (--rl-sync-grace-ms 0). Island 1's delta for step 1 comes 0.5 s
-    after island 0's. Without the terminal grace step 1 merges island 0
-    alone, island 1's delta waits for a round that never comes and the final
-    cut leaves it out (logged); with it step 1 merges both deltas."""
+    no grace (--rl-sync-grace-ms 0). Island 1's delta for step 1 comes after
+    island 0's. Without the terminal grace step 1 merges island 0 alone (island
+    1 pushes once step 1 is broadcast), island 1's delta waits for a round that
+    never comes and the final cut leaves it out (logged); with it step 1 waits
+    for island 1's delta (0.5 s later) and merges both."""
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "terminal-grace-test-key")
     rig = make_rig(2, *late.ASYNC_K1, "--rl-sync-grace-ms", "0",
                    "--rl-sync-terminal-grace-ms", terminal_ms, total_steps=1)
@@ -266,24 +267,33 @@ def test_the_terminal_grace_merges_a_late_delta_of_a_last_round(make_rig, monkey
     e = late._deltas(rig.layout, 1, 12, 2)
 
     rig.push(0, 1, d[0], base=0, c_steps=1, c_tokens=4)
-    time.sleep(0.5)
-    rig.push(1, 1, d[1], base=0, c_steps=1, c_tokens=4)
     if terminal_ms == "0":
-        want = ref.step(0, [d[0]], [1.0])
+        # late by construction: step 1 merged (and was broadcast) before island 1 pushes
+        late._check(rig.bcast(0, 0, 1), ref.step(0, [d[0]], [1.0]))
+        rig.push(1, 1, d[1], base=0, c_steps=1, c_tokens=4)
+        # Only island 1 answers step 2, after its late delta on the same connection: the
+        # syncer has queued that delta when step 2 merges and the final cut is built. (A
+        # step-2 delta of island 0 could merge step 2 before the late delta arrives.)
+        rig.push(1, 2, e[1], base=0, c_steps=1, c_tokens=4)
     else:
-        want = ref.step(0, [d[0], d[1]], [late._weight(1, 4), late._weight(1, 4)])
-    late._check(rig.bcast(0, 0, 1), want)
-    rig.push(0, 2, e[0], base=0, c_steps=1, c_tokens=4)
-    rig.push(1, 2, e[1], base=0, c_steps=1, c_tokens=4)
+        time.sleep(0.5)  # well inside the 20 s terminal grace
+        rig.push(1, 1, d[1], base=0, c_steps=1, c_tokens=4)
+        late._check(rig.bcast(0, 0, 1), ref.step(0, [d[0], d[1]], [late._weight(1, 4), late._weight(1, 4)]))
+        rig.push(0, 2, e[0], base=0, c_steps=1, c_tokens=4)
+        rig.push(1, 2, e[1], base=0, c_steps=1, c_tokens=4)
     deadline = time.monotonic() + 30  # the last step is not broadcast: the final cut carries it
     while 2 not in late._merge_records(rig) and time.monotonic() < deadline:
         time.sleep(0.05)
+    # The syncer logs the late pushes it leaves out while it builds the final cut, before
+    # it sends FINAL_MANIFEST: wait for that, not for step 2's tape record (a close right
+    # after the record killed the syncer before it logged on a loaded host).
+    for client in rig.clients:
+        assert client.finalizing.wait(30), "the syncer sent no FINAL_MANIFEST"
     records = late._merge_records(rig)
     responders = [sorted(r["id"] for r in records[t]["responders"]) for t in (1, 2)]
     rig.close()
     if terminal_ms == "0":
-        # Step 2 races the same way (island 1 pushes right after island 0).
-        assert responders[0] == [0], responders
+        assert responders == [[0], [1]], responders
         assert "late pushes left out of the final cut: no later round" in rig.output
     else:
         assert responders == [[0, 1], [0, 1]], responders

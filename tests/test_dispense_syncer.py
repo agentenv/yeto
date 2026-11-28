@@ -146,30 +146,45 @@ def test_file_fingerprint_counts_rows_and_hashes_bytes(tmp_path):
 
 def test_islands_of_different_speeds_share_one_sequence(syncer_binary, tmp_path):
     """3 islands, 1x / 2x / 4x speed: no position goes to two islands, the
-    fast island trains about 4x the slow one, nobody waits for anybody."""
+    fast island trains about 4x the slow one, nobody waits for anybody.
+
+    Speed is counted in ticks, not seconds: island i finishes a batch every
+    ``period[i]`` ticks, and all islands step through the ticks together (a barrier).
+    On a loaded host a take or a report can cost more than a 4 ms sleep, so a
+    wall-clock speed did not keep the 1:4 ratio."""
     syncer = Syncer(syncer_binary, tmp_path)
     try:
-        speeds = {0: 0.004, 1: 0.008, 2: 0.016}
-        sources = {i: source(syncer.port, i, block=8) for i in speeds}
-        trained: dict[int, list[int]] = {i: [] for i in speeds}
-        stop = time.monotonic() + 3.0
-        rng = random.Random(0)
+        period = {0: 1, 1: 2, 2: 4}
+        ticks = 96
+        sources = {i: source(syncer.port, i, block=8) for i in period}
+        trained: dict[int, list[int]] = {i: [] for i in period}
+        tick = threading.Barrier(len(period), timeout=60)
+        errors: list[BaseException] = []
 
         def island(i: int) -> None:
-            while time.monotonic() < stop:
-                positions = sources[i].take(8, timeout_s=10)
-                time.sleep(speeds[i])
-                dropped = [p for p in positions if rng.random() < 0.1]
-                requeue = [p for p in positions if p not in dropped and rng.random() < 0.05]
-                done = [p for p in positions if p not in dropped and p not in requeue]
-                sources[i].report(trained=done, dropped=dropped, requeue=requeue)
-                trained[i].extend(done)
+            rng = random.Random(i)
+            try:
+                for t in range(ticks):
+                    tick.wait()
+                    if t % period[i]:
+                        continue
+                    positions = sources[i].take(8, timeout_s=10)  # never waits for another island
+                    dropped = [p for p in positions if rng.random() < 0.1]
+                    requeue = [p for p in positions if p not in dropped and rng.random() < 0.05]
+                    done = [p for p in positions if p not in dropped and p not in requeue]
+                    sources[i].report(trained=done, dropped=dropped, requeue=requeue)
+                    trained[i].extend(done)
+            except BaseException as error:  # noqa: BLE001 - re-raised by the test thread
+                errors.append(error)
+                tick.abort()
 
-        threads = [threading.Thread(target=island, args=(i,)) for i in speeds]
+        threads = [threading.Thread(target=island, args=(i,)) for i in period]
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=30)
+            t.join(timeout=120)
+        assert not errors, errors
+        assert not any(t.is_alive() for t in threads)
         for src in sources.values():
             src.close(release=True)
         flat = [p for ps in trained.values() for p in ps]

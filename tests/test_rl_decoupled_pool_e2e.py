@@ -9,6 +9,7 @@ then finish the run on the final cut.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -111,6 +112,23 @@ class _Island:
               what=f"island {self.bridge.config.learner_id} pushes both fragments")
 
 
+REJOINED = re.compile(r"island re-joined after lease expiry learner_id=(\d+) generation=(\d+)")
+
+
+def _wait_for_rejoin_catch_up(log_path: Path, learner_id: int) -> None:
+    """Wait until the syncer ran the catch-up tail of ``learner_id``'s re-JOIN. Until
+    then the island is held out of every round the syncer launches (a member that owes
+    a catch-up tail joins no new round), so a sweep launched earlier never PULLs it."""
+
+    def tail_ran():
+        text = log_path.read_text()
+        joins = [g for lid, g in REJOINED.findall(text) if int(lid) == learner_id]
+        return bool(joins) and (f"its tail runs learner_id={learner_id} generation={joins[-1]} " in text
+                                or f"its tail still runs learner_id={learner_id} generation={joins[-1]} " in text)
+
+    _wait(tail_ran, timeout=60.0, what=f"the catch-up of island {learner_id}'s re-JOIN")
+
+
 def _tape_kinds(path: Path) -> list[str]:
     import json
 
@@ -150,6 +168,9 @@ def test_decoupled_pool_soft_deadline_lease_and_rejoin(syncer_binary, tmp_path):
         _wait(lambda: slow.bridge.client.lease_expiries >= 1, what="lease expiry")
         slow.bridge._heartbeat._paused = lambda: False
         _wait(lambda: slow.bridge.client.connection_generation != generation, what="re-JOIN")
+        # Sweep 2 must launch sweep 3 with island 1 in it: wait for the syncer to admit
+        # the re-joined island (its catch-up tail) before island 0 completes sweep 2.
+        _wait_for_rejoin_catch_up(tmp_path / "syncer.log", learner_id=1)
 
         # Sweep 2 merges without island 1 again; it then sees versions it
         # skipped and answers the next sweep's PULLs on its new connection.
