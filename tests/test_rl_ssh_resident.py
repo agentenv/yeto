@@ -523,6 +523,39 @@ def test_the_fleet_relaunches_a_failed_rank_then_ends_with_the_trainer(tmp_path)
     assert cluster.count("kill", 0) == 3
 
 
+def test_a_relaunch_of_a_resident_island_carries_the_fleets_relaunch_envs(tmp_path):
+    """Peer recovery (on by default for full-parameter async fleets) gives the controller
+    relaunch envs. A resident ssh: island's task is a frozen SshTrainerSpec its ops relaunch
+    from: the envs go to the ops' spec, the next incarnation's script carries them, and the
+    controller does not raise (it raised TypeError, which crashed the island's launcher)."""
+    cluster = FakeCluster(NAMES)
+    ops = make_ops(tmp_path, cluster)
+    ops.add("isl", spec())
+    ops.start("isl")
+    cluster.exit("b300-2", 0, 1)
+
+    def finish_i1():
+        if 1 in cluster.runs["b300-0"]:
+            for name in NAMES:
+                cluster.exit(name, 1, 0)
+
+    ctl = _controller(ops, on_relaunch=lambda name, job: finish_i1(),
+                      island_relaunch_envs={"YETO_RL_PEER_RECOVER": "1"})
+    codes = ctl.run()
+    assert ctl.learners["isl"]["state"] == DONE and "SUCCEEDED" in codes["isl"]
+    rec = ops.islands["isl"]
+    assert rec.spec.env == {"YETO_X": "1", "YETO_RL_PEER_RECOVER": "1"} and rec.islands.spec is rec.spec
+    assert "YETO_RL_PEER_RECOVER" not in cluster.runs["b300-0"][0]["script"]
+    assert all("YETO_RL_PEER_RECOVER" in cluster.runs[n][1]["script"] for n in NAMES)
+
+
+def test_relaunch_envs_for_an_island_no_ops_own_still_raise():
+    ctl = FleetController(learners={}, syncer=None, sky_ops=RoutingOps(_SkySide(), None, ssh_ops=None),
+                          poll_interval=30.0, recover_timeout=60.0, island_relaunch_envs={"A": "1"})
+    with pytest.raises(TypeError, match="cannot add relaunch envs"):
+        ctl._add_relaunch_envs(object(), "isl")
+
+
 def test_the_fleet_gives_up_on_an_island_failing_again_and_releases_it(tmp_path):
     cluster = FakeCluster(NAMES)
     ops = make_ops(tmp_path, cluster)

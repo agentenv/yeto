@@ -1635,16 +1635,19 @@ class FleetController:
                     rec["attempt"] = planned
                     return
             if not is_syncer:
-                self._add_relaunch_envs(rec["task"])
+                self._add_relaunch_envs(rec["task"], rec["name"])
             rec["attempt"] = self._start_relaunch(rec)
 
-    def _add_relaunch_envs(self, task) -> None:
+    def _add_relaunch_envs(self, task, name: str | None = None) -> None:
         if not self.island_relaunch_envs:
             return
         if callable(getattr(task, "update_envs", None)):  # sky.Task
             task.update_envs(self.island_relaunch_envs)
         elif isinstance(getattr(task, "envs", None), dict):  # ModalIslandConfig
             task.envs.update(self.island_relaunch_envs)
+        elif name is not None and callable(getattr(self.ops, "add_relaunch_envs", None)) \
+                and self.ops.add_relaunch_envs(name, self.island_relaunch_envs):
+            pass  # a resident ssh: island (frozen SshTrainerSpec): its ops relaunch from their own spec
         else:
             raise TypeError(f"cannot add relaunch envs to a {type(task).__name__}")
 
