@@ -253,6 +253,13 @@ launcher folder in the store) fold in the order they were written, so a host clo
 stepped back (NTP) folds as before. A host clock that is off by more than the gap
 between two hosts' records still orders those records by that clock, and records of
 two hosts with the same `time_unix` fold in the order they are read (a known limit).
+The spare-node events of a resident `ssh:` island (`island_node_lost`,
+`island_waiting_spare`, `island_node_replaced`, `island_replacement_limit`) fold the
+same way and share both limits: a host whose clock is behind by more than the gap
+between two hosts' records can show a replaced island still waiting for a spare node,
+and two hosts' events with the same `time_unix` fold in the order they are read. The
+island's record in the run store (`fleet/trainers/<k>/state.json`) wins over the
+events, so a page that reads the store shows the record's state either way.
 For tools that read the file itself:
 
 ```
@@ -261,6 +268,20 @@ python -m yeto.dashboard.fleet_store merge --store s3://<bucket>/runs/<run> \
 ```
 
 writes one `fleet.jsonl`, in time order, each record once.
+
+A resident `ssh:` trainer island with spare nodes shows its wait for a spare node,
+its lost node and why, and its replacements on its card, its tip and an extra
+`Nodes` column of Islands now (a page without such an island has no new column).
+It is out of the syncer roster while a spare takes a lost node's place (the roster
+in the warning colour). Past `fleet.waiting_absent_after_s` (plan, default 1 h) it
+reads `waiting for a spare node · counts as absent`. A wait past
+`--spare-max-wait-s` (the record's or its events', default 24 h) is not believed:
+the island reads lost, as one without spare nodes. One no record reported for 1 h +
+2 x `--controller-poll` (from the plan, default 30 s) + 10 min (the hourly wait
+report lands with the controller's next poll) reads unknown: `launcher may be gone`.
+Node checks stop on purpose while the island recovers, so a check reads stale only
+while it runs; right after a relaunch a check may read stale for about 60 s until
+the first new health record lands.
 
 ## Alert rules and thresholds
 

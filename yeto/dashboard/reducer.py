@@ -66,6 +66,13 @@ MAX_EVENTS = 20000
 SPOT_EVENTS = frozenset({"spot_reclaim", "spot_replace_advice", "spot_replace_launch", "spot_budget_cap"})
 SPOT_MAX = 500
 FLEET_VIEW_MAX = 500  # fleet records / cost ticks the fleet view shows (the last ones)
+# a resident ssh: island's spare nodes (yeto.launch.island_spares) and its nodes' health checks
+# (yeto.hw.node_health): fleet.jsonl events that mark its card, never a lifecycle state nor a
+# sign of life of its trainer
+SPARE_EVENTS = frozenset({"island_node_lost", "island_waiting_spare", "island_node_replaced",
+                          "island_replacement_limit"})
+NODE_HEALTH_EVENTS = frozenset({"node_health", "node_health_read_failed", "node_health_degraded"})
+FLEET_EVENTS = FLEET_EVENTS | SPARE_EVENTS | NODE_HEALTH_EVENTS
 NO_DATA = None
 
 # Overlay-chart metrics (v7 tabs): series key -> (label, extractor field paths).
@@ -361,6 +368,11 @@ class Reducer:
         self.fleet_lifecycle: dict[str, list[tuple[float, int, str, float]]] = {}
         self.fleet_source_ts: dict[tuple[str, str], float] = {}  # (island, source) -> its newest record time
         self.fleet_shape_ts: dict[str, dict[str, float]] = {}  # island -> shape field -> its record's time
+        # island -> its spare-node records [(time, seq, event, record, ts)] in replay order: by
+        # time_unix across sources, in write order within one source (another host's store copy
+        # that arrives late is replayed in place); island -> source -> its latest replay time
+        self.fleet_spares_log: dict[str, list[tuple[float, int, str, dict, float | None]]] = {}
+        self.fleet_spares_src_t: dict[str, dict[str, float]] = {}
         self.events: deque = deque(maxlen=MAX_EVENTS)
         self.event_seq = 0
         self.max_ts: float | None = None
@@ -1465,6 +1477,14 @@ class Reducer:
         if event in STRAGGLER_EVENTS and iid not in self.islands:
             return  # a mark for a learner no other record names: no card of its own
         isl = self.island(iid)
+        # spare-node and node health events: a mark on the card (and a line of the event stream),
+        # never a shape field nor a lifecycle state of the island: they return before both (and
+        # before the lifecycle insort)
+        if event in SPARE_EVENTS:
+            self._feed_spares(isl, event, r, ts)
+            return
+        if event in NODE_HEALTH_EVENTS:
+            return  # the record carries the health per node; the event is a line of the stream only
         # The island's timed lifecycle records in fold order (eff, seq, event, ts). A source's
         # time never goes back (eff): a clock stepped back in one file folds in write order, as on
         # main. A record before the newest of another source (a lost host's store copy read late)
@@ -1534,6 +1554,132 @@ class Reducer:
             if isl["open_ts"] is not None:
                 isl["closed_s"] += max(0.0, ts - isl["open_ts"])
                 isl["open_ts"] = None
+
+    def _feed_spares(self, isl: dict, event: str, r: dict, ts: float | None) -> None:
+        """Fold a spare-node event in replay order: by its ``time_unix`` across sources, in
+        write order within one source (a record of a source never goes before an earlier line
+        of that source, even with an older time; an untimed one keeps the time of the line
+        before it). A record that sorts before one folded already (a lost host's store copy
+        read after the new host's records) replays the island's ``spares`` mark from its
+        records; in-order records fold as they come."""
+        iid, source = str(isl["id"]), self._source
+        log = self.fleet_spares_log.setdefault(iid, [])
+        src_t = self.fleet_spares_src_t.setdefault(iid, {})
+        prev = src_t.get(source)
+        if ts is None:
+            t = prev if prev is not None else (log[-1][0] if log else float("-inf"))
+        else:
+            t = ts if prev is None else max(ts, prev)
+        src_t[source] = t
+        row = (t, self.event_seq, event, r, ts)
+        if log and row[:2] < log[-1][:2]:
+            bisect.insort(log, row)
+            isl.pop("spares", None)
+            for _t, _seq, ev, rec, at in log:
+                self._fold_spares(isl, ev, rec, at)
+            return
+        log.append(row)
+        self._fold_spares(isl, event, r, ts)
+
+    @staticmethod
+    def _fold_spares(isl: dict, event: str, r: dict, ts: float | None) -> None:
+        """A spare-node event of a resident ssh: island (``yeto.launch.island_spares``) into its
+        ``spares`` mark: what the card shows when the island's record has none."""
+        sp = isl.get("spares")
+        if sp is None:
+            sp = isl["spares"] = {"waiting": False, "since": None, "reason": None, "replacements": 0,
+                                  "last_at": None, "last": None, "lost": [], "stopped": None, "last_ts": None,
+                                  "max_wait": None}
+        if ts is not None:  # the newest spare-node event (a wait no event reports any more reads frozen)
+            sp["last_ts"] = ts if sp["last_ts"] is None else max(sp["last_ts"], ts)
+        why = str(r["reason"])[:300] if r.get("reason") else None
+        if finite(r.get("max_wait_s")) is not None:  # --spare-max-wait-s, on its wait events
+            sp["max_wait"] = finite(r.get("max_wait_s"))
+        if event == "island_node_lost":
+            if r.get("node") and r["node"] not in sp["lost"]:
+                sp["lost"].append(str(r["node"]))
+        elif event == "island_waiting_spare":
+            if r.get("given_up"):
+                sp.update(waiting=False, since=None, stopped=why)
+            else:
+                waited = finite(r.get("elapsed_s"))
+                start = ts - waited if ts is not None and waited is not None else ts
+                # a new wait: an earlier give-up is over; a later report keeps the wait's first start
+                sp.update(waiting=True, reason=why or sp["reason"], stopped=None,
+                          since=sp["since"] if sp["waiting"] and sp["since"] is not None else start)
+        elif event == "island_node_replaced":
+            sp["replacements"] += 1
+            sp["last_at"] = ts
+            sp["last"] = {"lost": r.get("lost"), "spare": r.get("spare"), "rank": r.get("rank"),
+                          "resume_step": r.get("resume_step"), "reason": why}
+            sp["lost"] = [n for n in sp["lost"] if n != r.get("lost")]
+            sp.update(waiting=False, since=None, reason=None, stopped=None)  # a spare took its place: not given up
+        elif event == "island_replacement_limit":
+            sp.update(waiting=False, since=None, stopped=why)
+
+    def _spares_card(self, isl: dict, inow: dict | None, now: float) -> dict:
+        """A trainer island's spare nodes and its unhealthy nodes, for its card: its record's
+        (``spares`` / ``health`` in ``fleet/trainers/<k>/state.json``) over its fleet.jsonl
+        events. Empty (no key at all) for an island without spare nodes or health checks.
+
+        A wait for a spare node carries ``wait_state`` (:func:`fleet_islands.spare_wait_state`)
+        past ``fleet.waiting_absent_after_s`` (absent), past ``--spare-max-wait-s`` (expired) or
+        when no record or event reported it for an hour (frozen); expired and frozen are no
+        wait (``waiting`` false): the island reads lost or unknown. A give-up (``stopped``) is
+        not shown once the island's record runs again."""
+        trainers = (self.fleet_state or {}).get("trainers") or {}
+        k = int(isl["id"]) if str(isl["id"]).isdigit() else None
+        rec = ((trainers.get(k) if k is not None else None) or {}).get("record") or {}
+        mine, ev = rec.get("spares"), isl.get("spares")
+        running = bool(inow) and inow.get("state") == "running"
+        out: dict[str, Any] = {}
+        updated = max_wait = None
+        if mine:
+            out["spares"] = {"waiting": bool(mine.get("waiting_spare")), "since": mine.get("waiting_since"),
+                             "reason": mine.get("wait_reason"), "replacements": mine.get("replacements") or 0,
+                             "window": mine.get("replacements_window"), "max": mine.get("max_replacements"),
+                             "last_at": mine.get("last_replaced_at"), "lost": list(mine.get("lost") or ()),
+                             "spare_nodes": list(mine.get("spare_nodes") or ()),
+                             # the names of the last replacement are on its event only
+                             "last": (ev or {}).get("last") if mine.get("replacements") else None,
+                             "stopped": None if running else (ev or {}).get("stopped"), "source": "record"}
+            updated, max_wait = mine.get("updated"), mine.get("max_wait_s")
+        elif ev:
+            out["spares"] = {**{key: ev[key] for key in ("waiting", "since", "reason", "replacements", "last_at",
+                                                         "last", "stopped")},
+                             "window": None, "max": None, "lost": list(ev["lost"]), "spare_nodes": None,
+                             "source": "events"}
+            if running:
+                out["spares"]["stopped"] = None
+            updated, max_wait = ev.get("last_ts"), ev.get("max_wait")
+        sp = out.get("spares")
+        if sp and sp["waiting"]:
+            ws = fleet_islands.spare_wait_state(
+                sp["since"], updated, now, max_wait_s=max_wait,
+                absent_after_s=(self.fleet_plan or {}).get("waiting_absent_after_s"),
+                poll_s=(self.fleet_plan or {}).get("controller_poll_s"))
+            if ws is not None:
+                sp["wait_state"] = ws
+                if ws["state"] != "absent":  # not believed: no wait masks the island's loss
+                    sp["waiting"] = False
+        health = rec.get("health")
+        # an island that ended: its last checks say nothing of it now
+        if health and (inow is None or inow.get("state") in ("running", "starting", "moving")):
+            # the island's nodes now (a node a spare replaced is none of them any more)
+            nodes = set((mine or {}).get("nodes") or ()) or None
+            bad = []
+            for name, node in sorted((health.get("nodes") or {}).items()):
+                if nodes is not None and name not in nodes:
+                    continue
+                if running:  # checks run only while the island runs (stopped on purpose while it recovers)
+                    node = fleet_islands.stale_health(node, health.get("updated"))
+                if node.get("verdict") in (None, "ok"):
+                    continue
+                bad.append({"node": name, "verdict": node["verdict"], "reasons": list(node.get("reasons") or ()),
+                            "bad_in_row": node.get("bad_in_row"), **({"stale": True} if node.get("stale") else {})})
+            if bad:
+                out["node_health"] = bad
+        return out
 
     def _feed_pool(self, r: dict, iid: str | None, ts: float | None) -> None:
         self.async_.fold_pool(r)
@@ -1684,6 +1830,14 @@ class Reducer:
         # a trainer island of a fleet launched island by island: its records in the run store say
         # what it is (yeto.rl.trainer_worker), over what its tape last said
         inow = self._trainer_island_now(isl) if role != "sampler" else None
+        # spare nodes and unhealthy nodes of a resident ssh: island (no key without them)
+        spare_card = self._spares_card(isl, inow, now) if role != "sampler" else {}
+        ws = (spare_card.get("spares") or {}).get("wait_state") or {}
+        if inow and ws.get("state") in ("expired", "frozen") and inow["state"] == "starting":
+            # a wait past the longest wait (lost) or nobody reports any more (unknown) is not a start: the
+            # island reads what its tape says
+            inow = {**inow, "state": "lost" if ws["state"] == "expired" else "unknown", "reason": ws["why"],
+                    "detail": inow.get("reason")}
         rec_stopped = bool(inow) and inow["state"] in ("stopped", "done", "down")
         if inow and inow["state"] in ("moving", "starting"):
             left = None  # the leave on its tape is the superseded launch's: its next launch is starting
@@ -1807,6 +1961,8 @@ class Reducer:
             # round metrics the island's backend does not report: shown as "not reported by <backend>"
             "unreported": unreported_metrics(isl.get("backend")),
             "backend_label": backend_label(isl.get("backend")),
+            # spare nodes and unhealthy nodes of a resident ssh: island (no key without them)
+            **spare_card,
         }
 
     def infer_hardware(self) -> None:

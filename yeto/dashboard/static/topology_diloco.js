@@ -23,6 +23,9 @@ function esc(s){return U.esc(s)}
 function lr(x){return fin(x)?(x===0?"0":x.toExponential(0)):null}
 function kn(v){return !fin(v)?"n/a":v>=1e9?(v/1e9).toFixed(1)+"B":v>=1e6?(v/1e6).toFixed(1)+"M":v>=1e4?(v/1e3).toFixed(1)+"k":v.toFixed(0)}
 function now(){return T?T.now+(U.clock()-recvAt)/1000:0}
+// the time a spare-node wait or a replacement is measured against, the same on the card, its tip and the
+// Islands now table: a snapshot's own time offline, the topology's clock live
+function spNow(){return T?(T.live?now():T.now):null}
 function colors(){var cs=typeof getComputedStyle==="function"?getComputedStyle(document.documentElement):null,o={},g=function(n){return cs&&cs.getPropertyValue?String(cs.getPropertyValue(n)||"").trim():""};
   ["ink","ink2","line","good","warn","bad","traj","wt","delta","bg"].forEach(function(k){o[k]=g("--"+k)});o.wire=g("--topo-wire");return o}
 function arch(a){return a?"var(--arch-"+String(a).toLowerCase()+")":"var(--ink2)"}
@@ -72,6 +75,8 @@ function islandNow(tr){var n=tr.island_now;if(!n)return null;
 function straggler(tr){var n=tr.island_now;return (n&&"straggler" in n?n.straggler:tr.straggler)||null}
 function trainerState(tr,tn,isl){
   var age=fin(tr.phase_since)?tn-tr.phase_since:null,a=age!=null?" · "+dur(age):"",ph=tr.phase_raw,co=isl&&isl.colocated;
+  if(waitingSpare(tr))return ["waiting for a spare node"+(absentWait(tr)?" · counts as absent":fin(tr.spares.since)?" · "+dur(Math.max(0,spNow()-tr.spares.since)):""),"warn"];
+  var ow=overdueWord(tr);if(ow&&!tr.live)return [ow+(fin(tr.last_event_ts)?" · no event for "+dur(Math.max(0,spNow()-tr.last_event_ts)):""),"bad"];
   var inow=islandNow(tr);if(inow)return inow;
   if(tr.failure)return["failed: "+tr.failure.metric,"bad"];
   if(sft()){var q=fin(tr.last_event_ts)?dur(tn-tr.last_event_ts)+" ago":"n/a";
@@ -92,6 +97,63 @@ function rolloutState(tr,tn){
   if(ph==="publish")return["loading the new snapshot"+(age!=null?" · "+dur(age):""),"wt"];
   if(ph==="onload")return["onloading weights","wt"];
   return[r.colocated?"offloaded · GPU is training":"idle · trainer step (serial)","mute"]}
+// a resident ssh: island with spare nodes (tr.spares: its record's, else its fleet.jsonl events) and its
+// nodes' health checks (tr.node_health: the nodes whose newest check is not ok)
+var ENDED_NOW=/^(stopped|done|down|removed|failed|abandoned)$/;
+function ended(tr){return D.done||!!(tr.island_now&&ENDED_NOW.test(tr.island_now.state))}
+function waitingSpare(tr){return !!(tr.spares&&tr.spares.waiting&&!ended(tr))}
+function lostNode(tr){return !ended(tr)&&(tr.node_health||[]).some(function(h){return h.verdict==="lost"})}
+// a wait past fleet.waiting_absent_after_s (the fleet counts the island absent; it still waits)
+function absentWait(tr){return waitingSpare(tr)&&(tr.spares.wait_state||{}).state==="absent"}
+// a wait not believed (past --spare-max-wait-s, or no report for an hour): the island reads lost
+function overdueWait(tr){var w=(tr.spares||{}).wait_state;return !ended(tr)&&!!w&&w.state!=="absent"?w:null}
+// a wait not believed in words, what to act on first, durations against spNow() as everywhere else
+function overdueText(w,at){var tn=fin(at)?at:spNow();return w.state==="frozen"?"launcher may be gone · no wait report for "+(fin(w.since)&&fin(tn)?dur(Math.max(0,tn-w.since)):"over an hour"):w.why}
+// what the card reads for it: unknown (nobody reports the wait) or lost (past the longest wait)
+function overdueWord(tr){var w=overdueWait(tr);return w?(w.state==="frozen"?"unknown":"lost"):null}
+// the badge of a lost node (a wait is the card's phase line, not a badge too)
+function spareBadge(tr){return lostNode(tr)?["node ✕",C.bad]:null}
+// why no spare node (island_spares.Pick.why_none): the skipped nodes and why first (what to act on: a
+// lease, a quarantine), then the group, then the placement; any other reason as it is
+function whyNoSpare(r){r=String(r||"");var i=r.indexOf("; placement: "),head=i<0?r:r.slice(0,i),place=i<0?"":r.slice(i+13);
+  var m=/^(?:fabric group (\S+)|the inventory) has no free healthy spare node(?: \((.*)\))?$/.exec(head);
+  if(!m)return r||"no free spare node";
+  return (m[2]?m[2]+" · ":"")+"no free spare"+(m[1]?" in "+m[1]:"")+(place?" · placement: "+place:"")}
+// a node's health in words: its reasons, else what its verdict means
+var VERDICT_WORDS={lost:"health bad in 2 checks in a row",bad_once:"health bad in 1 check",read_failed:"health unread"};
+function healthWhy(h){if(h.stale)return "health unread (stale)";if(h.verdict==="read_failed")return "health unread"+(h.reasons.length?" ("+h.reasons[0]+")":"");
+  return (h.reasons.length?h.reasons.join("; "):VERDICT_WORDS[h.verdict]||"health check not ok")+(h.verdict==="bad_once"&&h.reasons.length?" · 1 bad check":"")}
+// the card's spare / health line: [[text, colour key]] parts (a bad node and why first, then the replacements),
+// or null; waiting: why no spare is free; stopped: why the island gave up
+function spareNote(tr,tn){var sp=tr.spares,bad=ended(tr)?[]:tr.node_health||[],out=[];
+  if(sp&&sp.stopped)return [[sp.stopped,"bad"]];
+  var od=overdueWait(tr);if(od)return [[overdueText(od),"bad"]];
+  if(waitingSpare(tr))return [[whyNoSpare(sp.reason),"warn"]];
+  if(bad.length){var h=bad[0];out.push([h.node+": ",""],[healthWhy(h),h.verdict==="lost"?"bad":"warn"]);
+    if(bad.length>1)out.push([" +"+(bad.length-1)+" node"+(bad.length>2?"s":""),""])}
+  if(sp&&sp.replacements>0){var l=sp.last||{};
+    out.push([(out.length?" · ":"")+"replaced "+sp.replacements+"×"+(l.lost&&l.spare?" · "+l.lost+" → "+l.spare:"")+(fin(sp.last_at)?" · "+dur(Math.max(0,spNow()-sp.last_at))+" ago":""),""])}
+  return out.length?out:null}
+// rich text cut to maxW (an ellipsis on the part where it ends), the whole line on hover
+function fitRich(e,parts,maxW){var full=parts.map(function(p){return p[0]}).join(""),key=full+"|"+parts.map(function(p){return p[1]}).join(",")+"|"+maxW;
+  if(e._rich===key)return;e._rich=key;e._full=null;
+  var cap=Math.max(8,Math.floor(maxW/6.3)),n=0,out=[];
+  for(var i=0;i<parts.length&&n<cap;i++){var t=parts[i][0];if(n+t.length>cap)t=t.slice(0,Math.max(1,cap-n-1))+"…";out.push([t,parts[i][1]?"fill:"+col(parts[i][1]):""]);n+=t.length}
+  rich(e,out);
+  if(full.length>cap&&typeof document!=="undefined"&&document.createElementNS&&e.namespaceURI){var tt=document.createElementNS(e.namespaceURI,"title");tt.textContent=full;e.appendChild(tt)}}
+// the trainer tip's rows of its spare nodes and unhealthy nodes (a 400 px touch page reads them here)
+function spareRows(tr){var sp=tr.spares,h="",tn=spNow(),ws=(sp||{}).wait_state;
+  (tr.node_health||[]).forEach(function(x){h+=row("node "+x.node,(x.verdict==="lost"?"lost · ":"")+healthWhy(x))});
+  if(!sp)return h;
+  if(sp.stopped)h+=row("spare nodes",sp.stopped);
+  if(sp.waiting||ws)h+=row("waiting for a spare",(fin(sp.since)?dur(Math.max(0,tn-sp.since))+" · ":"")+(sp.reason||"no free spare node"));
+  if(ws)h+=row("spare wait",ws.state==="absent"?"counts as absent for the fleet (past fleet.waiting_absent_after_s)":overdueText(ws));
+  if(sp.lost&&sp.lost.length)h+=row("lost node(s)",sp.lost.join(", "));
+  if(sp.replacements>0){var l=sp.last||{};
+    h+=row("last replacement",(l.lost&&l.spare?l.lost+" → "+l.spare:"")+(l.resume_step!=null?" · resumed at step "+l.resume_step:"")+(fin(sp.last_at)?" · "+dur(Math.max(0,tn-sp.last_at))+" ago":""));
+    h+=row("replacements",sp.replacements+(fin(sp.window)&&fin(sp.max)?" · "+sp.window+" of at most "+sp.max+" in 24 h":""))}
+  if(sp.spare_nodes&&sp.spare_nodes.length)h+=row("other nodes of its pool",sp.spare_nodes.join(", "));
+  return h}
 function col(k){return{good:C.good,warn:C.warn,bad:C.bad,wt:C.wt,mute:C.ink2,delta:C.delta}[k]||C.ink2}
 function shardOf(f){var sh=D.shards;for(var i=0;i<sh.length;i++)if(f>=sh[i].lo&&f<sh[i].hi)return i;return 0}
 function behind(tr,f){return !D.done&&tr.versions&&fin(tr.versions[f])&&D.versions[f]>tr.versions[f]}
@@ -353,13 +415,14 @@ function lane(e,k){var c={delta:C.delta,wt:C.wt,warn:C.warn,bad:C.bad}[k];e.styl
 function active(kk,iid,sh,td){return T.live&&D.flows.some(function(f){return f.k===kk&&f.i===iid&&(sh==null||f.sh===sh)&&f.t0<=td&&Math.max(f.t1,f.t0+1.3)>=td})}
 function paint(){
   var tn=now(),td=tn-DELAY_S,red=U.reduced();
-  D.trainers.forEach(function(tr,k){var o=L.boxes[k],tc=o.tc,st=trainerState(tr,tn,tr.island),c=col(st[1]),dead=!tr.live&&!(tr.status==="done"||tr.status==="stopped"||tr.finalized||D.done)&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state));  // a finished run: no trainer is lost
+  D.trainers.forEach(function(tr,k){var o=L.boxes[k],tc=o.tc,st=trainerState(tr,tn,tr.island),c=col(st[1]),dead=!tr.live&&!(tr.status==="done"||tr.status==="stopped"||tr.finalized||D.done)&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state))&&!waitingSpare(tr);  // a finished run: no trainer is lost
     tc.step.textContent=(fin(tr.step)?"step "+tr.step:fleet()?"not trained yet":"step —")+(sft()&&fin(tr.steps_total)?" / "+tr.steps_total:"");tc.outer.textContent=fin(tr.outer)?(L.W<640?"sweep ":"outer sweep ")+tr.outer:"";  // complete sweeps it applied (hover: the card's tip)
     fitText(tc.ph,st[0],tc.phw);tc.ph.style.fill=st[1]==="good"?C.ink:c;tc.dot.setAttribute("fill",c);
-    tc.badge.textContent=tr.failure?(/hash/.test(tr.failure.metric)?"hash ✕":/lr/.test(tr.failure.metric)?"lr 0":"failed"):tr.lr_zero&&tr.live?"lr 0":dead?"lost":tr.syncer_link&&tr.syncer_link.state==="disconnected"&&!D.done&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state))?"link ✕":"";tc.badge.style.fill=C.bad;
+    tc.badge.textContent=tr.failure?(/hash/.test(tr.failure.metric)?"hash ✕":/lr/.test(tr.failure.metric)?"lr 0":"failed"):tr.lr_zero&&tr.live?"lr 0":dead?(overdueWord(tr)||"lost"):tr.syncer_link&&tr.syncer_link.state==="disconnected"&&!D.done&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state))?"link ✕":"";tc.badge.style.fill=C.bad;
     if(!tc.badge.textContent&&tr.live&&straggler(tr)&&!D.done){tc.badge.textContent="straggler";tc.badge.style.fill=C.warn}  // no push merged for N merge cycles
     [tc.co?o.merged:tc.box].forEach(function(b){if(b){b.style.stroke=dead||tr.failure?C.bad:"";b.style.strokeDasharray=dead?"5 4":""}});
     o.tc.g.setAttribute("opacity",dead?0.6:1);
+    var sb=spareBadge(tr);if(sb&&!/^(failed|hash ✕|lr 0)$/.test(tc.badge.textContent)){tc.badge.textContent=sb[0];tc.badge.style.fill=sb[1]}  // a lost node / no spare node
     var L0=tc.l,lw=tc.lw;
     fitText(L0[0],(tr.hash?"snapshot "+tr.hash:"no snapshot yet")+(lr(tr.lr)!=null?" · lr "+lr(tr.lr):""),lw);
     if(tr.versions){var parts=[["frag [",""]];tr.versions.forEach(function(v,f){var b=behind(tr,f);parts.push([String(v),b?"fill:"+C.warn+";font-weight:700":""]);if(f<tr.versions.length-1)parts.push([" ",""])});parts.push(["]",""]);rich(L0[1],parts)}
@@ -370,7 +433,8 @@ function paint(){
     var up=Object.keys(tr.pushed||{});
     fitText(L0[3],tr.full_push?"↑ "+(tr.full_push.count||0)+" PUSH last round · "+(tr.full_push.total||0)+" in run"+(tr.full_push.overwritten?" · "+tr.full_push.overwritten+" overwritten":fin(tr.full_push.inflight)&&tr.full_push.inflight?" · in flight "+tr.full_push.inflight:""):
       "↑ unmerged PUSH "+up.length+(up.length?" ("+up.slice(0,3).map(function(f){return "f"+f+" t"+tr.pushed[f]}).join(", ")+")":""),lw);
-    fitText(L0[4],fin(tr.gpu_util)?"GPU "+Math.round(tr.gpu_util)+"%"+(fin(tr.mem_pct)?" · HBM "+Math.round(tr.mem_pct)+"%":""):"",lw);
+    var gu=fin(tr.gpu_util)?"GPU "+Math.round(tr.gpu_util)+"%"+(fin(tr.mem_pct)?" · HBM "+Math.round(tr.mem_pct)+"%":""):"",sn=spareNote(tr,tn);
+    if(sn)fitRich(L0[4],gu?sn.concat([[" · "+gu,""]]):sn,lw);else{L0[4]._rich=null;fitText(L0[4],gu,lw)}  // its spare / health line first
     var ap=fin(tr.apply_ts)&&T.live&&td-tr.apply_ts>=0&&td-tr.apply_ts<3;tc.flash.style.stroke=C.wt;tc.flash.setAttribute("opacity",ap?0.9:0);
     if(o.ro)paintRollout(tr,o,tn,td);
     if(o.lat){var ln=(D.lanes||{})[tr.id]||{};o.lat.textContent=fin(ln.latest)?"v"+ln.latest:"no release";o.buf.textContent=fin(ln.backlog)?"buffer "+Math.round(ln.backlog):"written "+Math.round(ln.written||0);
@@ -408,7 +472,7 @@ function paint(){
         if(!fin(sw0)||sw0<=0)sw0=pre.length*6.3+big.length*12.2;  // no layout: the small and big fonts' advances
         if(fi===forms.length-1||14+sw0+16+textW(o.of,5.9)<=o.w-12)break}}
     o.barf.setAttribute("width",D.P?(o.barW*(((sh.step-1)%D.P+1)/D.P)).toFixed(1):0);
-    o.roster.textContent=D.done?"run done · roster "+D.M:"roster "+D.roster+"/"+D.M;o.roster.style.fill=D.done?C.ink2:D.roster<D.M?C.bad:C.good;
+    o.roster.textContent=D.done?"run done · roster "+D.M:"roster "+D.roster+"/"+D.M;o.roster.style.fill=D.done?C.ink2:D.roster<D.M?(D.roster+(D.roster_spare||0)>=D.M?C.warn:C.bad):C.good;
     var c=st==="done"?C.ink2:st==="waiting for quorum"?(sh.attempt_max>1?C.bad:C.warn):st==="merging"?C.wt:st==="gathering"?C.good:C.ink2;
     var ended=mine.length&&mine.every(function(r){return r.ended});
     fitText(o.st,(st==="done"?"done (final cut)":st==="stale"?"stale: no trainer up":st)+(ended?" · "+mine.length+" unmerged at the end":st==="done"&&!mine.length?"":" · in flight "+mine.length)+(D.behind&&D.syncer_tape!==false?" · syncer tape behind":""),o.lw-14);o.st.style.fill=c===C.good?C.ink:c;o.dot.setAttribute("fill",c);
@@ -545,7 +609,7 @@ function tipHtml(key){var a=key.split(":"),tn=now(),tr=null;D.trainers.forEach(f
   if(a[0]==="trn"&&tr)return '<div class="h">Trainer '+esc(tr.id)+"</div>"+row("island status",tr.status)+row("local step",tr.step)+row("outer sweep",fin(tr.outer)?tr.outer+": every fragment merged at least "+tr.outer+" time"+(tr.outer===1?"":"s")+" (complete sweeps applied)":null)+row("policy hash",tr.hash)+
     row("fragment versions",tr.versions?"["+tr.versions.join(", ")+"]":null)+row("merged, not applied",tr.pending_n)+row("applied lr",lr(tr.lr))+
     row("last PUSH",tr.last_push?"f"+tr.last_push.frag+" t"+tr.last_push.step+" · "+mb(tr.last_push.bytes)+(tr.last_push.wire?" on the wire ("+mb(tr.last_push.payload_bytes)+" f32)":""):null)+
-    row("BCAST overwrite / catch-up",tr.bcast_overwrites||tr.bcast_catch_ups?(tr.bcast_overwrites||0)+" / "+(tr.bcast_catch_ups||0):null)+row("last event",fin(tr.last_event_ts)?dur(tn-tr.last_event_ts)+" ago":null)+
+    row("BCAST overwrite / catch-up",tr.bcast_overwrites||tr.bcast_catch_ups?(tr.bcast_overwrites||0)+" / "+(tr.bcast_catch_ups||0):null)+row("last event",fin(tr.last_event_ts)?dur(tn-tr.last_event_ts)+" ago":null)+spareRows(tr)+
     row("source",tr.full_push?"rl_full_parameter_round · rl_fragment_*":"rl_local_round · rl_policy_snapshot · rl_fragment_*")+'<div class="ns">PULL permits held and live BCAST queueing are not on the tapes yet</div>';
   if(a[0]==="rol"&&tr&&tr.island){var r=tr.island;return '<div class="h">Island '+esc(tr.id)+" rollout ("+esc(r.placement||"placement n/a")+")</div>"+row("execution mode",r.exec_mode)+row("engines",r.engines)+row("rollout round",r.round)+
     row("serving",r.served?r.served.token:null)+row("groups / traj / tokens",[r.groups,r.traj,r.tokens].join(" / "))+row("rollout seconds",fin(r.rollout_s)?r.rollout_s.toFixed(1):null)+
@@ -610,7 +674,8 @@ function render(view,offline){
   var W=host.clientWidth||800;
   if(!L||L.shape!==shape()||vw(L.W)!==vw(W)||(host.contains&&!host.contains(L.svg)))build(host);
   var live=D.trainers.filter(function(x){return x.live}).length,rolls=D.trainers.filter(function(x){return x.island}).length;
-  $("topoNote").textContent="layout: "+D.kind.replace("_"," ")+" ("+D.layout_reason+") · "+(sft()?D.trainers.length+" learner island(s), no rollout":D.kind==="island"?rolls+" island(s): trainer + in-island rollout":(t.samplers||[]).filter(function(s){return s.live}).length+" live sampler(s)"+(D.fleet?" in "+D.fleet.islands.length+" island(s)":""))+" · "+live+"/"+D.M+(sft()?" learner(s)":" trainer(s)")+" live · syncer "+(D.shards.length>1?D.shards.length+" shards":"1 process")+
+  if(D.roster_spare)live=D.roster;  // an island out of the roster while a spare takes a lost node's place is not live
+  $("topoNote").textContent="layout: "+D.kind.replace("_"," ")+" ("+D.layout_reason+") · "+(sft()?D.trainers.length+" learner island(s), no rollout":D.kind==="island"?rolls+" island(s): trainer + in-island rollout":(t.samplers||[]).filter(function(s){return s.live}).length+" live sampler(s)"+(D.fleet?" in "+D.fleet.islands.length+" island(s)":""))+" · "+live+"/"+D.M+(sft()?" learner(s)":" trainer(s)")+" live"+(D.roster_spare?" ("+D.roster_spare+" replacing a lost node)":"")+" · syncer "+(D.shards.length>1?D.shards.length+" shards":"1 process")+
     (t.live?" · replayed "+DELAY_S+" s behind the newest tape data":" · offline snapshot");
   paint();kick();
   if(!bound){bound=true;host.addEventListener("mousemove",tip);host.addEventListener("mouseleave",function(){var tp=$("topoTip");if(tp)tp.style.display="none"});
@@ -623,7 +688,7 @@ function render(view,offline){
 function ago(t,tn){return fin(t)?dur(tn-t)+" ago":"n/a"}
 function kpis(view,kp){
   var t=view&&view.topology,d=t&&t.diloco;if(!d)return kp;U=YetoTopo.util;
-  var tn=(view.overview||{}).now||t.now,trs=d.trainers,isl=d.kind==="island",live=trs.filter(function(x){return x.live}).length,rolls=trs.filter(function(x){return x.island});
+  var tn=(view.overview||{}).now||t.now,trs=d.trainers,isl=d.kind==="island",live=d.roster_spare?d.roster:trs.filter(function(x){return x.live}).length,rolls=trs.filter(function(x){return x.island});
   var eng=rolls.reduce(function(a,x){return a+(x.island.engines||0)},0),pls={};rolls.forEach(function(x){if(x.island.placement)pls[x.island.placement]=1});
   var pl=Object.keys(pls),co=rolls.some(function(x){return x.island.colocated});
   var pct=function(x){return fin(x)?Math.round(100*x)+"%":"—"},sh=d.shards[0]||{},open=d.rounds.filter(function(r){return !r.ended}).length,pend=trs.filter(function(x){return x.live}).reduce(function(a,x){return a+x.pending_n},0);
@@ -652,5 +717,5 @@ function table(view){var d=view&&view.topology&&view.topology.diloco;if(!d)retur
       return (p?"↑ f"+p.frag+" t"+p.step+" · "+dur(tn-p.ts)+" ago":t.full_push?"↑ "+(t.full_push.count||0)+" PUSH last round, "+(t.full_push.total||0)+" in the run"+(t.full_push.overwritten?" · overwritten "+t.full_push.overwritten:""):"↑ none")+'<div class="ns">'+(b?"↓ f"+b.frag+" v"+b.v+" applied"+(fin(t.apply_s)?" · apply "+t.apply_s.toFixed(2)+"s":""):t.full_push?"↓ applied in the round (no per-fragment record yet)":"↓ no BCAST applied yet")+"</div>"+
         '<div class="ns">frag ['+(t.versions||[]).join(" ")+"]</div>"}}}
 
-return{render:render,kpis:kpis,table:table};
+return{render:render,kpis:kpis,table:table,whyNoSpare:whyNoSpare,healthWhy:healthWhy,spNow:spNow,overdueText:overdueText};
 })();

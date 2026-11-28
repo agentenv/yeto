@@ -2634,3 +2634,12 @@ def test_two_refused_quarantines_of_one_node_owe_both_stops(tmp_path):
     ops._flush_pending(rec)
     doc = spares.records.own_quarantine("b300-2")
     assert sorted(int(o["incarnation"]) for o in doc["owed"]) == [0, 1]
+
+
+def test_the_compiled_plan_keeps_the_controller_poll(fleet_run, files):  # noqa: F811
+    """The dashboard's unreported-wait threshold reads --controller-poll from the plan."""
+    cfg = _cfg(files)
+    cfg["fleet"]["trainer_argv"] = [*cfg["fleet"]["trainer_argv"], "--controller-poll", "1500"]
+    plan = fleet_run(cfg).fleet_plan()
+    assert plan.controller_poll_s == 1500.0 and plan.to_json()["roster"]["controller_poll_s"] == 1500.0
+    assert "controller_poll_s" not in fleet_run(_cfg(files)).fleet_plan().to_json()["roster"]

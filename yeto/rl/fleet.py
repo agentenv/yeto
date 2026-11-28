@@ -290,6 +290,7 @@ class FleetPlan:
     launch: str = LAUNCH_SYNCED_GROUP  # fleet.launch
     max_islands: int | None = None  # per_island: the syncer's learner id limit (fleet.max_islands)
     waiting_absent_after_s: float | None = None  # fleet.waiting_absent_after_s (None: the default)
+    controller_poll_s: float | None = None  # the trainer argv's --controller-poll (None: not given, 30 s)
 
     @property
     def absent_after_s(self) -> float:
@@ -309,7 +310,9 @@ class FleetPlan:
                "roster": {"fixed": self.fixed_roster, "min_islands": self.min_islands,
                           "lease_s": self.island_lease_s, "reason": self.roster_reason,
                           **({"waiting_absent_after_s": self.waiting_absent_after_s}
-                             if self.waiting_absent_after_s is not None else {})},
+                             if self.waiting_absent_after_s is not None else {}),
+                          **({"controller_poll_s": self.controller_poll_s}
+                             if self.controller_poll_s is not None else {})},
                "islands": [i.to_json() for i in self.islands]}
         if self.per_island:  # a synced-group plan stays byte for byte what it was
             out.update(launch=self.launch, max_islands=self.max_islands)
@@ -399,7 +402,8 @@ class FleetPlan:
                    min_islands=int(roster.get("min_islands") or DEFAULT_MIN_ISLANDS),
                    island_lease_s=roster.get("lease_s"), roster_reason=roster.get("reason"),
                    launch=str(doc.get("launch") or LAUNCH_SYNCED_GROUP), max_islands=doc.get("max_islands"),
-                   waiting_absent_after_s=roster.get("waiting_absent_after_s"))
+                   waiting_absent_after_s=roster.get("waiting_absent_after_s"),
+                   controller_poll_s=roster.get("controller_poll_s"))
 
 
 def plan_of(cfg: dict[str, Any]) -> FleetPlan | None:
@@ -568,6 +572,22 @@ def roster_options(cfg: dict[str, Any]) -> tuple[bool, int, float | None]:
             raise _err("fleet.island_lease_s is the syncer lease of the island pool; a fixed roster "
                        "(fleet.fixed_roster: true) has none: drop one of the two")
     return fixed, int(minimum), lease
+
+
+def controller_poll_s(argv: Any) -> float | None:
+    """The trainer argv's ``--controller-poll`` in seconds (None: not given; the page reads 30 s):
+    how often the island controller writes a waiting island's record at most late."""
+    args = [str(a) for a in (argv or ())]
+    for i, a in enumerate(args):
+        raw = args[i + 1] if a == "--controller-poll" and i + 1 < len(args) else (
+            a.split("=", 1)[1] if a.startswith("--controller-poll=") else None)
+        if raw is not None:
+            try:
+                v = float(raw)
+            except ValueError:
+                return None
+            return v if v > 0 else None
+    return None
 
 
 def waiting_absent_after_s(cfg: dict[str, Any]) -> float | None:
@@ -1362,7 +1382,8 @@ def compile_fleet(cfg: dict[str, Any], *, strict_breakers: bool = True) -> tuple
                      syncer_placement=syncer_placement(argv).to_json(),
                      fixed_roster=roster.fixed, min_islands=roster.min_islands,
                      island_lease_s=roster.lease_s, roster_reason=roster.reason,
-                     launch=launch, max_islands=max_islands, waiting_absent_after_s=waiting_absent_after_s(cfg))
+                     launch=launch, max_islands=max_islands, waiting_absent_after_s=waiting_absent_after_s(cfg),
+                     controller_poll_s=controller_poll_s(argv))
     out = copy.deepcopy({k: v for k, v in cfg.items() if k != PLAN_KEY})
     out["trainer"] = {"argv": argv, "usd_per_h": None if all(p is None for p in prices)
                       else float(sum(p or 0.0 for p in prices))}

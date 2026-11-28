@@ -169,6 +169,9 @@ table.nt tr:last-child td{border-bottom:0}table.nt th:first-child,table.nt td:fi
 .nn{display:flex;align-items:center;gap:6px;white-space:nowrap}.ns{font-size:11px;color:var(--ink2);margin-top:1px}
 .dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none}.dot.g{background:var(--good)}.dot.y{background:var(--warn)}.dot.r{background:var(--bad)}.dot.m{background:var(--ink2)}
 .sq{width:8px;height:8px;border-radius:2px;display:inline-block;flex:none}
+/* a resident ssh: island's spare / health reason (Islands now Nodes column): one line cut to the column's
+   width, the whole on hover; a lost node in red */
+table.nt th.spn,table.nt td.spn{text-align:left;width:14%;max-width:0}table.nt td.spn .ns{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ns.bd{color:var(--bad)}
 td.bar,th.bar{text-align:left!important;min-width:200px}.bl{font-size:11px;margin-bottom:3px}
 .bt{position:relative;height:5px;background:#3a3a40;border-radius:3px}.bf{height:5px;background:#facc15;border-radius:3px}.bf.over{background:var(--bad)}.bf.idle{background:var(--ink2)}.nt tr.off td{color:var(--ink2)}.nt tr.off .sq{opacity:.45}
 .bm{position:absolute;top:-2px;width:2px;height:9px;background:var(--ink)}

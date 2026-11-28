@@ -1197,11 +1197,13 @@ class SshIslandOps:
                    f"--spare-max-wait-s): {sp.wait_reason or 'no spare'}; the island stops")
             if not sp.limited:
                 sp.limited = True
-                sp.emit(isp.WAITING_SPARE, lost=lost, reason=why[:500], elapsed_s=round(waited), given_up=True)
+                sp.emit(isp.WAITING_SPARE, max_wait_s=float(sp.max_wait_s), lost=lost, reason=why[:500],
+                        elapsed_s=round(waited), given_up=True)
                 self.log(f"[launcher] CRITICAL: {rec.name}: {why}")
             raise RelaunchBlocked(why)
         if sp.report_due(wall):
-            sp.emit(isp.WAITING_SPARE, lost=lost, reason=str(sp.wait_reason or "")[:500], elapsed_s=round(waited),
+            sp.emit(isp.WAITING_SPARE, max_wait_s=float(sp.max_wait_s), lost=lost,
+                    reason=str(sp.wait_reason or "")[:500], elapsed_s=round(waited),
                     next_check_s=round(max(0.0, sp.next_check - now)))
         return not (sp.waiting and now < sp.next_check)
 
@@ -1237,7 +1239,8 @@ class SshIslandOps:
                     return _RECHECK  # type: ignore[return-value]
                 reason = pick.why_none()
                 if sp.wait(now, reason, wall=wall):
-                    sp.emit(isp.WAITING_SPARE, lost=sorted(self._lost_names(rec)), reason=reason[:500],
+                    sp.emit(isp.WAITING_SPARE, max_wait_s=float(sp.max_wait_s), lost=sorted(self._lost_names(rec)),
+                            reason=reason[:500],
                             group=pick.group, next_check_s=sp.wait_s, elapsed_s=round(sp.waited_s(wall)))
                 self.log(f"[launcher] {rec.name}: waiting for a spare node ({reason}); next check in "
                          f"{sp.wait_s:.0f} s")
@@ -1321,7 +1324,7 @@ class SshIslandOps:
                 "wait_reason": sp.wait_reason, "waiting_since": sp.wait_since if sp.waiting else None,
                 "replacements": len(sp.replacements),
                 "replacements_window": len(sp.recent(self.wall())), "max_replacements": int(sp.max_replacements),
-                "last_replaced_at": None if last is None else last.get("at")}
+                "last_replaced_at": None if last is None else last.get("at"), "max_wait_s": float(sp.max_wait_s)}
 
     def _node_log_tail(self, rec: _Island, reason: str, lines: int = 20) -> str:
         """The last lines of the failed rank's local log copy (rank > 0)."""
