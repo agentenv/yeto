@@ -1592,12 +1592,11 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
 
         # a node quarantined by any run of the inventory (a lost node, island_spares: its record
         # in the lease store, nodes/<name>/quarantine.json) is no candidate until release-node
-        from .node_quarantine import quarantine_note, shared_quarantines
+        from .node_quarantine import trainer_pick_excluded
 
-        docs = shared_quarantines(getattr(leases, "objects", None), by_name,
-                                  log=lambda line: print(line, file=sys.stderr, flush=True))
-        quarantined = set(docs)  # an unreadable record counts as one
-        note = quarantine_note(docs)
+        excluded, _docs, note = trainer_pick_excluded(  # an unreadable record counts as one
+            by_name, lease_objects=getattr(leases, "objects", None), run_objects=_run_store_objects(args),
+            assigned=leases.assigned, log=lambda line: print(line, file=sys.stderr, flush=True))
         if note:  # said once, and on every waiting line: not just "no free node"
             print(f"[launcher] node leases: island {key}: {note}", file=sys.stderr, flush=True)
 
@@ -1606,7 +1605,7 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
 
         try:
             picked = pick_nodes(list(trainers), need, leases, wait_s=limit, prefer=recorded, stop=stop,
-                                excluded=set(leases.assigned) | quarantined, place=place, log=log)
+                                excluded=excluded, place=place, log=log)
         except NodeLeased as error:
             raise SshIslandError(f"ssh: island {key}: {error}" + (f"; {note}" if note else "")) from None
     leases.picks[key] = [n.name for n in picked]
@@ -1616,6 +1615,21 @@ def lease_trainer_nodes(args: Any, trainers: Sequence[Node], need: int, leases: 
     except OSError as error:
         print(f"[launcher] node leases: the pick of {key} is not recorded ({error})", file=sys.stderr, flush=True)
     return tuple(picked)
+
+
+def _run_store_objects(args: Any) -> Any:
+    """The object API of the run's ``--rl-checkpoint-store``, where its islands quarantine
+    lost nodes (``fleet/nodes/<name>/quarantine.json``); None: none, or no object API here."""
+    store = getattr(args, "rl_checkpoint_store", None)
+    if not store:
+        return None
+    try:
+        from .island_lifecycle import store_objects  # noqa: PLC0415
+        from .store_env import store_client_environ  # noqa: PLC0415
+
+        return store_objects(store, store_client_environ(args))
+    except Exception:  # noqa: BLE001 - the lease store's records still hold every quarantine
+        return None
 
 
 _TRAINER_LEASES: dict[tuple[str, str], Any] = {}  # (lease store, holder): one per process and run

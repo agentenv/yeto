@@ -701,13 +701,42 @@ quarantined (exit 1). The launcher never releases a quarantined node on its own.
 
 The run's launcher may still be running during the release. It never writes a
 quarantine record back: a stop it confirmed is recorded as a marker of its own
-(`fleet/nodes/<name>/settled/`), and the release first writes `released.json`, with
-its time, next to the record in both stores. A stop the launcher confirms after the
-release therefore records nothing. The launcher reads the record again before each
-stop it retries, and skips a stop the record no longer owes. A confirmed stop removes
+(`fleet/nodes/<name>/settled/`), and once the marker is written the launcher reads the
+record again; if the record no longer lists that stop (the node was released, or
+quarantined anew), it removes the marker. A stop the launcher confirms during or after
+the release therefore leaves nothing behind. The release removes the record before
+the markers. No clocks are compared, so a launcher and a release-node whose clocks
+disagree behave the same. The release also leaves `fleet/nodes/<name>/released.json`
+(who released the node, and when) in the run store. The launcher reads the record
+again before each stop it retries, and skips a stop the record no longer owes. When the
+store cannot list the markers, every stop the record lists counts as owed (a stop is
+safe to run twice); when it cannot read the record, the launcher runs the stop, does not
+write over the record, and release-node exits 1 asking to be run again later. A confirmed stop removes
 its incarnation's pid file and leaves a `stopped` marker in its state dir, so a later
 stop of that incarnation (release-node, `yeto cleanup`) succeeds without signalling a
 process that reused the pid. A ledger row is closed only after its stop was confirmed.
+A candidate spare with open owed rows (it was released elsewhere) has their stops run
+during its checks, outside the launcher's lock and before any island starts on it; one
+whose stop fails, or whose run ledger cannot be read, is passed over this round, with
+the reason. One stop runs per node at a time. These stops run one after another and have
+no overall deadline: with 8 spares whose stops each fail after the kill grace, one check
+can take about half an hour (the other islands are not held up meanwhile).
+
+A spare whose start failed is given back to the pool only once its stop of that start is
+confirmed. If that stop is not confirmed, the spare is treated as a lost node: it is
+quarantined with the stop it owes, that stop gets a ledger row of its own (open until
+the stop is confirmed), its lease is kept, and no island of this or another run picks
+it until `yeto cluster release-node`. A failed start keeps its incarnation number: the
+next try starts the next one, after stopping the failed one on any node where its stop
+was not confirmed. `down()` also stops it there first; while that stop is not confirmed,
+the island keeps its leases, claims and ledger rows (down reports a release not
+confirmed).
+
+If the store refuses a quarantine record (a lost node, or such a spare), the launcher
+keeps the quarantine in memory: the node owes its stop in a ledger row of its own, this
+island does not pick it, the island's claim keeps the run's other islands off it, and
+every check (and `down()`) writes the record again. Once it is written, the claim is
+given up and the node is released as any quarantined node.
 
 ### Known limits
 
