@@ -100,6 +100,27 @@ def test_per_island_compiles_a_syncer_launch_and_one_launch_per_island(tmp_path)
     assert "--rl-island-release-every" in members[0]["argv"] and "--rl-island-release-every" not in members[1]["argv"]
 
 
+def test_the_straggler_cycles_in_fleet_trainer_argv_reach_every_island_launch(tmp_path):
+    """docs/OWN_CLUSTERS.md ("An island that lags") sets --rl-island-straggler-cycles in
+    fleet.trainer_argv: the compile writes no such flag, so it is taken there and every island
+    launch gets the same value; the --rl-island- flags the compile writes are still refused."""
+    doc = example_doc(tmp_path)
+    doc["fleet"]["trainer_argv"] += ["--rl-island-straggler-cycles", "2"]
+    path = tmp_path / "run.json"
+    path.write_text(json.dumps(doc))
+    cfg = up.load_config(str(path))
+    members = island_launches.trainer_members(cfg, fleet.plan_of(cfg))
+    assert len(members) == 2
+    for m in members:
+        a = m["argv"]
+        assert a.count("--rl-island-straggler-cycles") == 1 and a[a.index("--rl-island-straggler-cycles") + 1] == "2"
+        assert _prepared(island_launches.launch_argv(m, syncer={"addr": "10.0.0.1:29400"})).rl_island_straggler_cycles == 2
+    doc["fleet"]["trainer_argv"] += ["--rl-island-release-every", "2"]
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="--rl-island-release-every is written by the fleet compile"):
+        up.load_config(str(path))
+
+
 def test_max_islands_below_the_declared_islands_is_refused(tmp_path):
     with pytest.raises(ValueError, match="max_islands"):
         example(tmp_path, max_islands=1)
