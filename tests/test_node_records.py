@@ -311,3 +311,32 @@ def _continue(objects, cfg, member, profile, code, spec, env) -> None:
     handoff = [json.loads(line) for line in tape.read_text().splitlines() if '"rl_sampler_handoff"' in line]
     assert handoff and handoff[0]["predecessor"] == "a" and handoff[0]["start_rollout_id"] >= 2
     assert handoff[0]["predecessor_groups"] >= 4
+
+
+def test_a_loop_beat_that_read_before_left_never_writes_over_its_leave_reason(tmp_path):
+    """The heartbeat loop reads the report's state, then writes it. A loop beat that read
+    before left() (no leave_reason yet) must not write after left()'s beat: the last
+    heartbeat keeps the leave reason (test_fence_and_handoff_act_the_same_on_a_manual_machine)."""
+    objects = DirectoryObjectStore(tmp_path)
+    in_beat, go = threading.Event(), threading.Event()
+    report = SamplerNodeReport(NodeReporter(objects, "t-race", 1, base={"sampler": "a"}), metrics=lambda port: {})
+
+    def health():  # the loop beat, stopped after it read leave_reason and before it writes
+        if threading.current_thread().name == "loop":
+            in_beat.set()
+            assert go.wait(10)
+        return None
+
+    report.health = health
+    loop = threading.Thread(target=report._beat, name="loop")
+    loop.start()
+    assert in_beat.wait(10)
+    leaving = threading.Thread(target=report.left, args=("FENCED",), name="left")
+    leaving.start()
+    leaving.join(timeout=0.5)  # without the lock it is done here; with it, it waits for the loop beat
+    go.set()
+    loop.join(10)
+    leaving.join(10)
+    assert not loop.is_alive() and not leaving.is_alive()
+    beat = node_status(objects, "t-race", generation=1).heartbeat
+    assert beat["leave_reason"] == "FENCED" and beat["stage"] == "left"

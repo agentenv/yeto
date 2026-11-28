@@ -139,6 +139,12 @@ class SamplerNodeReport:
         return out
 
     def _beat(self, **extra: Any) -> None:
+        # read and written under one lock: a loop beat that read the state before left() must
+        # not write after left()'s beat (a final heartbeat without its leave_reason)
+        with self._lock:
+            self._beat_locked(**extra)
+
+    def _beat_locked(self, **extra: Any) -> None:
         fields: dict[str, Any] = {}
         if self.progress is not None:
             try:
@@ -158,8 +164,7 @@ class SamplerNodeReport:
         health = self.health()
         if health is not None:
             fields["health"] = health
-        with self._lock:
-            self.reporter.heartbeat(self.stage, **{**fields, **extra})
+        self.reporter.heartbeat(self.stage, **{**fields, **extra})
 
     def health(self) -> dict[str, Any] | None:
         """The runtime's newest health check (None: no health file named, or none readable yet)."""
@@ -200,8 +205,10 @@ class SamplerNodeReport:
         self._beat()
 
     def left(self, reason: str, **fields: Any) -> None:
-        self.leave_reason, self.stage = str(reason), "left"
-        self._beat(**{k: v for k, v in fields.items() if isinstance(v, (str, int, float, bool, type(None)))})
+        with self._lock:
+            self.leave_reason, self.stage = str(reason), "left"
+            self._beat_locked(**{k: v for k, v in fields.items()
+                                 if isinstance(v, (str, int, float, bool, type(None)))})
 
     def stop(self) -> None:
         self._stop.set()
