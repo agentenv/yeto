@@ -64,8 +64,17 @@ def resolve(environ: Mapping[str, str] | None = None, *, owner_home: str | None 
     first = shutil.which("cargo", path=path)
     if _runs(first, env, run):
         return Toolchain(cargo=first)
-    home = owner_home if owner_home is not None else _owner_home()
     tried = f"cargo on PATH: {first or 'none'}"
+    # rustup's default install puts cargo in $CARGO_HOME/bin (default $HOME/.cargo/bin), which a login
+    # shell adds to PATH but a systemd unit's or cron's PATH does not
+    own_bin = Path(env.get("CARGO_HOME") or Path(env.get("HOME") or "~").expanduser() / ".cargo") / "bin"
+    if first is None and (own_bin / "cargo").exists():
+        extra = {"PATH": f"{path}{os.pathsep}{own_bin}" if path else str(own_bin)}
+        cargo = str(own_bin / "cargo")
+        if _runs(cargo, {**env, **extra}, run):
+            return Toolchain(env=extra, cargo=cargo)
+        tried += f"; {cargo}: does not run"
+    home = owner_home if owner_home is not None else _owner_home()
     if home and Path(home) != Path(env.get("HOME", "")):
         extra: dict[str, str] = {}
         if "RUSTUP_HOME" not in env and (Path(home) / ".rustup").is_dir():

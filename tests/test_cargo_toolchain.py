@@ -65,6 +65,21 @@ def test_a_variable_the_caller_set_is_kept(tmp_path):
     assert not tc.ok and tc.env == {} and f"RUSTUP_HOME={str(empty)!r}" in tc.reason
 
 
+def test_the_owners_own_home_with_cargo_off_path_is_found(tmp_path):
+    """A systemd unit (the on-site syncer service) runs as the owner with HOME the owner's own and
+    PATH without rustup's ~/.cargo/bin: the toolchain there is used, not given up on."""
+    owner = _owner(tmp_path)
+    tc = cargo_toolchain.resolve({"HOME": str(owner), "PATH": "/usr/bin:/bin"}, owner_home=str(owner))
+    assert tc.ok and tc.cargo == str(owner / ".cargo/bin/cargo")
+    assert tc.env == {"PATH": f"/usr/bin:/bin{os.pathsep}{owner / '.cargo/bin'}"}
+
+
+def test_the_build_names_the_reason_without_a_toolchain(monkeypatch):
+    monkeypatch.setattr(cargo_toolchain, "resolve", lambda: cargo_toolchain.Toolchain(reason="no Rust toolchain runs cargo (x)"))
+    with pytest.raises(RuntimeError, match="cannot build the syncer: no Rust toolchain runs cargo"):
+        syncer.build_syncer_binary()
+
+
 def test_no_toolchain_says_why(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()

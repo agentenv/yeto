@@ -35,6 +35,8 @@ def build_syncer_binary() -> Path:
     # An isolated HOME has no toolchain of its own: the caller's (cargo_toolchain.resolve).
     # With a toolchain in the environment the call is as before.
     toolchain = cargo_toolchain.resolve()
+    if not toolchain.ok:
+        raise RuntimeError(f"cannot build the syncer: {toolchain.reason}")
     extra = {"env": {**os.environ, **toolchain.env}} if toolchain.env else {}
     subprocess.run(["cargo", "build", "--release"], cwd=REPO_ROOT / "syncer", check=True, **extra)
     return binary
