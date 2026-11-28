@@ -159,9 +159,10 @@ def _entry_argv(run: str, env: dict, module: str = MILES_ENTRY) -> list[str]:
     return [env.get(t[1:], t) if t.startswith("$") and t[1:].isidentifier() else t for t in tokens]
 
 
-def _island_parses(run: str, env: dict, monkeypatch, capsys) -> types.SimpleNamespace:
+def _island_parses(run: str, env: dict, monkeypatch, capsys, tmp_path) -> types.SimpleNamespace:
     """The island's parser and its compat group, with only ``env`` of what this process
-    has from conftest (the island runs elsewhere)."""
+    has from conftest (the island runs elsewhere). Its event tape (``~/yeto-output`` of
+    the island's node) is written under ``tmp_path``, not this host's home."""
     from yeto.hw.catalog import COMPAT_GROUP_ENV
     from yeto.rl.adapters.miles import island_entry
 
@@ -174,6 +175,8 @@ def _island_parses(run: str, env: dict, monkeypatch, capsys) -> types.SimpleName
         args = island_entry.parse_args(argv)
     except SystemExit as stop:
         raise AssertionError(f"the island entry refused its argv: {capsys.readouterr().err[-2000:]}") from stop
+    if getattr(args, "event_tape", None):
+        args.event_tape = str(tmp_path / Path(args.event_tape).name)
     group = island_entry._island_compat_group(args)
     return types.SimpleNamespace(args=args, group=group, argv=argv)
 
@@ -199,7 +202,7 @@ def test_the_customer_modal_island_entry_parses_with_only_its_own_environment(tm
     spec, task = _island_task(args)
     assert spec.cloud == "modal"
     cfg = build_modal_island_config(args, spec, 0, task, "10.0.0.1:29400")
-    island = _island_parses(cfg.run_script, {**cfg.envs, "LEARNER_ID": "0"}, monkeypatch, capsys)
+    island = _island_parses(cfg.run_script, {**cfg.envs, "LEARNER_ID": "0"}, monkeypatch, capsys, tmp_path)
     assert island.group == "nvidia-b300"
     assert island.args.rl_single_island_no_sync and island.args.inner_lr == float(args.inner_lr)
 
@@ -218,7 +221,7 @@ def test_the_customer_ssh_island_entry_parses_with_only_the_node_environment(cas
     env = sti.node_env(ssh_spec, 0, {})
     script = sti.start_script(ssh_spec, 0, env, sti.remote_paths("r", "island-0", 0), container="c0")
     assert "export YETO_RL_COMPAT_GROUP=nvidia-b300" in script  # the node's job gets it
-    island = _island_parses(ssh_spec.run_script, {**env, "LEARNER_ID": "0"}, monkeypatch, capsys)
+    island = _island_parses(ssh_spec.run_script, {**env, "LEARNER_ID": "0"}, monkeypatch, capsys, tmp_path)
     assert island.group == "nvidia-b300"
 
 
@@ -343,7 +346,7 @@ def test_each_fleet_island_launch_passes_with_production_defaults(example, tmp_p
         spec, task = _island_task(args)
         modal = build_modal_island_config(args, spec, 0, task, "10.0.0.1:29400")
         parsed = _island_parses(modal.run_script, {**modal.envs, "LEARNER_ID": str(island.learner)},
-                                monkeypatch, capsys)
+                                monkeypatch, capsys, tmp_path)
         assert int(parsed.args.learner_id) == island.learner
         assert parsed.group == "nvidia-h100"
     assert asked["hub"]
@@ -368,7 +371,7 @@ def test_a_sky_island_entry_parses_with_only_the_task_environment(tmp_path, monk
     assert spec.cloud == "aws"
     envs = {**task.envs, **{k: str(v) for k, v in (getattr(task, "secrets", None) or {}).items()}}
     parsed = _island_parses(task.run, {**envs, "LEARNER_ID": "0", "SYNCER_ADDR": "10.0.0.1:29400"},
-                            monkeypatch, capsys)
+                            monkeypatch, capsys, tmp_path)
     assert parsed.group == "nvidia-h100"
 
 

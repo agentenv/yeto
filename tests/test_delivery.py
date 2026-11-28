@@ -157,3 +157,13 @@ def test_self_terminate_detaches_sky_down(monkeypatch):
     )
     delivery.self_terminate("run-head")
     assert popens == [(["sky", "down", "-y", "run-head"], True)]
+
+
+def test_the_local_output_dir_is_home_yeto_output_unless_the_variable_names_one(tmp_path, monkeypatch):
+    from yeto import delivery
+
+    monkeypatch.delenv(delivery.LOCAL_OUTPUT_ENV, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert delivery.local_output_dir() == str(tmp_path / "home" / "yeto-output")
+    monkeypatch.setenv(delivery.LOCAL_OUTPUT_ENV, str(tmp_path / "out"))
+    assert delivery.local_output_dir() == str(tmp_path / "out")

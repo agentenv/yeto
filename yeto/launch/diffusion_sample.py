@@ -249,7 +249,7 @@ def run_diffusion_sample(args) -> int:
     local_dest = (
         os.path.expanduser(output)
         if output and delivery.kind(output) == "local"
-        else os.path.expanduser(DIFFUSION_SAMPLE_OUTPUT_DIR)
+        else delivery.local_output_dir()
     )
     try:
         print(f"[launcher] launching diffusion sampler on {spec} as {cluster}")

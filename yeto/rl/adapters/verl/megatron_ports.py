@@ -319,7 +319,9 @@ def remote_hf_export(worker_dict, config: dict, rollout_id: int, policy_version:
 
     worker = _inner_worker(worker_dict)
     rank = int(torch.distributed.get_rank()) if torch.distributed.is_initialized() else 0
-    staging = Path(tempfile.gettempdir()) / HF_STAGING
+    # the island's own staging directory (MegatronHfExports names it): every rank of this
+    # island joins it, another island process on the host has another one
+    staging = Path(tempfile.gettempdir()) / str(config.get("staging") or HF_STAGING)
 
     def write(_rollout_id: int, directory: Path) -> None:
         _save_hf(worker, Path(directory), model_path, rank)
@@ -481,10 +483,14 @@ class MegatronHfExports:
     export runs on the trainer workers (:func:`remote_hf_export`)."""
 
     def __init__(self, island: MegatronIsland, config: dict):
+        import uuid
+
         from yeto.rl.engine.hf_export import ExportRounds
 
         self.island = island
-        self.config = dict(config)
+        # One staging directory name per island driver, the same on every trainer rank
+        # (they all write into it): two islands on one host stage apart.
+        self.config = {**dict(config), "staging": f"{HF_STAGING}-{uuid.uuid4().hex[:16]}"}
         self.rounds = ExportRounds.parse(self.config["rounds"])
 
     def due(self, rollout_id: int, *, final: bool) -> bool:

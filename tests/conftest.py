@@ -171,23 +171,24 @@ class _YetoHomeGuard:
 
 
 def _report_yeto_home(session) -> None:
-    """End of the outermost session: a refused write to the real ~/.yeto fails it; an entry
-    there that is new or changed since the start (a child process, or another process on
-    this machine) is a warning."""
+    """End of the outermost session: a refused write to the real ~/.yeto or ~/yeto-output
+    (in this process, or a child named it) fails it; an entry there that is new or changed
+    since the start (a child process, or another process on this machine) is a warning."""
     errors, warnings = _home_guard.session_report()
     tr = session.config.pluginmanager.get_plugin("terminalreporter")
     write = (lambda line: tr.write_line(line)) if tr is not None else print
     if tr is not None and (errors or warnings):
         tr.ensure_newline()
     if warnings:
-        write(f"WARNING real ~/.yeto changed during the session ({len(warnings)} entries; not from this "
-              "process: a child process, or another run / test session on this machine):")
+        write(f"WARNING real ~/.yeto or ~/yeto-output changed during the session ({len(warnings)} entries; "
+              "not from this process: a child process, or another run / test session on this machine):")
         for line in warnings[:_home_guard.WARN_LIST_MAX]:
             write(f"  {line}")
         if len(warnings) > _home_guard.WARN_LIST_MAX:
             write(f"  ... {len(warnings) - _home_guard.WARN_LIST_MAX} more")
     if errors:
-        write(f"ERROR tests tried to write the real ~/.yeto ({len(errors)} refused; tests/yeto_home_guard.py):")
+        write(f"ERROR tests tried to write the real ~/.yeto or ~/yeto-output ({len(errors)} refused; "
+              "tests/yeto_home_guard.py):")
         for line in errors[:_home_guard.WARN_LIST_MAX]:
             write(f"  {line}")
         if len(errors) > _home_guard.WARN_LIST_MAX:
@@ -204,6 +205,20 @@ def _island_hmac_key_does_not_leak():
     _reset_island_hmac_key()
     yield
     _reset_island_hmac_key()
+
+
+@_pytest.fixture(scope="session", autouse=True)
+def _local_output_in_tmp(tmp_path_factory):
+    """The launcher's copy of a run's output on this machine (``yeto.delivery.local_output_dir``,
+    ``~/yeto-output`` by default) goes to one directory of the session, for every test: a
+    launch a test runs never creates or writes the real ~/yeto-output (yeto_home_guard). A
+    test of the default deletes the variable with monkeypatch."""
+    from yeto.delivery import LOCAL_OUTPUT_ENV
+
+    patch = _pytest.MonkeyPatch()
+    patch.setenv(LOCAL_OUTPUT_ENV, str(tmp_path_factory.mktemp("yeto-output")))
+    yield
+    patch.undo()
 
 
 @_pytest.fixture(autouse=True)

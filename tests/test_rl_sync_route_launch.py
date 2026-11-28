@@ -35,6 +35,7 @@ from test_rl_full_parameter_async import (
     syncer_binary,  # noqa: F401
 )
 from test_rl_k31_synced_cpu import STORE, _island_hmac_key, _selection, _tis_spec  # noqa: F401
+from yeto.launch.dispense_evidence import DISPENSE_LOG
 
 LAYOUT = "e" * 64
 TWO = "modal:2xh100,modal:2xh100"
@@ -213,7 +214,8 @@ def _routed_syncer(binary, tmp_path, *, total_steps: int):
     port = free_port()
     command = (command.replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
-               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
+               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl"))
+               .replace(DISPENSE_LOG, str(tmp_path / "task-dispense.jsonl")))
     log = tmp_path / "syncer.log"
     with log.open("w") as out:
         process = group_popen(["bash", "-c", command], stdout=out, stderr=subprocess.STDOUT, text=True)

@@ -26,6 +26,7 @@ from test_verl_full_parameter_sync import (  # noqa: F401 - syncer_binary is a f
     SHAPES, _layout, _plan, _run_island, needs_cargo, syncer_binary,
 )
 from test_rl_algorithm_provenance import _launcher_args
+from yeto.launch.dispense_evidence import DISPENSE_LOG
 from yeto.final_marker import read_checkpoint_global_step
 from yeto.rl.engine.full_parameter_stream import LAZY_CAPTURE_ENV
 
@@ -49,7 +50,8 @@ def _syncer_command(binary, tmp_path, *, fragments: int, rounds: int, port: int)
     command = launcher.role_syncer_commands(args, 2, binary=str(binary))["actor"]
     command = (command.replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
-               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
+               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl"))
+               .replace(DISPENSE_LOG, str(tmp_path / "task-dispense.jsonl")))
     assert "--resume" in command and "--checkpoint-every 1" in command
     return command, launcher.rl_syncer_profile(args, 2).sha256
 

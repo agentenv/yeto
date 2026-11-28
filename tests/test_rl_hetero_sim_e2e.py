@@ -22,6 +22,7 @@ from free_ports import free_port
 from process_groups import group_popen, kill_group
 from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
 from test_rl_algorithm_provenance import _launcher_args as _provenance_launcher_args
+from yeto.launch.dispense_evidence import DISPENSE_LOG
 from yeto.rl.adapters.miles import buffer_rollout as br
 from yeto.rl.adapters.sampler_engines.fake import (FAKE_IDENTITY, FakeEngine, _unit, fake_identity,
                                                    fake_sampler_fleet)
@@ -133,7 +134,8 @@ def _start_decoupled_syncer(binary, workdir, islands, total_steps, *options):
     port = free_port()
     command = (command.replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(workdir / "state.ckpt"))
-               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(workdir / "tape.jsonl")))
+               .replace(launcher.RL_SYNCER_EVENT_TAPE, str(workdir / "tape.jsonl"))
+               .replace(DISPENSE_LOG, str(workdir / "task-dispense.jsonl")))
     log = (workdir / "syncer.log").open("w")
     process = group_popen(["bash", "-c", command], stdout=log, stderr=subprocess.STDOUT, text=True)
     return process, port, layout, command

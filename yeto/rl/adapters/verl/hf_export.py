@@ -55,7 +55,6 @@ from yeto.rl.engine.hf_export import COMPLETE_MARKER
 
 from .hf_checkpoint_keys import FLOAT_TAGS, BaseExport, base_export, checkpoint_tensor
 
-HF_EXPORT_STAGING = "yeto-hf-export"  # under the system temp dir (local disk)
 SHARD_BYTES = 4 << 30  # export-dtype bytes per safetensors file
 INDEX_FILE = "model.safetensors.index.json"
 # Weight files of the source checkpoint (never copied: the export writes its own).
@@ -282,11 +281,8 @@ def hf_round_exports(config: Mapping[str, Any], *, group: Any, model_path: str |
                      environ: Mapping[str, str] | None = None):
     """The island's ``HfRoundExports`` from the plan's ``hf_exports`` section
     (``{"rounds", "store"}``, :func:`.full_parameter_stream.full_parameter_extras`)."""
-    import tempfile
-
-    from yeto.rl.engine.hf_export import ExportRounds, HfRoundExports
+    from yeto.rl.engine.hf_export import ExportRounds, HfRoundExports, private_staging
     from yeto.rl.engine.resume import store_for
 
     return HfRoundExports(ExportRounds.parse(config["rounds"]), store_for(config["store"], environ=environ),
-                          VerlHfWriter(group, model_path, run=run),
-                          staging=Path(tempfile.gettempdir()) / HF_EXPORT_STAGING)
+                          VerlHfWriter(group, model_path, run=run), staging=private_staging())

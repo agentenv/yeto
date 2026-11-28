@@ -1546,7 +1546,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         local_dest = (
             os.path.expanduser(output)
             if output and delivery.kind(output) == "local" and not head_mode
-            else os.path.expanduser("~/yeto-output")
+            else delivery.local_output_dir()
         )
         os.makedirs(local_dest, exist_ok=True)
         if rl_mode and head_mode:

@@ -20,6 +20,15 @@ import subprocess
 from pathlib import Path
 
 
+LOCAL_OUTPUT_ENV = "YETO_LOCAL_OUTPUT_DIR"
+
+
+def local_output_dir() -> str:
+    """This machine's copy of a run's output when ``--output`` names no local path:
+    ``~/yeto-output``, or the directory ``YETO_LOCAL_OUTPUT_DIR`` names."""
+    return os.path.expanduser(os.environ.get(LOCAL_OUTPUT_ENV) or "~/yeto-output")
+
+
 def kind(output: str | None) -> str:
     """"none" | "local" | "hf" | "store" (any sky-supported object store)."""
     if not output:

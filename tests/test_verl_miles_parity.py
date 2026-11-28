@@ -21,6 +21,7 @@ import hashlib
 import json
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -322,7 +323,16 @@ def test_the_writer_exports_every_parameter_in_the_model_dtype(tmp_path, model_d
     assert (out / "model.safetensors").exists() is False
 
 
-def test_one_file_when_the_model_fits_and_the_round_lands_in_the_store(tmp_path, model_dir):
+@pytest.fixture
+def system_tmp(tmp_path, monkeypatch):
+    """The system temp dir of this test (the exports stage under it), not the host's."""
+    root = tmp_path / "system-tmp"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    return root
+
+
+def test_one_file_when_the_model_fits_and_the_round_lands_in_the_store(tmp_path, model_dir, system_tmp):
     from safetensors.torch import load_file
 
     from yeto.rl.adapters.verl.hf_export import hf_round_exports
@@ -332,6 +342,7 @@ def test_one_file_when_the_model_fits_and_the_round_lands_in_the_store(tmp_path,
     store = tmp_path / "store" / "hf" / "island0"
     exports = hf_round_exports({"rounds": "final", "store": str(store)}, group=group, model_path=model_dir,
                                run=vfs._LoopRunner().run, environ={})
+    assert exports.staging.parent == system_tmp and exports.staging.name.startswith("yeto-hf-export-")
     assert exports.due(5, final=True) and not exports.due(5, final=False)
     record = exports.export(5, policy_version=6, final=True)
     assert record["ok"] and record["round"] == 6, record
@@ -339,6 +350,59 @@ def test_one_file_when_the_model_fits_and_the_round_lands_in_the_store(tmp_path,
     assert (landed / ".complete").is_file() and not (landed / INDEX_FILE).exists()
     assert sorted(load_file(str(landed / "model.safetensors"))) == sorted(SHAPES)
     assert json.loads((store / "final.json").read_text())["round"] == 6
+    assert list(exports.staging.iterdir()) == []  # the staging copy is deleted
+
+
+class _MeetingGroup:
+    """An island's group whose first parameter export waits until the other island's
+    export got there too: both write the same round at the same time."""
+
+    def __init__(self, group, barrier):
+        self._group, self._barrier, self._met = group, barrier, False
+
+    def export_parameters(self, names):
+        if not self._met:
+            self._met = True
+            self._barrier.wait(timeout=30)
+        return self._group.export_parameters(names)
+
+    def __getattr__(self, name):
+        return getattr(self._group, name)
+
+
+def test_two_islands_on_one_host_export_the_same_round_at_the_same_time(tmp_path, model_dir, system_tmp):
+    """Two island processes on one host (or two test sessions) share the system temp dir.
+    Each stages in its own directory, so neither export removes the other's files while
+    it writes them."""
+    from safetensors.torch import load_file
+
+    from yeto.rl.adapters.verl.hf_export import hf_round_exports
+
+    barrier = threading.Barrier(2)
+    models = [_Model(seed=5), _Model(seed=6)]
+    exports = [hf_round_exports({"rounds": "final", "store": str(tmp_path / "store" / "hf" / f"island{i}")},
+                                group=_MeetingGroup(vfs.VerlFullParameterGroup(_Island(model)), barrier),
+                                model_path=model_dir, run=vfs._LoopRunner().run, environ={})
+               for i, model in enumerate(models)]
+    records = [None, None]
+
+    def export(i):
+        records[i] = exports[i].export(5, policy_version=6, final=True)
+
+    threads = [threading.Thread(target=export, args=(i,)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not barrier.broken and [t.is_alive() for t in threads] == [False, False]
+    for i, model in enumerate(models):
+        assert records[i]["ok"], records[i]
+        landed = tmp_path / "store" / "hf" / f"island{i}" / "round-6"
+        loaded = load_file(str(landed / "model.safetensors"))
+        for name, value in model.values().items():
+            assert torch.equal(loaded[name], value.to(torch.bfloat16)), (i, name)
+        assert list(exports[i].staging.iterdir()) == []
+    assert exports[0].staging != exports[1].staging and {e.staging.parent for e in exports} == {system_tmp}
 
 
 def test_the_export_dtype_follows_the_config(tmp_path):
