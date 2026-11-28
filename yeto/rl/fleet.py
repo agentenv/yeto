@@ -159,6 +159,9 @@ SAMPLE_WAIT_FLAG = "--rl-sample-wait-s"
 # flags the compile writes; fleet.trainer_argv must not set them
 GENERATED_FLAGS = ("--gpu", "--rl-sample-role", "--rl-sampler-follow", "--rl-buffer-shards")
 GENERATED_PREFIX = "--rl-island-"
+# --rl-island- flags the fleet compile never writes: the fleet's shared value, set once in fleet.trainer_argv
+# so that every island launch gets it (docs/OWN_CLUSTERS.md, "An island that lags")
+SHARED_ISLAND_FLAGS = ("--rl-island-straggler-cycles",)
 EXCLUSIVE_KEYS = ("trainer", "pool", "samplers")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 # an island's samplers entry of a Miles sampler island of the fleet's launch (module doc)
@@ -538,7 +541,7 @@ def _fleet_section(cfg: dict[str, Any]) -> tuple[list[str], str]:
     argv = _string_list(section["trainer_argv"], "fleet.trainer_argv")
     for arg in argv:
         flag = _flag(arg)
-        if flag in GENERATED_FLAGS or flag.startswith(GENERATED_PREFIX):
+        if flag in GENERATED_FLAGS or (flag.startswith(GENERATED_PREFIX) and flag not in SHARED_ISLAND_FLAGS):
             raise _err(f"fleet.trainer_argv: {flag} is written by the fleet compile (from each island's trainer "
                        "and pools); drop it")
         if flag == "--rl-single-island-no-sync":
