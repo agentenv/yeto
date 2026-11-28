@@ -777,7 +777,9 @@ FAKE_AS_ROOT=1 exec "$@"
 
 FAKE_PS = """#!/bin/sh
 # The node's process table (ps -eo pid=,args=): the rows of $FAKE_STATE_DIR/ps.txt and the
-# probe itself (the shell that runs this ps), never the processes of the test host.
+# probe itself (the shell that runs this ps), never the processes of the test host. Any
+# other columns or selection (only its own session, say) is not the scan the node runs.
+[ "$*" = "-eo pid=,args=" ] || {{ echo "fake ps: not the node's process table: $*" >&2; exit 2; }}
 [ -f "$FAKE_STATE_DIR/ps.txt" ] && cat "$FAKE_STATE_DIR/ps.txt"
 exec {ps} -o pid=,args= -p "$PPID"
 """
