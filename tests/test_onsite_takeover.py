@@ -404,6 +404,7 @@ def test_the_new_host_reattaches_to_the_running_ssh_incarnation_from_its_store_r
     cluster, spec = _ssh_fixture(tmp_path, monkeypatch)
     seeded, journal, args = _seed(tmp_path, monkeypatch)
     assert seeded == ["isl"] and not getattr(args, "_reattach_only", None)
+    assert args._taken_over == {"isl"}  # a quarantined node does not restart it at the start (M-C)
     again = _again(cluster, spec, journal, tmp_path)
     assert again.start("isl") == 0
     assert cluster.count("start") == 3 and cluster.count("follow", 0) == 3  # asked by ssh, followed: no 2nd copy
