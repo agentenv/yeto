@@ -50,6 +50,7 @@ from typing import Any
 
 INVENTORY_FLAG = "--rl-node-inventory"
 ISLAND_ENV_FLAG = "--island-env"
+CHECKPOINT_STORE_FLAG = "--rl-checkpoint-store"
 HEALTH_TIMEOUT_S = 120.0  # the SSH call of one check (the check bounds itself at node_health.HEALTH_LIMIT_S)
 # the previous check of a node that has none: an XID cursor of no boot, so every hardware
 # XID of this boot is new (``CudaChecker`` counts the XIDs after a reboot the same way)
@@ -94,6 +95,17 @@ def inventory_of(argv: Sequence[str]) -> str | None:
         if arg == INVENTORY_FLAG and i + 1 < len(argv):
             found = str(argv[i + 1])
         elif str(arg).startswith(INVENTORY_FLAG + "="):
+            found = str(arg).split("=", 1)[1]
+    return found
+
+
+def flag_of(argv: Sequence[str], flag: str) -> str | None:
+    """The last value of ``flag`` in a launch argv (the island's own wins over the fleet's)."""
+    found = None
+    for i, arg in enumerate(argv):
+        if arg == flag and i + 1 < len(argv):
+            found = str(argv[i + 1])
+        elif str(arg).startswith(flag + "="):
             found = str(arg).split("=", 1)[1]
     return found
 
@@ -227,16 +239,29 @@ def _hcas(node: Any, env: Mapping[str, str] | None = None) -> list[str]:
 
 def _absolute(result: Any, *, fm_read: bool = True) -> list[str]:
     """What a first check cannot see as a change but a node joining must not have: a
-    volatile uncorrectable ECC count above 0, an NVSwitch node whose fabric manager is not
-    active (the checker's facts)."""
+    volatile uncorrectable ECC count above 0, a fabric manager that one check alone judges
+    bad (``fabric_manager_absolute``)."""
     facts = result.facts or {}
     bus = dict(facts.get("bus") or {})
     out = [f"GPU {bus.get(key, key)} uncorrectable ECC {count} (volatile)"
            for key, count in sorted((facts.get("ecc") or {}).items(), key=lambda kv: str(bus.get(kv[0], kv[0])))
            if count is not None and int(count) > 0]
-    if fm_read and facts.get("fabric") not in (None, "none") and facts.get("fm") != "active":  # NVSwitch: the FM runs
-        out.append(f"nvidia-fabricmanager {facts.get('fm') or 'not running'} on an NVSwitch node")
+    if fm_read:  # the fabric manager by one check alone (yeto.hw.node_health.fabric_manager_absolute)
+        verdict, detail = _fm_absolute(result)
+        if verdict == "bad":
+            out.append(detail)
     return out
+
+
+def _fm_absolute(result: Any) -> tuple[str, str]:
+    """``fabric_manager_absolute`` over a check's facts; a checker without fabric manager
+    facts (no CUDA GPU) is ok."""
+    from yeto.hw.node_health import fabric_manager_absolute  # noqa: PLC0415
+
+    facts = result.facts or {}
+    if "fm_state" not in facts and "nvswitch" not in facts:
+        return "ok", "no fabric manager facts"
+    return fabric_manager_absolute(facts)
 
 
 def _unread_parts(text: str, result: Any) -> list[str]:
@@ -309,8 +334,12 @@ def read_health(node: Any, *, multi: bool, ssh: Any, env: Mapping[str, str] | No
                           + ("; ".join(result.reasons) or "no reason given") + ")")
     ok = result.ok(multi)
     unread = _unread_parts(text, result)
+    if not unread:  # a part that timed out says it already
+        verdict, detail = _fm_absolute(result)
+        if verdict == "unread":
+            unread.append(f"fabric manager not judged: {detail}")
     reasons = (list(result.job_reasons(multi)) if ok is False else []) + _absolute(
-        result, fm_read=not any("nvidia-fabricmanager" in part for part in unread))
+        result, fm_read=not any("nvidia-fabricmanager" in part or "fabric manager" in part for part in unread))
     if reasons:
         hint = XID_HINT if any(_HARDWARE_XID.search(r) for r in reasons) else ""
         return NodeHealth("bad", "is not healthy: " + "; ".join(dict.fromkeys(reasons)) + hint)
@@ -429,13 +458,69 @@ def check_leases(nodes: Sequence[Any], *, lease_store: str | None, run_id: str, 
             out.refusals.append(f"node {node.name} {why}")
 
 
+# -- quarantine -----------------------------------------------------------------------------------
+
+def open_run_store(store: str | None, environ: Mapping[str, str] | None = None) -> Any:
+    """The object API of the run's ``--rl-checkpoint-store`` (where its islands quarantine lost
+    nodes, ``fleet/nodes/<name>/quarantine.json``), listed once; raises when it does not open."""
+    from .island_lifecycle import store_objects  # noqa: PLC0415
+    from .node_quarantine import RUN_NODES_DIR  # noqa: PLC0415
+
+    objects = store_objects(store, environ)
+    if objects is None:
+        raise ValueError(f"no object API for {store}")
+    list(objects.list(f"{RUN_NODES_DIR}/"))
+    return objects
+
+
+def quarantined(nodes: Sequence[Any], *, lease_store: str | None, checkpoint_store: str | None, force: bool,
+                out: JoinCheck, store_env: Mapping[str, str] | None = None,
+                run_objects: Any = None, lease_objects: Any = None) -> dict[str, str] | None:
+    """The nodes the launch's trainer pick leaves out as quarantined (``node_quarantine.
+    trainer_pick_excluded``, as the launch calls it): name -> why. Without a checkpoint store
+    the run store's records are not checked (a note). A run store that does not open refuses
+    without ``lease_store`` (``force``: a WARNING); with one, it is a WARNING (the lease store
+    holds every run's quarantines too). None: the check refused."""
+    from .node_quarantine import describe, release_how, trainer_pick_excluded  # noqa: PLC0415
+
+    if not checkpoint_store:
+        out.notes.append("no checkpoint store: the run's quarantined nodes (fleet/nodes/<name>/quarantine.json) "
+                         "are not checked")
+    elif run_objects is None:
+        try:
+            run_objects = open_run_store(checkpoint_store, store_env)
+        except Exception as error:  # noqa: BLE001 - named in the refusal or warning
+            what = f"run store {checkpoint_store} does not open ({type(error).__name__}: {error})"[:300]
+            if lease_store:
+                out.warnings.append(f"{what}: this run's quarantines are not checked, the lease store's are")
+            elif force:
+                out.warnings.append(f"{what}: --force: the run's quarantined nodes are not checked")
+            else:
+                out.refusals.append(f"{what}: the run's quarantined nodes cannot be checked (--force: a WARNING)")
+                return None
+            run_objects = None
+    if lease_store and lease_objects is None:
+        try:
+            from .node_lease import open_objects  # noqa: PLC0415
+
+            lease_objects = open_objects(str(lease_store), store_env)
+        except Exception as error:  # noqa: BLE001 - the lease store that does not open refuses
+            out.refusals.append(f"lease store {lease_store}: {type(error).__name__}: {error}"[:300])
+            return None
+    _, docs, _ = trainer_pick_excluded([n.name for n in nodes], lease_objects=lease_objects,
+                                       run_objects=run_objects)
+    return {name: f"is quarantined: {describe(name, doc)}; once it is fixed, {release_how(name)}"
+            for name, doc in docs.items()}
+
+
 # -- the check ------------------------------------------------------------------------------------
 
 def check(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str | None = None,
           taken: Mapping[str, str] | None = None, islands: Mapping[str, str] | None = None, ssh: Any = None,
           inventory: Sequence[Any] | None = None, env: Mapping[str, str] | None = None, force: bool = False,
           health: Mapping[str, NodeHealth] | None = None,
-          aliases: Mapping[str, tuple[str, str]] | None = None) -> JoinCheck:
+          aliases: Mapping[str, tuple[str, str]] | None = None, checkpoint_store: str | None = None,
+          store_env: Mapping[str, str] | None = None) -> JoinCheck:
     """The checks of a new island's trainer ``nodes`` (module doc). ``taken``: a node key
     (:func:`node_keys`) -> the fleet island whose inventory lists it (an inventory without
     ``lease_store``); ``islands``: the fleet's other islands' launch prefix -> island (whose
@@ -445,28 +530,36 @@ def check(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str | No
     nodes of the islands whose inventory has no ``lease_store`` or another one (their leases
     are not in this store); ``aliases``: a machine key (SSH target / address) -> (island, its
     node name) of the islands on the same ``lease_store`` (a lease is taken by node name: the
-    same machine under another name is not exclusive)."""
+    same machine under another name is not exclusive); ``checkpoint_store``: the run's
+    ``--rl-checkpoint-store`` (its quarantine records, :func:`quarantined`)."""
     out = JoinCheck()
     if ssh is None:
         from .ssh_trainer_island import SshOps  # noqa: PLC0415
 
         ssh = SshOps()
     every = list(nodes if inventory is None else inventory)
+    shut = quarantined(nodes, lease_store=lease_store, checkpoint_store=checkpoint_store, force=force, out=out,
+                       store_env=store_env)
+    if shut is None:
+        out.nodes = []
+        return out
     if not lease_store:
         _check_listed(nodes, need=need, taken=taken or {}, ssh=ssh, env=env, force=force, health=health, out=out,
-                      inventory=every)
+                      inventory=every, shut=shut)
     else:
         _check_leased(nodes, need=need, run_id=run_id, lease_store=lease_store, islands=islands or {}, ssh=ssh,
                       env=env, force=force, health=health, out=out, inventory=every, taken=taken or {},
-                      aliases=aliases or {})
+                      aliases=aliases or {}, shut=shut)
     if out.refusals:
         out.nodes = []
     return out
 
 
 def _check_listed(nodes: Sequence[Any], *, need: int, taken: Mapping[str, str], ssh: Any, env: Any, force: bool,
-                  health: Any, out: JoinCheck, inventory: Sequence[Any]) -> None:
-    """An inventory without ``lease_store``: its trainer nodes are the island's."""
+                  health: Any, out: JoinCheck, inventory: Sequence[Any],
+                  shut: Mapping[str, str] | None = None) -> None:
+    """An inventory without ``lease_store``: its trainer nodes are the island's (a
+    quarantined one refuses)."""
     if len(nodes) != need:
         out.refusals.append(f"the island needs {need} trainer node(s); its inventory lists {len(nodes)} "
                             f"{[n.name for n in nodes]}")
@@ -475,6 +568,8 @@ def _check_listed(nodes: Sequence[Any], *, need: int, taken: Mapping[str, str], 
         owner = next((taken[k] for k in sorted(node_keys(node)) if k in taken), None)
         if owner:
             out.refusals.append(f"node {node.name} is island {owner}'s")
+        if node.name in (shut or {}):
+            out.refusals.append(f"node {node.name} {shut[node.name]}")
     check_health(nodes, multi=need > 1, ssh=ssh, out=out, env=env, cache=health, inventory=inventory)
     for node in nodes:
         problem = _health_problem(node.name, out.health[node.name], force=force, out=out)
@@ -513,7 +608,8 @@ def _foreign(node: Any, taken: Mapping[str, str],
 
 def _check_leased(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: str, islands: Mapping[str, str],
                   ssh: Any, env: Any, force: bool, health: Any, out: JoinCheck, inventory: Sequence[Any],
-                  taken: Mapping[str, str], aliases: Mapping[str, tuple[str, str]]) -> None:
+                  taken: Mapping[str, str], aliases: Mapping[str, tuple[str, str]],
+                  shut: Mapping[str, str] | None = None) -> None:
     """An inventory with ``lease_store``: ``need`` of its trainer nodes, as the launch picks them.
 
     The launch (``lease_trainer_nodes`` / ``pick_nodes``) runs under a new holder (a new
@@ -531,6 +627,7 @@ def _check_leased(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: 
     if holders is None:
         return
     held = {n.name: why for n in nodes if (why := lease_problem(holders[n.name], run_id=run_id, islands=islands))}
+    held.update({name: why for name, why in (shut or {}).items() if name not in held})  # the pick leaves them out
     foreign = {n.name: f for n in nodes if n.name not in held and (f := _foreign(n, taken, aliases))}
     launch = [n for n in nodes if n.name not in held]  # what the launch may take: free or the earlier incarnation's
     usable = [n for n in launch if n.name not in foreign]
@@ -588,13 +685,14 @@ def _check_leased(nodes: Sequence[Any], *, need: int, run_id: str, lease_store: 
 def taken_nodes(doc: Mapping[str, Any], *, other_than: str, fleet_argv: Sequence[str],
                 lease_store: str | None = None) -> dict[str, str]:
     """Node key (:func:`node_keys`) -> island, for the ``ssh:`` trainer islands of the desired
-    state other than ``other_than`` (their inventories' trainer nodes). ``lease_store``: the
+    state other than ``other_than`` (their inventories' trainer and spare nodes). ``lease_store``: the
     new island's; an island whose inventory has the same one is left out (its leases say
     which nodes it holds)."""
     from yeto.launch.pool import desired as dz  # noqa: PLC0415
 
     from .node_inventory import island_nodes as role_nodes  # noqa: PLC0415
     from .node_inventory import load_inventory  # noqa: PLC0415
+    from .node_quarantine import SPARE_ROLE  # noqa: PLC0415
 
     out: dict[str, str] = {}
     for name, member in dz.trainers(dict(doc)).items():
@@ -609,7 +707,8 @@ def taken_nodes(doc: Mapping[str, Any], *, other_than: str, fleet_argv: Sequence
             raise ValueError(f"island {name}'s inventory {path} does not read ({error})") from None
         if lease_store is not None and store_key(getattr(listed, "lease_store", None)) == store_key(lease_store):
             continue
-        for node in role_nodes(listed, "trainer"):
+        spares = [n for n in listed if SPARE_ROLE in (n.roles or ())]  # a lost node's replacement (island_spares)
+        for node in [*role_nodes(listed, "trainer"), *spares]:
             for key in node_keys(node):
                 out.setdefault(key, name)
     return out
@@ -681,7 +780,8 @@ def check_member(member: Mapping[str, Any], doc: Mapping[str, Any], *, fleet_arg
                    taken=taken_nodes(doc, other_than=name, fleet_argv=fleet_argv, lease_store=store),
                    aliases=aliases_of(doc, other_than=name, fleet_argv=fleet_argv, lease_store=store),
                    islands=fleet_prefixes(doc, other_than=name), ssh=ssh, inventory=inventory,
-                   env=island_env_of(argv), force=force, health=health)
+                   env=island_env_of(argv), force=force, health=health,
+                   checkpoint_store=flag_of(argv, CHECKPOINT_STORE_FLAG), store_env=store_env_of(argv))
     shown = set(seen)
     for note in result.notes:
         if note not in shown:
@@ -690,6 +790,18 @@ def check_member(member: Mapping[str, Any], doc: Mapping[str, Any], *, fleet_arg
         if warning not in shown:
             say(f"fleet island: WARNING: island {name}: {warning}")
     return result
+
+
+def store_env_of(argv: Sequence[str]) -> dict[str, str]:
+    """The store client environment of a launch argv (``--rl-object-store-endpoint`` /
+    ``--rl-object-store-profile``), as the launch opens its run store."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from .store_env import store_client_environ  # noqa: PLC0415
+
+    return store_client_environ(SimpleNamespace(
+        rl_object_store_endpoint=flag_of(argv, "--rl-object-store-endpoint"),
+        rl_object_store_profile=flag_of(argv, "--rl-object-store-profile")))
 
 
 def names(nodes: Iterable[str]) -> str:

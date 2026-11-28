@@ -19,7 +19,7 @@ import subprocess
 import pytest
 from test_cluster_preflight import ibstat_text  # tests/ is on sys.path
 from test_fleet_island_changes import fleet_store  # noqa: F401 - fixture
-from test_node_health import FABRIC_OK, gpus_text, node_text, xid_line, xid_text
+from test_node_health import FABRIC_OK, fm_text, gpus_text, node_text, xid_line, xid_text
 
 from yeto.hw import node_health
 from yeto.launch import island_join as ij
@@ -32,7 +32,9 @@ GPU = "ssh:2x8xb300@bm"
 HCA = "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
 XID_79 = node_text(xid=(0, xid_text(xid_line(812.5, 5, 79))))  # in the kernel log of this boot already
 ECC_5 = node_text(gpus=(0, gpus_text(ecc={2: 5})))
-FM_DOWN = node_text(fabricmanager=(3, "inactive"))  # NVSwitch GPUs (fabric Completed), its fabric manager down
+FM_DOWN = fm_text("inactive", load="loaded", dev=8)  # NVSwitch devices on the node, its fabric manager down
+FM_OFF_HOST = fm_text("inactive", load="loaded", entered=0)  # HGX B300 names only, unit never active: off-host
+FM_UNDETERMINED = fm_text("inactive", load="loaded", entered=None)  # names only, its active time unread
 PCIE = node_text(fabricmanager=(3, "inactive"), fabric=(0, "    Fabric\n        State : N/A\n        Status : N/A\n" * 8))
 SLOW = node_text(ibstat=(0, ibstat_text(rate=100)))
 PORT_DOWN = node_text(ibstat=(0, ibstat_text(down=(3,))))
@@ -98,7 +100,7 @@ def test_healthy_nodes_join_with_one_bounded_check_each(tmp_path):
 @pytest.mark.parametrize(("text", "why"), [
     (XID_79, "GPU 5 XID 79" + ij.XID_HINT),
     (ECC_5, "GPU 2 uncorrectable ECC 5 (volatile)"),
-    (FM_DOWN, "nvidia-fabricmanager inactive on an NVSwitch node"),
+    (FM_DOWN, "nvidia-fabricmanager inactive (NVSwitch present)"),
     (node_text(gpus=(0, gpus_text(n=7))), "7 of 8 GPUs visible"),
 ])
 def test_a_fault_a_first_check_cannot_see_as_a_change_refuses(tmp_path, text, why):
@@ -111,6 +113,17 @@ def test_a_fault_a_first_check_cannot_see_as_a_change_refuses(tmp_path, text, wh
 
 def test_a_pcie_node_without_nvswitch_joins_with_its_fabric_manager_inactive(tmp_path):
     assert _check(_nodes(tmp_path), Ssh({"b300-4": PCIE, "b300-5": PCIE})).ok
+
+
+def test_the_fabric_manager_is_judged_by_node_health_s_one_check_rule(tmp_path):
+    """``fabric_manager_absolute``: a fabric managed off-host joins; one it cannot judge does
+    not read (refused, --force warns)."""
+    assert _check(_nodes(tmp_path), Ssh({"b300-4": FM_OFF_HOST, "b300-5": FM_OFF_HOST})).ok
+    out = _check(_nodes(tmp_path), Ssh({"b300-5": FM_UNDETERMINED}))
+    assert out.refusals == ["node b300-5: its health check did not read (fabric manager not judged: "
+                            "nvidia-fabricmanager inactive, fabric Completed, its active time unread)"]
+    forced = _check(_nodes(tmp_path), Ssh({"b300-5": FM_UNDETERMINED}), force=True)
+    assert forced.ok and len(forced.warnings) == 1 and "--force" in forced.warnings[0]
 
 
 def test_a_port_down_refuses_a_multi_node_island_only(tmp_path):
@@ -173,7 +186,8 @@ def test_the_real_null_checker_is_a_note_with_no_ssh_call(tmp_path):
     ssh = Ssh()
     out = _check(nodes, ssh)
     assert out.ok and ssh.calls == []
-    assert out.notes[:2] == [f"node {n}: no health check for device family no-such-family" for n in ("b300-4", "b300-5")]
+    notes = [n for n in out.notes if not n.startswith("no checkpoint store:")]
+    assert notes[:2] == [f"node {n}: no health check for device family no-such-family" for n in ("b300-4", "b300-5")]
 
 
 def test_a_node_with_its_health_check_off_is_noted_and_not_called(tmp_path):
@@ -778,3 +792,66 @@ def test_join_prev_counts_every_xid_of_this_boot(tmp_path):
     assert checker.parse(XID_79, [], None).ok_single is True  # the checker alone: history
     assert checker.parse(XID_79, [], dict(ij.JOIN_PREV)).ok_single is False
     assert FABRIC_OK in node_text()
+
+
+# -- quarantine: the run store's and the lease store's records (island_spares) --------------------
+
+def _quarantine(root, name, *, under="fleet/nodes", island="north"):
+    path = root / under / name / "quarantine.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"run": "r", "island": island, "reason": "lost: no SSH answer"}))
+
+
+def test_a_node_quarantined_in_the_run_store_refuses(tmp_path):
+    run = tmp_path / "run"
+    _quarantine(run, "b300-5")
+    out = _check(_nodes(tmp_path), Ssh(), checkpoint_store=str(run))
+    assert len(out.refusals) == 1 and out.refusals[0].startswith(
+        "node b300-5 is quarantined: b300-5 by run r island north (lost: no SSH answer)")
+    assert "release-node b300-5" in out.refusals[0] and out.nodes == []
+    assert _check(_nodes(tmp_path), Ssh(), checkpoint_store=str(tmp_path / "other")).ok
+
+
+def test_without_a_checkpoint_store_the_quarantine_check_is_skipped(tmp_path):
+    out = _check(_nodes(tmp_path), Ssh())
+    assert out.ok and any(n.startswith("no checkpoint store:") for n in out.notes)
+
+
+def test_a_run_store_that_does_not_open_refuses_without_lease_store_force_warns(tmp_path):
+    out = _check(_nodes(tmp_path), Ssh(), checkpoint_store="modal://vol")
+    assert out.refusals == ["run store modal://vol does not open (ValueError: no object API for modal://vol): "
+                            "the run's quarantined nodes cannot be checked (--force: a WARNING)"]
+    forced = _check(_nodes(tmp_path), Ssh(), checkpoint_store="modal://vol", force=True)
+    assert forced.ok and forced.warnings == [
+        "run store modal://vol does not open (ValueError: no object API for modal://vol): --force: the run's "
+        "quarantined nodes are not checked"]
+
+
+def test_with_lease_store_a_run_store_that_does_not_open_warns_and_shared_quarantines_hold(tmp_path):
+    store = str(tmp_path / "leases")
+    nodes = load_inventory(_inventory(tmp_path / "shared.yaml", ["b300-3", "b300-4", "b300-5"], lease_store=store))
+    out = _check(nodes, Ssh(), lease_store=store, checkpoint_store="modal://vol")
+    assert out.ok and out.nodes == ["b300-3", "b300-4"]
+    assert out.warnings == ["run store modal://vol does not open (ValueError: no object API for modal://vol): "
+                            "this run's quarantines are not checked, the lease store's are"]
+    _quarantine(tmp_path / "leases", "b300-3", under="nodes")
+    out = _check(nodes, Ssh(), lease_store=store, checkpoint_store="modal://vol")
+    assert out.ok and out.nodes == ["b300-4", "b300-5"]  # the launch's pick leaves it out
+    assert any(n.startswith("left out: node b300-3 is quarantined") for n in out.notes)
+    _quarantine(tmp_path / "leases", "b300-4", under="nodes")
+    out = _check(nodes, Ssh(), lease_store=store, checkpoint_store="modal://vol")
+    assert not out.ok and "node b300-4 is quarantined" in "; ".join(out.refusals)
+
+
+def test_another_island_s_spare_node_is_its_own(tmp_path):
+    """A spare (role trainer-spare, island_spares) takes a lost node's place: another island
+    may not take it as a trainer node."""
+    other = tmp_path / "north.yaml"
+    text = _inventory(other, ["b300-1", "b300-2", "b300-4"]).read_text()
+    other.write_text(text.replace("name: b300-4,", "name: b300-4, roles: [trainer-spare],"))
+    doc = {"members": [{"kind": "trainer", "name": "north", "gpu": GPU,
+                        "argv": ["--rl-node-inventory", str(other)]}]}
+    taken = ij.taken_nodes(doc, other_than="south", fleet_argv=[])
+    assert taken["name:b300-4"] == "north"
+    out = _check(_nodes(tmp_path), Ssh(), taken=taken)
+    assert out.refusals == ["node b300-4 is island north's"]

@@ -53,6 +53,11 @@ def fleet_store(tmp_path, monkeypatch):
     store.apply({"members": [*island_launches.trainer_members(cfg, plan), *pools]}, expect=0)
     fake_run = types.SimpleNamespace(cfg=cfg, _objects=lambda: objects)
     monkeypatch.setattr("yeto.launch.pool.fleet_cli._store", lambda config: (fake_run, store))
+    from yeto.launch import island_join  # an ssh: island's join check reads quarantines in the run store
+
+    real_open = island_join.open_run_store
+    monkeypatch.setattr(island_join, "open_run_store", lambda uri, environ=None: objects if str(uri).startswith(
+        "s3://") else real_open(uri, environ))
     samplers = tmp_path / "north.samplers.json"
     samplers.write_text(json.dumps([dict(cfg["islands"][1]["samplers"][0], name="sglang-north")]))
 

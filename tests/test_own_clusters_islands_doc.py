@@ -106,6 +106,7 @@ def test_the_section_states_the_join_rules_of_the_code():
 
     assert f"({DEFAULT_NODE_LEASE_WAIT_S:.0f} s by default)" in text
     for word in ("`min_ib_gbps`", "`--force`", "`--island-env`", "`<prefix>-m<n>/trainer`", "exit 3",
-                 "yeto fleet island move --gpu ssh:", "`adm` or `systemd-journal`", "NVL72", "same fabric group",
+                 "yeto fleet island move --gpu ssh:", "`adm` or `systemd-journal`", "fabric_manager_absolute", "same fabric group",
+                 "trainer-spare", "fleet/nodes/<name>/quarantine.json",
                  "`--rl-node-lease-wait-s`"):
         assert word in text, word
