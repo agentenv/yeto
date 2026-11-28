@@ -41,8 +41,13 @@ from . import sft as sft_mod
 from . import topology as topology_mod
 from .sources import COST_EVENTS_FILE, up_state_stops
 
+# a trainer island the syncer has merged no push of for N merge cycles, and its end (or why
+# that cannot be watched): fleet.jsonl events that are not lifecycle states
+STRAGGLER_EVENTS = frozenset({"island_straggler", "island_straggler_cleared", "island_straggler_unavailable",
+                              "island_straggler_available"})
+STRAGGLER_TS = "straggler"  # fleet_shape_ts key: the time of the island's newest straggler mark event
 FLEET_EVENTS = frozenset({"island_launch", "island_ready", "island_lost", "island_stop", "island_done",
-                          "cost_tick"})
+                          "cost_tick"}) | STRAGGLER_EVENTS
 POLICY_SWEEP_LEDGER_EVENT = "policy_sweep_ledger"
 # the syncer's own records (``kind``, no ``step``): its config, round opens / timeouts and
 # the island connections it saw; a ``learner_id`` there is not a sign of life of that island
@@ -677,6 +682,7 @@ class Reducer:
                 "gpu": rec.get("gpu") or row.get("gpu"),
                 "usd_per_h": rec.get("usd_per_h") or row.get("usd_per_h"), "incarnation": rec.get("incarnation"),
                 "relaunches": rec.get("relaunches"), "moves": row.get("moves") or [], "name": row.get("name"),
+                "straggler": rec.get("straggler"),  # the controller's straggler mark, None once cleared
                 "prefix": rec.get("prefix") or row.get("prefix")}
 
     def _membership_left(self, isl: dict, now: float | None = None) -> dict | None:
@@ -1478,6 +1484,17 @@ class Reducer:
                 isl[key] = r[field]
                 if eff is not None:
                     shape_ts[key] = eff
+        if event in STRAGGLER_EVENTS:  # a mark on the card, not a lifecycle state: never in the replay
+            # the newest mark event by its source's time decides (eff: one source in write order,
+            # its clock stepped back included); an older one arriving later never undoes it
+            if event in ("island_straggler", "island_straggler_cleared") and (
+                    eff is None or eff >= shape_ts.get(STRAGGLER_TS, eff)):
+                if eff is not None:
+                    shape_ts[STRAGGLER_TS] = eff
+                isl["straggler"] = ({**{k: r.get(k) for k in ("action", "missed_cycles", "newest_step",
+                                                             "last_merged_step")}, "at": ts}
+                                    if event == "island_straggler" else None)
+            return
         if eff is not None:
             bisect.insort(life, (eff, self.event_seq, event, ts))
             if older:  # folded in time order again: the newest record still decides the state
@@ -1750,6 +1767,7 @@ class Reducer:
             # a sampler waiting at its backlog cap writes nothing until the trainers read
             "waiting_backlog": waiting, "waiting_reason": waiting_why or ("backlog full" if waiting else None),
             "role": role, "left": left, "stale_after_s": _r(warn_s), "island_now": inow,
+            "straggler": isl.get("straggler"),
             # a sampler whose pool removed or retired it but that still runs (draining, or its
             # machine not released): shown running, alerted past alerts.POOL_REMOVED_GRACE_S
             "pool_removed": ({**pool_removed, "since_s": _r(now - pool_removed["ts"])

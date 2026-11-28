@@ -930,3 +930,167 @@ example:
 When it falls back to the default, the line names the closest records and why
 they do not fit. A configuration that names its image prints nothing new and runs
 exactly as before.
+
+## Islands that lag, join or leave
+
+A fleet of `ssh:` trainer islands on your own machines uses the same fleet mechanisms as any
+other island fleet ([FLEET_TRAINER_ISLANDS.md](FLEET_TRAINER_ISLANDS.md)). This section
+covers what is specific to `ssh:` islands: how a slow or stuck island is reported, and what
+happens when one leaves.
+
+### An island that lags
+
+An island can fall behind or stop pushing while its process and its connection stay up: a
+slow node, a hung collective, a trainer that waits on something. The syncer does not wait
+for it. When a round's quorum deadline passes, the syncer merges the pushes that arrived and
+records the silent island as absent. Later rounds do not wait for it either. Once the island
+delivers again, its late push is carried into a later round with a discount, or refused when
+it lags past `--rl-sync-max-base-lag`. The island then catches up to the newest merged
+weights and answers rounds again. The other islands keep merging the whole time.
+
+The island's fleet controller reports such an island. It reads the syncer's merges, and
+when none of the island's pushes was merged in `N` merge cycles it writes:
+
+- `island_straggler` in the launch's `fleet.jsonl`, with `missed_cycles`, `merges`,
+  `fragments`, `last_merged_step`, `newest_step`, `absent` and `action`;
+- the same fields under `straggler` in the island's record (`fleet/trainers/<k>/state.json`,
+  shown by `yeto island status`).
+
+A merge cycle is one outer step of every fragment, so with 4 fragments and `N = 3` the
+island is reported after 12 merges without it. A push the syncer refused does not count as
+merged. Counting starts when the island joins the syncer:
+
+- A launch counts only what the syncer records after the launch started: it reads each
+  syncer tape from its end at the launch's start. A relaunched or moved island's new launch
+  never counts the merges an earlier launch of it missed. No clock is compared for that,
+  so a syncer host whose clock is off is counted as usual. Only a syncer tape found later
+  is read from its start; there, records stamped more than 10 minutes before the launch
+  started are skipped (the clocks may differ up to 10 minutes before it does).
+- An island also counts as joined once a merge lists it `absent`: the syncer expects it. An
+  island that a restarted launcher adopted joined before that launcher started, and is
+  counted this way.
+- Only the island's controller restarts the count. When the island stops running (its
+  controller relaunches it, or it is stopped), its count starts again once it runs again: at
+  its next join after a relaunch, so the time it takes to start is not counted. The same
+  launch back from recovering is counted again at once.
+- A new launch catches up before it pushes: a large model's catch-up can take many merge
+  cycles. A new launch is an island relaunched by its controller (on new machines, on a spare
+  node, after a move) or a new island whose join the controller read. It is not counted until
+  its first push is merged, for at most the controller's recover timeout
+  (`--recover-timeout`, counted from when the controller holds the new launch running; 20
+  minutes when relaunch is off: `--no-island-relaunch` or `--modal-retries 0`). Once
+  a push of it is merged, it is counted as usual. If none is merged by the end of the recover
+  timeout, it is counted from then on and reported `N` merge cycles later; its report's
+  `reason` says that the catch-up grace ran out. An island that a restarted launcher adopted
+  is not a new launch and has no grace. Each launch gets the grace once; a reconnect's join
+  neither starts it nor extends it.
+- A reconnect of the same trainer, or a syncer that takes over, writes a new join to the
+  syncer's tape. That join keeps the count and the report: an island whose link keeps
+  dropping and that never delivers is still reported.
+
+The report is written once per stretch. `island_straggler_cleared` closes the stretch, and its
+`reason` says why: a push of the island is merged again, it is `recovering`, it was
+`relaunched` (running again as a new launch), it was stopped or removed (island STOP), it
+is no longer running, or `controller restarted`. The last one is written by a launcher that
+starts, or adopts the island, while its record still holds a report from an earlier
+launcher; the new launcher then judges the island again. If that record does not read, it
+is read again at each poll until it does. The record's `straggler` is set back to `null` at
+the same time.
+
+The dashboard shows both events in its event stream. While the island is reported, its
+trainer card carries a `straggler` badge and its row in "Islands now" says `straggler`.
+
+`action` is what the controller does about it. The default is `wait`: nothing is stopped or
+relaunched, because the syncer already merges without the island. A lost or unhealthy node
+is handled by the island's own launch, not by this report.
+
+An island that loses a node (see [Spare nodes](#spare-nodes)) is recovering, not running. The
+poll that finds the loss clears its report (`recovering`), and the island is not counted while
+it waits for a spare. On the spare it is a new launch: it is not counted until its first push
+is merged, for at most its recover timeout from when it runs on the spare, then as above.
+
+Set `N` in `fleet.trainer_argv`, so every island launch gets the same value:
+
+```json
+"trainer_argv": ["...", "--rl-island-straggler-cycles", "3"]
+```
+
+`3` is the default. `0` turns the report off. The value must be a whole number of 0 or more;
+`yeto launch --dry-run` refuses anything else.
+
+The controller reads the syncer's tape in one of two places:
+
+- from the syncer's own file, when the syncer runs on the same host as the controller
+  (`--controller head`);
+- otherwise, in a fleet launched island by island (`fleet.launch: per_island`), from its
+  copy in the run store, `tapes/syncer/<incarnation>/<seq>.jsonl`. The syncer launch
+  uploads it every 30 s (`YETO_RL_TAPE_UPLOAD_S`) when `--rl-checkpoint-store` is an
+  `s3://` store. Each island launch reads it every 30 s. Its first read keeps the end of
+  every syncer incarnation there. No incarnation is picked as the current one: each read
+  lists the known incarnations after the last chunk it read (those that grew last time
+  first, the others in turn), and reads the new chunks of those that grew, one chunk of each
+  before a second of any. A restarted syncer is read whatever its step or term.
+
+How late the report can be, with the store copy:
+
+- Normally one upload interval and one read interval after the merges it counts (about
+  1 minute).
+- One read takes at most 16 chunks, about 8 minutes of tape. A backlog left by a store
+  outage is read in about one fifteenth of the outage's length: 1 hour of outage is caught
+  up in about 4 minutes.
+- A restarted syncer writes to a new incarnation. The launch finds it at its next full
+  listing, which comes every 10 reads (about 5 minutes), and reads it from its start. Each
+  read lists the incarnations it knows within half of its 5 s budget; with many stopped
+  syncers, they take turns.
+- If the first read fails, or does not finish within its budget, the next reads go on with
+  it. Until it is done nothing is read, and the syncer's earlier records are never read.
+
+Known limits of the store copy:
+
+- A join written before the first read finished is not read. A new island that joined then
+  is counted like an adopted one: from the first merge that lists it absent, with no
+  catch-up grace.
+- An uploader that rewrites a chunk it already uploaded (a retry under the same key) adds
+  lines the launch does not read when it already read that chunk.
+- Only a syncer incarnation found after the first read is filtered by its clock (records
+  stamped more than 10 minutes before the launch started are skipped). If that syncer's
+  clock runs more than 10 minutes behind, its records are skipped, and the launch reports
+  the tape silent (`island_straggler_unavailable`) instead of the stragglers.
+
+When the report cannot work, the launch prints `island straggler watch off` and writes
+`island_straggler_unavailable` once, with the `reason`, in `fleet.jsonl`. Nothing is
+reported then, and training is not affected. This happens:
+
+- with `--rl-island-straggler-cycles 0`;
+- in a per-island fleet whose run store is not an object store, or with the upload off
+  (`YETO_RL_TAPE_UPLOAD_S=0`);
+- in a fleet launched as one launch (`fleet.launch: synced_group`) whose syncer runs on a VM
+  of its own (any `--controller` other than `head`). That syncer's tape stays on its VM:
+  the launch does not upload it to the run store, so the controller has nothing to read.
+  Run the syncer on the controller's host (`--controller head`) or launch the fleet island
+  by island to get the report.
+- when the launch reads no syncer record for two of the syncer's longest rounds plus two
+  upload intervals, and at least 5 minutes (the store copy is missing or stale). A round
+  ends at `--rl-sync-soft-deadline-s` only once enough pushes arrived; otherwise it runs to
+  its quorum timeout (`--rl-elastic-quorum-timeout-s`, else the syncer's default quorum
+  timeout of 900 s). The longest round is the larger of the two: with the defaults, the
+  window is 31 minutes. This is counted only after the first record about
+  the launch's islands, so a fleet whose trainers are still starting is not reported. Once
+  records are read again, the launch writes `island_straggler_available`.
+
+### Removing an island
+
+```bash
+yeto fleet island remove --config run.json --name north --dry-run
+yeto fleet island remove --config run.json --name north
+```
+
+The trainer worker writes the island's STOP. The island's controller drains it, stops the
+trainer on every node (and checks that each container is gone), and records the island
+`done`. Its incarnation is closed in the run's resource ledger. The syncer sees the island's
+connection drop. The round it was asked for waits one island lease and then merges over the
+islands left. The island's nodes are free for another island afterwards.
+
+In a fleet launched as one launch (`fleet.launch: synced_group`), islands cannot be added
+while it trains. One island can be stopped and started again by its learner id, for example
+island 1 with `yeto island stop 1 --config run.json` and `yeto island start 1 --config run.json`.

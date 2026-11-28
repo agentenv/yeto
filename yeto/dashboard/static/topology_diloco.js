@@ -68,6 +68,8 @@ function islandNow(tr){var n=tr.island_now;if(!n)return null;
   return {stopped:["stopped: "+(n.reason||""),"mute"],done:["finished","mute"],down:["down (run down)","mute"],removed:["removed from the fleet","mute"],
     abandoned:["abandoned: "+(n.reason||"given up"),"bad"],failed:["failed: "+(n.reason||"")+(n.detail?" · "+n.detail:""),"bad"],
     moving:[(n.reason||"moving").replace(/^moving to /,"moving → ")+(n.detail&&/^new launch ordering/.test(n.detail)?" · ordering":""),"warn"],starting:[(n.reason||"starting")+(fin(n.incarnation)?" · incarnation "+n.incarnation:""),"warn"]}[n.state]||null}
+// the controller's straggler mark: its record's when the island has one, else its last fleet.jsonl event
+function straggler(tr){var n=tr.island_now;return (n&&"straggler" in n?n.straggler:tr.straggler)||null}
 function trainerState(tr,tn,isl){
   var age=fin(tr.phase_since)?tn-tr.phase_since:null,a=age!=null?" · "+dur(age):"",ph=tr.phase_raw,co=isl&&isl.colocated;
   var inow=islandNow(tr);if(inow)return inow;
@@ -355,6 +357,7 @@ function paint(){
     tc.step.textContent=(fin(tr.step)?"step "+tr.step:fleet()?"not trained yet":"step —")+(sft()&&fin(tr.steps_total)?" / "+tr.steps_total:"");tc.outer.textContent=fin(tr.outer)?(L.W<640?"sweep ":"outer sweep ")+tr.outer:"";  // complete sweeps it applied (hover: the card's tip)
     fitText(tc.ph,st[0],tc.phw);tc.ph.style.fill=st[1]==="good"?C.ink:c;tc.dot.setAttribute("fill",c);
     tc.badge.textContent=tr.failure?(/hash/.test(tr.failure.metric)?"hash ✕":/lr/.test(tr.failure.metric)?"lr 0":"failed"):tr.lr_zero&&tr.live?"lr 0":dead?"lost":tr.syncer_link&&tr.syncer_link.state==="disconnected"&&!D.done&&!(tr.island_now&&/^(moving|starting)$/.test(tr.island_now.state))?"link ✕":"";tc.badge.style.fill=C.bad;
+    if(!tc.badge.textContent&&straggler(tr)&&!D.done){tc.badge.textContent="straggler";tc.badge.style.fill=C.warn}  // no push merged for N merge cycles
     [tc.co?o.merged:tc.box].forEach(function(b){if(b){b.style.stroke=dead||tr.failure?C.bad:"";b.style.strokeDasharray=dead?"5 4":""}});
     o.tc.g.setAttribute("opacity",dead?0.6:1);
     var L0=tc.l,lw=tc.lw;
